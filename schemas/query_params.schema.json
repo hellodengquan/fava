@@ -1,0 +1,134 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://fava.example/schemas/query_params.schema.json",
+  "title": "Fava Query Parameters Schema",
+  "description": "Single source of truth for Fava's shared query parameters. Used to generate both Python and TypeScript code.",
+  "metadata": {
+    "version": "1.0.0",
+    "generatedAt": "MANUAL",
+    "source": "hand-authored"
+  },
+  "fieldNameAliases": {
+    "TIME": "time",
+    "ACCOUNT": "account",
+    "FILTER": "filter",
+    "CONVERSION": "conversion",
+    "INTERVAL": "interval",
+    "CHARTS": "charts",
+    "QUERY_STRING": "query_string",
+    "EXPLICIT": "_e"
+  },
+  "conversionAliases": {
+    "unit": "units",
+    "units": "units",
+    "cost": "at_cost",
+    "value": "at_value"
+  },
+  "intervalValidValues": [
+    "year",
+    "quarter",
+    "month",
+    "week",
+    "day"
+  ],
+  "defaultConversion": "at_cost",
+  "defaultInterval": "month",
+  "fields": {
+    "time": {
+      "default": "",
+      "type": "string",
+      "synced": true,
+      "serializableDefault": false,
+      "normalizeFnName": {
+        "python": "normalize_time",
+        "typescript": "normalizeTime"
+      },
+      "dataclassFieldName": "time"
+    },
+    "account": {
+      "default": "",
+      "type": "string",
+      "synced": true,
+      "serializableDefault": false,
+      "normalizeFnName": {
+        "python": "normalize_account",
+        "typescript": "normalizeAccount"
+      },
+      "dataclassFieldName": "account"
+    },
+    "filter": {
+      "default": "",
+      "type": "string",
+      "synced": true,
+      "serializableDefault": false,
+      "normalizeFnName": {
+        "python": "normalize_filter",
+        "typescript": "normalizeFilter"
+      },
+      "dataclassFieldName": "filter"
+    },
+    "conversion": {
+      "default": "at_cost",
+      "type": "string",
+      "synced": true,
+      "serializableDefault": true,
+      "normalizeFnName": {
+        "python": "normalize_conversion",
+        "typescript": "normalizeConversion"
+      },
+      "dataclassFieldName": "conversion",
+      "hasAliases": true
+    },
+    "interval": {
+      "default": "month",
+      "type": "string",
+      "synced": true,
+      "serializableDefault": true,
+      "normalizeFnName": {
+        "python": "normalize_interval",
+        "typescript": "normalizeInterval"
+      },
+      "dataclassFieldName": "interval",
+      "hasValidValues": true,
+      "validValuesRef": "intervalValidValues",
+      "pythonType": "Interval",
+      "typescriptType": "Interval",
+      "pythonDefault": "Month",
+      "typescriptDefault": "DEFAULT_INTERVAL"
+    },
+    "charts": {
+      "default": true,
+      "type": "boolean",
+      "synced": true,
+      "serializableDefault": false,
+      "normalizeFnName": {
+        "python": "normalize_charts",
+        "typescript": "normalizeCharts"
+      },
+      "dataclassFieldName": "charts"
+    },
+    "query_string": {
+      "default": "",
+      "type": "string",
+      "synced": false,
+      "serializableDefault": false,
+      "normalizeFnName": {
+        "python": "normalize_query_string",
+        "typescript": "normalizeQueryString"
+      },
+      "dataclassFieldName": "query_string"
+    },
+    "_e": {
+      "default": false,
+      "type": "boolean",
+      "synced": false,
+      "serializableDefault": false,
+      "normalizeFnName": {
+        "python": "normalize_explicit",
+        "typescript": "normalizeExplicit"
+      },
+      "dataclassFieldName": "explicit",
+      "isExplicitFlag": true
+    }
+  }
+}

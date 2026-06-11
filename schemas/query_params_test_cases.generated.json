@@ -1,0 +1,747 @@
+{
+  "$schema": "query_params_test_cases.v1",
+  "generatedAt": "2026-06-11T11:48:24+00:00",
+  "generatedFrom": "query_params.schema.json",
+  "schemaVersion": "1.0.0",
+  "parseCases": [
+    {
+      "name": "empty params → defaults",
+      "input": {},
+      "expected": {
+        "time": "",
+        "account": "",
+        "filter": "",
+        "conversion": "at_cost",
+        "interval": "month",
+        "charts": true,
+        "query_string": "",
+        "explicit": false
+      }
+    },
+    {
+      "name": "single default param: time",
+      "input": {
+        "time": ""
+      },
+      "expectedPartial": {
+        "time": ""
+      }
+    },
+    {
+      "name": "single default param: account",
+      "input": {
+        "account": ""
+      },
+      "expectedPartial": {
+        "account": ""
+      }
+    },
+    {
+      "name": "single default param: filter",
+      "input": {
+        "filter": ""
+      },
+      "expectedPartial": {
+        "filter": ""
+      }
+    },
+    {
+      "name": "single default param: conversion",
+      "input": {
+        "conversion": "at_cost"
+      },
+      "expectedPartial": {
+        "conversion": "at_cost"
+      }
+    },
+    {
+      "name": "single default param: interval",
+      "input": {
+        "interval": "month"
+      },
+      "expectedPartial": {
+        "interval": "month"
+      }
+    },
+    {
+      "name": "single default param: charts",
+      "input": {
+        "charts": "true"
+      },
+      "expectedPartial": {
+        "charts": true
+      }
+    },
+    {
+      "name": "single default param: query_string",
+      "input": {
+        "query_string": ""
+      },
+      "expectedPartial": {
+        "query_string": ""
+      }
+    },
+    {
+      "name": "single default param: _e",
+      "input": {
+        "_e": "false"
+      },
+      "expectedPartial": {
+        "explicit": false
+      }
+    },
+    {
+      "name": "conversion alias: 'unit' → 'units'",
+      "input": {
+        "conversion": "unit"
+      },
+      "expectedPartial": {
+        "conversion": "units"
+      }
+    },
+    {
+      "name": "conversion alias: 'units' → 'units'",
+      "input": {
+        "conversion": "units"
+      },
+      "expectedPartial": {
+        "conversion": "units"
+      }
+    },
+    {
+      "name": "conversion alias: 'cost' → 'at_cost'",
+      "input": {
+        "conversion": "cost"
+      },
+      "expectedPartial": {
+        "conversion": "at_cost"
+      }
+    },
+    {
+      "name": "conversion alias: 'value' → 'at_value'",
+      "input": {
+        "conversion": "value"
+      },
+      "expectedPartial": {
+        "conversion": "at_value"
+      }
+    },
+    {
+      "name": "conversion alias case-insensitive: 'UNIT'",
+      "input": {
+        "conversion": "UNIT"
+      },
+      "expectedPartial": {
+        "conversion": "units"
+      }
+    },
+    {
+      "name": "conversion alias case-insensitive: 'UNITS'",
+      "input": {
+        "conversion": "UNITS"
+      },
+      "expectedPartial": {
+        "conversion": "units"
+      }
+    },
+    {
+      "name": "conversion alias case-insensitive: 'COST'",
+      "input": {
+        "conversion": "COST"
+      },
+      "expectedPartial": {
+        "conversion": "at_cost"
+      }
+    },
+    {
+      "name": "conversion alias case-insensitive: 'VALUE'",
+      "input": {
+        "conversion": "VALUE"
+      },
+      "expectedPartial": {
+        "conversion": "at_value"
+      }
+    },
+    {
+      "name": "conversion alias with whitespace: ' unit '",
+      "input": {
+        "conversion": "  unit  "
+      },
+      "expectedPartial": {
+        "conversion": "units"
+      }
+    },
+    {
+      "name": "conversion alias with whitespace: ' units '",
+      "input": {
+        "conversion": "  units  "
+      },
+      "expectedPartial": {
+        "conversion": "units"
+      }
+    },
+    {
+      "name": "conversion alias with whitespace: ' cost '",
+      "input": {
+        "conversion": "  cost  "
+      },
+      "expectedPartial": {
+        "conversion": "at_cost"
+      }
+    },
+    {
+      "name": "conversion alias with whitespace: ' value '",
+      "input": {
+        "conversion": "  value  "
+      },
+      "expectedPartial": {
+        "conversion": "at_value"
+      }
+    },
+    {
+      "name": "interval valid value: 'year'",
+      "input": {
+        "interval": "year"
+      },
+      "expectedPartial": {
+        "interval": "year"
+      }
+    },
+    {
+      "name": "interval valid value: 'quarter'",
+      "input": {
+        "interval": "quarter"
+      },
+      "expectedPartial": {
+        "interval": "quarter"
+      }
+    },
+    {
+      "name": "interval valid value: 'month'",
+      "input": {
+        "interval": "month"
+      },
+      "expectedPartial": {
+        "interval": "month"
+      }
+    },
+    {
+      "name": "interval valid value: 'week'",
+      "input": {
+        "interval": "week"
+      },
+      "expectedPartial": {
+        "interval": "week"
+      }
+    },
+    {
+      "name": "interval valid value: 'day'",
+      "input": {
+        "interval": "day"
+      },
+      "expectedPartial": {
+        "interval": "day"
+      }
+    },
+    {
+      "name": "interval mixed case: 'YEAR'",
+      "input": {
+        "interval": "YEAR"
+      },
+      "expectedPartial": {
+        "interval": "year"
+      }
+    },
+    {
+      "name": "interval mixed case: 'QUARTER'",
+      "input": {
+        "interval": "QUARTER"
+      },
+      "expectedPartial": {
+        "interval": "quarter"
+      }
+    },
+    {
+      "name": "interval mixed case: 'MONTH'",
+      "input": {
+        "interval": "MONTH"
+      },
+      "expectedPartial": {
+        "interval": "month"
+      }
+    },
+    {
+      "name": "interval mixed case: 'WEEK'",
+      "input": {
+        "interval": "WEEK"
+      },
+      "expectedPartial": {
+        "interval": "week"
+      }
+    },
+    {
+      "name": "interval mixed case: 'DAY'",
+      "input": {
+        "interval": "DAY"
+      },
+      "expectedPartial": {
+        "interval": "day"
+      }
+    },
+    {
+      "name": "interval with whitespace: ' year '",
+      "input": {
+        "interval": "  year  "
+      },
+      "expectedPartial": {
+        "interval": "year"
+      }
+    },
+    {
+      "name": "interval with whitespace: ' quarter '",
+      "input": {
+        "interval": "  quarter  "
+      },
+      "expectedPartial": {
+        "interval": "quarter"
+      }
+    },
+    {
+      "name": "interval with whitespace: ' month '",
+      "input": {
+        "interval": "  month  "
+      },
+      "expectedPartial": {
+        "interval": "month"
+      }
+    },
+    {
+      "name": "interval with whitespace: ' week '",
+      "input": {
+        "interval": "  week  "
+      },
+      "expectedPartial": {
+        "interval": "week"
+      }
+    },
+    {
+      "name": "interval with whitespace: ' day '",
+      "input": {
+        "interval": "  day  "
+      },
+      "expectedPartial": {
+        "interval": "day"
+      }
+    },
+    {
+      "name": "invalid interval → default month",
+      "input": {
+        "interval": "millennium"
+      },
+      "expectedPartial": {
+        "interval": "month"
+      }
+    },
+    {
+      "name": "explicit flag: _e=1",
+      "input": {
+        "_e": "1"
+      },
+      "expectedPartial": {
+        "explicit": true
+      }
+    },
+    {
+      "name": "explicit flag: _e=true",
+      "input": {
+        "_e": "true"
+      },
+      "expectedPartial": {
+        "explicit": true
+      }
+    },
+    {
+      "name": "explicit flag: _e=TRUE (case-insensitive)",
+      "input": {
+        "_e": "TRUE"
+      },
+      "expectedPartial": {
+        "explicit": true
+      }
+    },
+    {
+      "name": "explicit flag: _e=0 → false",
+      "input": {
+        "_e": "0"
+      },
+      "expectedPartial": {
+        "explicit": false
+      }
+    },
+    {
+      "name": "explicit flag: _e=false → false",
+      "input": {
+        "_e": "false"
+      },
+      "expectedPartial": {
+        "explicit": false
+      }
+    },
+    {
+      "name": "charts=false",
+      "input": {
+        "charts": "false"
+      },
+      "expectedPartial": {
+        "charts": false
+      }
+    },
+    {
+      "name": "charts=any-other-value → true",
+      "input": {
+        "charts": "true"
+      },
+      "expectedPartial": {
+        "charts": true
+      }
+    },
+    {
+      "name": "charts absent → true",
+      "input": {},
+      "expectedPartial": {
+        "charts": true
+      }
+    },
+    {
+      "name": "time trimmed: '  2024-01-02  '",
+      "input": {
+        "time": "  2024-01-02  "
+      },
+      "expectedPartial": {
+        "time": "2024-01-02"
+      }
+    },
+    {
+      "name": "account trimmed: '  Assets:Cash  '",
+      "input": {
+        "account": "  Assets:Cash  "
+      },
+      "expectedPartial": {
+        "account": "Assets:Cash"
+      }
+    },
+    {
+      "name": "filter trimmed: '  #tag and #other  '",
+      "input": {
+        "filter": "  #tag and #other  "
+      },
+      "expectedPartial": {
+        "filter": "#tag and #other"
+      }
+    },
+    {
+      "name": "query_string preserves whitespace",
+      "input": {
+        "query_string": "  SELECT *  "
+      },
+      "expectedPartial": {
+        "query_string": "  SELECT *  "
+      }
+    },
+    {
+      "name": "Chinese account name",
+      "input": {
+        "account": "  资产:现金  ",
+        "conversion": "units"
+      },
+      "expectedPartial": {
+        "account": "资产:现金",
+        "conversion": "units"
+      }
+    },
+    {
+      "name": "all params set (English)",
+      "input": {
+        "time": "2024",
+        "account": "Assets:Cash",
+        "filter": "#paycheck",
+        "conversion": "USD",
+        "interval": "year",
+        "charts": "false"
+      },
+      "expectedPartial": {
+        "time": "2024",
+        "account": "Assets:Cash",
+        "filter": "#paycheck",
+        "conversion": "USD",
+        "interval": "year",
+        "charts": false
+      }
+    }
+  ],
+  "serializeCases": [
+    {
+      "name": "serialize all defaults without explicit",
+      "input": {
+        "time": "",
+        "account": "",
+        "filter": "",
+        "conversion": "at_cost",
+        "interval": "month",
+        "charts": true,
+        "query_string": "",
+        "explicit": false
+      },
+      "options": {
+        "includeCharts": true
+      },
+      "expectedPairsContain": [
+        [
+          "conversion",
+          "at_cost"
+        ],
+        [
+          "interval",
+          "month"
+        ]
+      ],
+      "expectedPairsNotContainKeys": [
+        "_e"
+      ]
+    },
+    {
+      "name": "serialize all defaults with explicit=True",
+      "input": {
+        "time": "",
+        "account": "",
+        "filter": "",
+        "conversion": "at_cost",
+        "interval": "month",
+        "charts": true,
+        "query_string": "",
+        "explicit": true
+      },
+      "options": {
+        "includeCharts": true
+      },
+      "expectedPairsContain": [
+        [
+          "conversion",
+          "at_cost"
+        ],
+        [
+          "interval",
+          "month"
+        ],
+        [
+          "_e",
+          "1"
+        ]
+      ]
+    },
+    {
+      "name": "serialize with options.explicit=True",
+      "input": {
+        "time": "2024",
+        "account": "",
+        "filter": "",
+        "conversion": "at_cost",
+        "interval": "month",
+        "charts": true,
+        "query_string": "",
+        "explicit": false
+      },
+      "options": {
+        "includeCharts": true,
+        "explicit": true
+      },
+      "expectedPairsContain": [
+        [
+          "time",
+          "2024"
+        ],
+        [
+          "_e",
+          "1"
+        ]
+      ]
+    },
+    {
+      "name": "serialize charts=false",
+      "input": {
+        "time": "",
+        "account": "",
+        "filter": "",
+        "conversion": "at_cost",
+        "interval": "month",
+        "charts": false,
+        "query_string": "",
+        "explicit": false
+      },
+      "options": {
+        "includeCharts": true
+      },
+      "expectedPairsContain": [
+        [
+          "conversion",
+          "at_cost"
+        ],
+        [
+          "interval",
+          "month"
+        ],
+        [
+          "charts",
+          "false"
+        ]
+      ]
+    },
+    {
+      "name": "serialise converts alias 'unit' to canonical 'units'",
+      "input": {
+        "time": "",
+        "account": "",
+        "filter": "",
+        "conversion": "unit",
+        "interval": "month",
+        "charts": true,
+        "query_string": "",
+        "explicit": false
+      },
+      "options": {
+        "includeCharts": true
+      },
+      "expectedPairsContain": [
+        [
+          "conversion",
+          "units"
+        ],
+        [
+          "interval",
+          "month"
+        ]
+      ]
+    },
+    {
+      "name": "serialise converts alias 'units' to canonical 'units'",
+      "input": {
+        "time": "",
+        "account": "",
+        "filter": "",
+        "conversion": "units",
+        "interval": "month",
+        "charts": true,
+        "query_string": "",
+        "explicit": false
+      },
+      "options": {
+        "includeCharts": true
+      },
+      "expectedPairsContain": [
+        [
+          "conversion",
+          "units"
+        ],
+        [
+          "interval",
+          "month"
+        ]
+      ]
+    },
+    {
+      "name": "serialise converts alias 'cost' to canonical 'at_cost'",
+      "input": {
+        "time": "",
+        "account": "",
+        "filter": "",
+        "conversion": "cost",
+        "interval": "month",
+        "charts": true,
+        "query_string": "",
+        "explicit": false
+      },
+      "options": {
+        "includeCharts": true
+      },
+      "expectedPairsContain": [
+        [
+          "conversion",
+          "at_cost"
+        ],
+        [
+          "interval",
+          "month"
+        ]
+      ]
+    },
+    {
+      "name": "serialise converts alias 'value' to canonical 'at_value'",
+      "input": {
+        "time": "",
+        "account": "",
+        "filter": "",
+        "conversion": "value",
+        "interval": "month",
+        "charts": true,
+        "query_string": "",
+        "explicit": false
+      },
+      "options": {
+        "includeCharts": true
+      },
+      "expectedPairsContain": [
+        [
+          "conversion",
+          "at_value"
+        ],
+        [
+          "interval",
+          "month"
+        ]
+      ]
+    }
+  ],
+  "roundtripCases": [
+    {
+      "name": "Chinese account + explicit flag",
+      "input": {
+        "account": "资产:现金",
+        "conversion": "units",
+        "_e": "1"
+      }
+    },
+    {
+      "name": "all params + explicit",
+      "input": {
+        "time": "2024",
+        "account": "Expenses:Food",
+        "filter": "#tag",
+        "conversion": "EUR",
+        "interval": "quarter",
+        "charts": "false",
+        "_e": "1"
+      }
+    },
+    {
+      "name": "legacy alias 'unit'",
+      "input": {
+        "conversion": "unit"
+      }
+    },
+    {
+      "name": "legacy alias 'cost'",
+      "input": {
+        "conversion": "cost"
+      }
+    },
+    {
+      "name": "whitespace everywhere",
+      "input": {
+        "time": "  2024  ",
+        "account": "  Assets:Cash  ",
+        "filter": "  #tag  ",
+        "interval": "  YEAR  "
+      }
+    }
+  ]
+}

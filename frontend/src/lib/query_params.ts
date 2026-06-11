@@ -1,31 +1,26 @@
 import { log_warn } from "../log.ts";
+import {
+  CONVERSION_ALIASES,
+  DEFAULT_CONVERSION,
+  EXPLICIT_PARAM_NAME,
+  FIELD_DATACLASS_MAP,
+  QUERY_PARAM_NAMES,
+  QUERY_PARAM_SCHEMA_META,
+  type QueryParamName,
+  SYNCED_QUERY_PARAM_NAMES,
+} from "./_query_params_schema_generated.ts";
 import type { Interval } from "./interval.ts";
 import { DEFAULT_INTERVAL, INTERVALS, getInterval } from "./interval.ts";
 
-export const QUERY_PARAM_NAMES = {
-  TIME: "time",
-  ACCOUNT: "account",
-  FILTER: "filter",
-  CONVERSION: "conversion",
-  INTERVAL: "interval",
-  CHARTS: "charts",
-  QUERY_STRING: "query_string",
-  EXPLICIT: "_e",
-} as const;
-
-export const EXPLICIT_PARAM_NAME = QUERY_PARAM_NAMES.EXPLICIT;
-
-export const CONVERSION_ALIASES: Readonly<Record<string, string>> = {
-  unit: "units",
-  units: "units",
-  cost: "at_cost",
-  value: "at_value",
+export {
+  CONVERSION_ALIASES,
+  DEFAULT_CONVERSION,
+  EXPLICIT_PARAM_NAME,
+  FIELD_DATACLASS_MAP,
+  QUERY_PARAM_NAMES,
+  type QueryParamName,
+  SYNCED_QUERY_PARAM_NAMES,
 };
-
-export type QueryParamName =
-  (typeof QUERY_PARAM_NAMES)[keyof typeof QUERY_PARAM_NAMES];
-
-export const DEFAULT_CONVERSION = "at_cost";
 
 export interface QueryParams {
   time: string;
@@ -108,14 +103,21 @@ export function normalizeExplicit(value: string | null | undefined): boolean {
   return value === "1" || value.toLowerCase() === "true";
 }
 
-export const SYNCED_QUERY_PARAM_NAMES: QueryParamName[] = [
-  QUERY_PARAM_NAMES.ACCOUNT,
-  QUERY_PARAM_NAMES.CHARTS,
-  QUERY_PARAM_NAMES.CONVERSION,
-  QUERY_PARAM_NAMES.FILTER,
-  QUERY_PARAM_NAMES.INTERVAL,
-  QUERY_PARAM_NAMES.TIME,
-];
+// Build the full schema with callable references by enriching the generated meta.
+// The generated module provides all declarative data; we attach runtime callables here.
+const _NORMALIZE_FN_TABLE: Record<
+  string,
+  (value: string | null | undefined) => string | boolean | Interval
+> = {
+  normalizeTime,
+  normalizeAccount,
+  normalizeFilter,
+  normalizeConversion,
+  normalizeInterval,
+  normalizeCharts,
+  normalizeQueryString,
+  normalizeExplicit,
+};
 
 export interface QueryParamSchema {
   default: string | boolean;
@@ -127,66 +129,22 @@ export interface QueryParamSchema {
   aliases?: Readonly<Record<string, string>>;
 }
 
-export const QUERY_PARAM_SCHEMA: Record<string, QueryParamSchema> = {
-  time: {
-    default: "",
-    type: "string",
-    synced: true,
-    normalizeFn: normalizeTime,
-    serializableDefault: false,
-  },
-  account: {
-    default: "",
-    type: "string",
-    synced: true,
-    normalizeFn: normalizeAccount,
-    serializableDefault: false,
-  },
-  filter: {
-    default: "",
-    type: "string",
-    synced: true,
-    normalizeFn: normalizeFilter,
-    serializableDefault: false,
-  },
-  conversion: {
-    default: DEFAULT_CONVERSION,
-    type: "string",
-    synced: true,
-    normalizeFn: normalizeConversion,
-    serializableDefault: true,
-    aliases: CONVERSION_ALIASES,
-  },
-  interval: {
-    default: DEFAULT_INTERVAL,
-    type: "string",
-    synced: true,
-    normalizeFn: normalizeInterval,
-    serializableDefault: true,
-    validValues: INTERVALS,
-  },
-  charts: {
-    default: true,
-    type: "boolean",
-    synced: true,
-    normalizeFn: normalizeCharts,
-    serializableDefault: false,
-  },
-  query_string: {
-    default: "",
-    type: "string",
-    synced: false,
-    normalizeFn: normalizeQueryString,
-    serializableDefault: false,
-  },
-  _e: {
-    default: false,
-    type: "boolean",
-    synced: false,
-    normalizeFn: normalizeExplicit,
-    serializableDefault: false,
-  },
-};
+export const QUERY_PARAM_SCHEMA: Record<string, QueryParamSchema> =
+  Object.fromEntries(
+    Object.entries(QUERY_PARAM_SCHEMA_META).map(([urlName, meta]) => [
+      urlName,
+      {
+        default: meta.default,
+        type: meta.type,
+        synced: meta.synced,
+        serializableDefault: meta.serializeDefault,
+        normalizeFn: _NORMALIZE_FN_TABLE[meta.normalizeFnName],
+        aliases: meta.hasAliases ? CONVERSION_ALIASES : undefined,
+        validValues:
+          meta.validValuesRef === "intervalValidValues" ? INTERVALS : undefined,
+      },
+    ]),
+  );
 
 export function parseQueryParams(
   params: URLSearchParams | Record<string, string | null | undefined>,

@@ -8,6 +8,8 @@ sync with the TypeScript version.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from fava.core.query_params import (
@@ -855,4 +857,159 @@ def test_conversion_alias_with_whitespace():
     assert normalize_conversion("  unit  ") == "units"
     assert normalize_conversion("  COST  ") == "at_cost"
     assert normalize_conversion("\tvalue\n") == "at_value"
+
+
+# ---------------------------------------------------------------------------
+# Shared regression test cases — generated from schemas/query_params_test_cases.generated.json
+# These are the SAME test cases consumed by the TypeScript frontend tests,
+# ensuring behaviour parity at compile/test time.
+# ---------------------------------------------------------------------------
+
+_SHARED_TEST_CASES_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "schemas"
+    / "query_params_test_cases.generated.json"
+)
+
+
+@pytest.fixture(scope="module")
+def shared_test_cases() -> dict:
+    """Load the generated shared test suite from JSON."""
+    import json
+
+    if not _SHARED_TEST_CASES_PATH.exists():
+        pytest.skip(
+            f"Shared test cases not found: {_SHARED_TEST_CASES_PATH}. "
+            "Run `python scripts/generate_query_params_test_cases.py` first."
+        )
+    with _SHARED_TEST_CASES_PATH.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _interval_to_str(interval_obj: object) -> str:
+    """Convert an Interval singleton to its URL string name."""
+    from fava.util.date import INTERVALS
+
+    for name, inst in INTERVALS.items():
+        if inst is interval_obj:
+            return name
+    return "month"
+
+
+def test_shared_parse_cases(shared_test_cases: dict):
+    """Run ALL generated parse cases — these must match frontend results exactly."""
+    from pathlib import Path
+
+    for case in shared_test_cases["parseCases"]:
+        parsed = parse_query_params(case["input"])
+        # Convert interval singleton to string for comparison
+        parsed_dict = {
+            "time": parsed.time,
+            "account": parsed.account,
+            "filter": parsed.filter,
+            "conversion": parsed.conversion,
+            "interval": _interval_to_str(parsed.interval),
+            "charts": parsed.charts,
+            "query_string": parsed.query_string,
+            "explicit": parsed.explicit,
+        }
+
+        if "expected" in case:
+            for field, expected_value in case["expected"].items():
+                assert (
+                    parsed_dict[field] == expected_value
+                ), f"[{case['name']}] field '{field}': got {parsed_dict[field]!r}, expected {expected_value!r}"
+        if "expectedPartial" in case:
+            for field, expected_value in case["expectedPartial"].items():
+                actual = parsed_dict[field]
+                assert (
+                    actual == expected_value
+                ), f"[{case['name']}] field '{field}': got {actual!r}, expected {expected_value!r}"
+
+
+def test_shared_serialize_cases(shared_test_cases: dict):
+    """Run ALL generated serialization cases — must match frontend exactly."""
+    from fava.core.query_params import SerializeOptions
+
+    for case in shared_test_cases["serializeCases"]:
+        raw = case["input"]
+        opts_dict = case.get("options", {})
+        interval_str = raw.get("interval", "month")
+        from fava.util.date import INTERVALS
+
+        interval_obj = INTERVALS.get(interval_str, Month)
+        params = QueryParams(
+            time=raw.get("time", ""),
+            account=raw.get("account", ""),
+            filter=raw.get("filter", ""),
+            conversion=raw.get("conversion", DEFAULT_CONVERSION),
+            interval=interval_obj,
+            charts=raw.get("charts", True),
+            query_string=raw.get("query_string", ""),
+            explicit=raw.get("explicit", False),
+        )
+        options = SerializeOptions(
+            omit_defaults=opts_dict.get("omitDefaults", False),
+            include_charts=opts_dict.get("includeCharts", True),
+            include_query_string=opts_dict.get("includeQueryString", False),
+            explicit=opts_dict.get("explicit", False),
+        )
+        pairs = serialize_query_params(params, options)
+        pairs_dict = dict(pairs)
+
+        for key, expected_value in case.get("expectedPairsContain", []):
+            assert key in pairs_dict, (
+                f"[{case['name']}] expected key {key!r} not in output "
+                f"(output: {pairs_dict})"
+            )
+            assert (
+                pairs_dict[key] == expected_value
+            ), f"[{case['name']}] key {key!r}: got {pairs_dict[key]!r}, expected {expected_value!r}"
+
+        for absent_key in case.get("expectedPairsNotContainKeys", []):
+            assert absent_key not in pairs_dict, (
+                f"[{case['name']}] expected key {absent_key!r} to be absent "
+                f"but found in output (output: {pairs_dict})"
+            )
+
+
+def test_shared_roundtrip_cases(shared_test_cases: dict):
+    """Run ALL generated round-trip cases — parse, serialize, re-parse == same values."""
+    from fava.core.query_params import SerializeOptions
+
+    for case in shared_test_cases["roundtripCases"]:
+        # 1. Parse the original URL params
+        parsed1 = parse_query_params(case["input"])
+
+        # 2. Serialize them back to (name, value) pairs
+        options = SerializeOptions(include_charts=True)
+        pairs = serialize_query_params(parsed1, options)
+        pairs_dict = dict(pairs)
+
+        # 3. Parse the serialised output again
+        parsed2 = parse_query_params(pairs_dict)
+
+        # 4. The parsed values (not necessarily the raw URL strings) must be equivalent.
+        #    Note: explicit flag should be preserved if _e=1 appears.
+        assert parsed1.time == parsed2.time, f"[{case['name']}] time round-trip mismatch"
+        assert (
+            parsed1.account == parsed2.account
+        ), f"[{case['name']}] account round-trip mismatch"
+        assert (
+            parsed1.filter == parsed2.filter
+        ), f"[{case['name']}] filter round-trip mismatch"
+        assert (
+            parsed1.conversion == parsed2.conversion
+        ), f"[{case['name']}] conversion round-trip mismatch"
+        assert (
+            parsed1.interval is parsed2.interval
+        ), f"[{case['name']}] interval round-trip mismatch"
+        assert (
+            parsed1.charts == parsed2.charts
+        ), f"[{case['name']}] charts round-trip mismatch"
+        # explicit flag survives only if _e=1 was emitted (i.e. explicit was True in parsed1)
+        if parsed1.explicit:
+            assert (
+                parsed2.explicit is True
+            ), f"[{case['name']}] explicit flag not preserved through round-trip"
 

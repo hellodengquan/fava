@@ -1,5 +1,8 @@
 import { equal, deepEqual, ok } from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   QUERY_PARAM_NAMES,
@@ -910,4 +913,187 @@ test("schema includes conversion aliases", () => {
     cost: "at_cost",
     value: "at_value",
   });
+});
+
+// ---------------------------------------------------------------------------
+// Shared regression test cases — generated from schemas/query_params_test_cases.generated.json
+// These are the SAME test cases consumed by the Python backend tests,
+// ensuring behaviour parity at compile/test time.
+// ---------------------------------------------------------------------------
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = resolve(__filename, "..");
+const SHARED_TEST_CASES_PATH = resolve(
+  __dirname,
+  "../../schemas/query_params_test_cases.generated.json",
+);
+
+interface SharedParseCase {
+  name: string;
+  input: Record<string, string>;
+  expected?: Record<string, string | boolean>;
+  expectedPartial?: Record<string, string | boolean>;
+}
+
+interface SharedSerializeCase {
+  name: string;
+  input: Record<string, string | boolean>;
+  options?: {
+    omitDefaults?: boolean;
+    includeCharts?: boolean;
+    includeQueryString?: boolean;
+    explicit?: boolean;
+  };
+  expectedPairsContain?: [string, string][];
+  expectedPairsNotContainKeys?: string[];
+}
+
+interface SharedRoundtripCase {
+  name: string;
+  input: Record<string, string>;
+}
+
+interface SharedTestCases {
+  parseCases: SharedParseCase[];
+  serializeCases: SharedSerializeCase[];
+  roundtripCases: SharedRoundtripCase[];
+}
+
+function loadSharedTestCases(): SharedTestCases | null {
+  try {
+    const raw = readFileSync(SHARED_TEST_CASES_PATH, "utf-8");
+    return JSON.parse(raw) as SharedTestCases;
+  } catch {
+    return null;
+  }
+}
+
+test("shared parse cases — match Python backend results exactly", () => {
+  const shared = loadSharedTestCases();
+  if (!shared) {
+    console.warn(
+      "SKIP: Shared test cases not found. Run `python scripts/generate_query_params_test_cases.py`",
+    );
+    return;
+  }
+
+  for (const case_ of shared.parseCases) {
+    const parsed = parseQueryParams(case_.input);
+    const parsedDict: Record<string, string | boolean> = {
+      time: parsed.time,
+      account: parsed.account,
+      filter: parsed.filter,
+      conversion: parsed.conversion,
+      interval: parsed.interval,
+      charts: parsed.charts,
+      query_string: parsed.query_string,
+      explicit: parsed.explicit,
+    };
+
+    if (case_.expected) {
+      for (const [field, expectedValue] of Object.entries(case_.expected)) {
+        equal(
+          parsedDict[field],
+          expectedValue,
+          `[${case_.name}] field '${field}': got ${JSON.stringify(parsedDict[field])}, expected ${JSON.stringify(expectedValue)}`,
+        );
+      }
+    }
+    if (case_.expectedPartial) {
+      for (const [field, expectedValue] of Object.entries(case_.expectedPartial)) {
+        const actual = parsedDict[field];
+        equal(
+          actual,
+          expectedValue,
+          `[${case_.name}] field '${field}': got ${JSON.stringify(actual)}, expected ${JSON.stringify(expectedValue)}`,
+        );
+      }
+    }
+  }
+});
+
+test("shared serialize cases — match Python backend results exactly", () => {
+  const shared = loadSharedTestCases();
+  if (!shared) {
+    console.warn(
+      "SKIP: Shared test cases not found. Run `python scripts/generate_query_params_test_cases.py`",
+    );
+    return;
+  }
+
+  for (const case_ of shared.serializeCases) {
+    const raw = case_.input;
+    const params: Partial<QueryParams> = {
+      time: (raw.time as string) ?? "",
+      account: (raw.account as string) ?? "",
+      filter: (raw.filter as string) ?? "",
+      conversion: (raw.conversion as string) ?? DEFAULT_CONVERSION,
+      interval: (raw.interval as Interval) ?? DEFAULT_INTERVAL,
+      charts: raw.charts as boolean,
+      query_string: (raw.query_string as string) ?? "",
+      explicit: raw.explicit as boolean,
+    };
+    const options = case_.options ?? {};
+    const serialized = serializeQueryParams(params, options);
+    const pairsObj: Record<string, string> = {};
+    serialized.forEach((v, k) => {
+      pairsObj[k] = v;
+    });
+
+    for (const [key, expectedValue] of case_.expectedPairsContain ?? []) {
+      ok(
+        key in pairsObj,
+        `[${case_.name}] expected key '${key}' not in output (output: ${JSON.stringify(pairsObj)})`,
+      );
+      equal(
+        pairsObj[key],
+        expectedValue,
+        `[${case_.name}] key '${key}': got ${JSON.stringify(pairsObj[key])}, expected ${JSON.stringify(expectedValue)}`,
+      );
+    }
+
+    for (const absentKey of case_.expectedPairsNotContainKeys ?? []) {
+      ok(
+        !(absentKey in pairsObj),
+        `[${case_.name}] expected key '${absentKey}' to be absent but found in output (output: ${JSON.stringify(pairsObj)})`,
+      );
+    }
+  }
+});
+
+test("shared roundtrip cases — parse→serialize→reparse preserves values", () => {
+  const shared = loadSharedTestCases();
+  if (!shared) {
+    console.warn(
+      "SKIP: Shared test cases not found. Run `python scripts/generate_query_params_test_cases.py`",
+    );
+    return;
+  }
+
+  for (const case_ of shared.roundtripCases) {
+    // 1. Parse the original URL params
+    const parsed1 = parseQueryParams(case_.input);
+
+    // 2. Serialize them back to URLSearchParams
+    const serialized = serializeQueryParams(parsed1, { includeCharts: true });
+    const pairsObj: Record<string, string> = {};
+    serialized.forEach((v, k) => {
+      pairsObj[k] = v;
+    });
+
+    // 3. Parse the serialized output again
+    const parsed2 = parseQueryParams(pairsObj);
+
+    // 4. Values must be equivalent
+    equal(parsed1.time, parsed2.time, `[${case_.name}] time round-trip mismatch`);
+    equal(parsed1.account, parsed2.account, `[${case_.name}] account round-trip mismatch`);
+    equal(parsed1.filter, parsed2.filter, `[${case_.name}] filter round-trip mismatch`);
+    equal(parsed1.conversion, parsed2.conversion, `[${case_.name}] conversion round-trip mismatch`);
+    equal(parsed1.interval, parsed2.interval, `[${case_.name}] interval round-trip mismatch`);
+    equal(parsed1.charts, parsed2.charts, `[${case_.name}] charts round-trip mismatch`);
+    // explicit flag survives only if _e=1 was emitted
+    if (parsed1.explicit) {
+      equal(parsed2.explicit, true, `[${case_.name}] explicit flag not preserved through round-trip`);
+    }
+  }
 });

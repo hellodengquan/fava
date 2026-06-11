@@ -2,8 +2,16 @@
 
 This module provides a canonical layer for parsing and serializing the
 query parameters shared between the backend (Flask request args) and
-the frontend (URL search params).  The behaviour here must stay in sync
-with the TypeScript module ``frontend/src/lib/query_params.ts``.
+the frontend (URL search params).
+
+All declarative schema metadata (field names, defaults, aliases, etc.)
+is auto-generated from the single-source-of-truth JSON schema at
+``schemas/query_params.schema.json`` into the sibling module
+:mod:`_query_params_schema_generated`.  Edit that JSON file and run
+``python scripts/generate_query_params_schema.py`` to regenerate.
+
+The language-specific normalisation/serialisation logic below must
+mirror the TypeScript module ``frontend/src/lib/query_params.ts``.
 """
 
 from __future__ import annotations
@@ -11,9 +19,16 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
-from typing import Literal
 from urllib.parse import urlencode
 
+from fava.core._query_params_schema_generated import CONVERSION_ALIASES
+from fava.core._query_params_schema_generated import DEFAULT_CONVERSION
+from fava.core._query_params_schema_generated import EXPLICIT_PARAM_NAME
+from fava.core._query_params_schema_generated import FIELD_DATACLASS_MAP
+from fava.core._query_params_schema_generated import QUERY_PARAM_NAMES
+from fava.core._query_params_schema_generated import QUERY_PARAM_SCHEMA_META
+from fava.core._query_params_schema_generated import QueryParamName
+from fava.core._query_params_schema_generated import SYNCED_QUERY_PARAM_NAMES
 from fava.util.date import INTERVALS
 from fava.util.date import Month
 
@@ -24,48 +39,6 @@ if TYPE_CHECKING:
     from fava.util.date import Interval
 
 log = logging.getLogger(__name__)
-
-QUERY_PARAM_NAMES = {
-    "TIME": "time",
-    "ACCOUNT": "account",
-    "FILTER": "filter",
-    "CONVERSION": "conversion",
-    "INTERVAL": "interval",
-    "CHARTS": "charts",
-    "QUERY_STRING": "query_string",
-    "EXPLICIT": "_e",
-}
-
-EXPLICIT_PARAM_NAME = QUERY_PARAM_NAMES["EXPLICIT"]
-
-CONVERSION_ALIASES = {
-    "unit": "units",
-    "units": "units",
-    "cost": "at_cost",
-    "value": "at_value",
-}
-
-QueryParamName = Literal[
-    "time",
-    "account",
-    "filter",
-    "conversion",
-    "interval",
-    "charts",
-    "query_string",
-    "_e",
-]
-
-DEFAULT_CONVERSION = "at_cost"
-
-SYNCED_QUERY_PARAM_NAMES: tuple[QueryParamName, ...] = (
-    "account",
-    "charts",
-    "conversion",
-    "filter",
-    "interval",
-    "time",
-)
 
 
 @dataclass(frozen=True)
@@ -119,66 +92,6 @@ class FiltersConversionInterval(Filters):
 
 DEFAULT_QUERY_PARAMS = QueryParams()
 
-QUERY_PARAM_SCHEMA: dict[str, dict[str, object]] = {
-    "time": {
-        "default": "",
-        "type": "string",
-        "synced": True,
-        "normalize_fn": "normalize_time",
-        "serializable_default": False,
-    },
-    "account": {
-        "default": "",
-        "type": "string",
-        "synced": True,
-        "normalize_fn": "normalize_account",
-        "serializable_default": False,
-    },
-    "filter": {
-        "default": "",
-        "type": "string",
-        "synced": True,
-        "normalize_fn": "normalize_filter",
-        "serializable_default": False,
-    },
-    "conversion": {
-        "default": "at_cost",
-        "type": "string",
-        "synced": True,
-        "normalize_fn": "normalize_conversion",
-        "serializable_default": True,
-        "aliases": CONVERSION_ALIASES,
-    },
-    "interval": {
-        "default": "month",
-        "type": "string",
-        "synced": True,
-        "normalize_fn": "normalize_interval",
-        "serializable_default": True,
-        "valid_values": list(INTERVALS.keys()),
-    },
-    "charts": {
-        "default": True,
-        "type": "bool",
-        "synced": True,
-        "normalize_fn": "normalize_charts",
-        "serializable_default": False,
-    },
-    "query_string": {
-        "default": "",
-        "type": "string",
-        "synced": False,
-        "normalize_fn": "normalize_query_string",
-        "serializable_default": False,
-    },
-    "_e": {
-        "default": False,
-        "type": "bool",
-        "synced": False,
-        "normalize_fn": "normalize_explicit",
-        "serializable_default": False,
-    },
-}
 
 
 def normalize_time(value: object | None) -> str:
@@ -302,6 +215,35 @@ def normalize_explicit(value: object | None) -> bool:
     if isinstance(value, str):
         return value == "1" or value.lower() == "true"
     return False
+
+
+# Build the full schema with callable references by enriching the generated meta.
+# The generated module provides all declarative data; we attach runtime callables here.
+_NORMALIZE_FN_TABLE: dict[str, object] = {
+    "normalize_time": normalize_time,
+    "normalize_account": normalize_account,
+    "normalize_filter": normalize_filter,
+    "normalize_conversion": normalize_conversion,
+    "normalize_interval": normalize_interval,
+    "normalize_charts": normalize_charts,
+    "normalize_query_string": normalize_query_string,
+    "normalize_explicit": normalize_explicit,
+}
+
+QUERY_PARAM_SCHEMA: dict[str, dict[str, object]] = {
+    url_name: {
+        "default": meta["default"],
+        "type": meta["type"],
+        "synced": meta["synced"],
+        "serializable_default": meta["serialize_default"],
+        "normalize_fn": _NORMALIZE_FN_TABLE[str(meta["normalize_fn_name"])],
+        "aliases": CONVERSION_ALIASES if meta.get("has_aliases") else None,
+        "valid_values": (
+            list(INTERVALS.keys()) if meta.get("valid_values_ref") == "intervalValidValues" else None
+        ),
+    }
+    for url_name, meta in QUERY_PARAM_SCHEMA_META.items()
+}
 
 
 def parse_query_params(
