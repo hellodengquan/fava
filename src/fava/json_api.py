@@ -517,7 +517,7 @@ def put_attach_document(filename: str, entry_hash: str) -> str:
 
 @api_endpoint
 def put_update_review_status(
-    entry_hash: str, status: str, notes: str | None = None
+    entry_hash: str, status: str, notes: str = ""
 ) -> str:
     """Update the review status of a document entry."""
     valid_statuses = {"pending", "approved", "rejected"}
@@ -529,7 +529,7 @@ def put_update_review_status(
         entry_hash, "reviewed_at", datetime.datetime.now().isoformat()
     )
 
-    if notes is not None and notes.strip():
+    if notes.strip():
         g.ledger.file.set_metadata(entry_hash, "review_notes", notes.strip())
     else:
         try:

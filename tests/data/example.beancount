@@ -3,6 +3,7 @@ option "operating_currency" "EUR"
 plugin "beancount.plugins.auto_accounts"
 
 2012-11-18 * "Payee" "Narration with many postings and long narration"
+  review_status: "pending"
     Expenses:Others                  10.00 EUR
     Expenses:Others                  10.00 EUR
     Expenses:Others                  10.00 EUR
