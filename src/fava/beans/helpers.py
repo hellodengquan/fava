@@ -104,3 +104,19 @@ def filter_actual_transactions(entries: Sequence[Directive]) -> list[Transaction
     from fava.beans.abc import Transaction
 
     return [e for e in entries if is_actual_transaction(e)]
+
+
+def filter_system_generated(entries: Sequence[Directive]) -> list[Directive]:
+    """Filter a list of entries to exclude system-generated transactions.
+
+    This excludes system-generated transactions like opening balance
+    summarizations, but preserves all other entry types (Open, Close,
+    Note, Document, etc.).
+
+    Args:
+        entries: A list of directives.
+
+    Returns:
+        A list of directives with system-generated transactions removed.
+    """
+    return [e for e in entries if not is_system_generated_transaction(e)]

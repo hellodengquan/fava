@@ -23,6 +23,7 @@ from fava.beans.account import get_entry_accounts
 from fava.beans.funcs import get_position
 from fava.beans.funcs import hash_entry
 from fava.beans.helpers import filter_actual_transactions
+from fava.beans.helpers import filter_system_generated
 from fava.beans.helpers import is_actual_transaction
 from fava.beans.helpers import slice_entry_dates
 from fava.beans.load import load_uncached
@@ -211,6 +212,42 @@ class FilteredLedger:
         return transactions
 
     @cached_property
+    def journal_entries(self) -> Sequence[Directive]:
+        """Entries for the journal view.
+
+        All entries are within the date range [begin, end), excluding prices.
+        System-generated entries (like opening balance summarizations) are
+        preserved but can be identified using `is_system_generated_transaction()`.
+
+        Returns:
+            A sequence of directives for the journal view.
+        """
+        entries = self.entries_without_prices
+        if self.date_range:
+            entries = slice_entry_dates(
+                entries, self.date_range.begin, self.date_range.end
+            )
+        return entries
+
+    @cached_property
+    def entries_without_system_generated(self) -> Sequence[Directive]:
+        """Entries with system-generated transactions removed.
+
+        This preserves all non-transaction entry types (Open, Close, Note, etc.)
+        but excludes system-generated transactions like opening balance
+        summarizations. All entries are within the date range [begin, end).
+
+        Returns:
+            A sequence of directives with system-generated transactions removed.
+        """
+        entries = filter_system_generated(self.entries)
+        if self.date_range:
+            entries = slice_entry_dates(
+                entries, self.date_range.begin, self.date_range.end
+            )
+        return entries
+
+    @cached_property
     def root_tree(self) -> Tree:
         """A root tree."""
         return Tree(self.entries)
@@ -295,7 +332,7 @@ class FilteredLedger:
             or self._pages[1] != order
         ):
             pages: list[Sequence[tuple[int, Directive]]] = []
-            enumerated = list(enumerate(self.entries_without_prices))
+            enumerated = list(enumerate(self.journal_entries))
             entries = (
                 iter(enumerated) if order == "asc" else reversed(enumerated)
             )
@@ -573,7 +610,9 @@ class FavaLedger:
         interval_balances = [
             Tree(
                 slice_entry_dates(
-                    filtered.entries,
+                    filtered.entries_without_system_generated
+                    if not accumulate
+                    else filtered.entries,
                     date.min if accumulate else date_range.begin,
                     date_range.end,
                 ),
