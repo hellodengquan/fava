@@ -950,12 +950,27 @@ def get_statistics() -> Statistics:
 # Filter Presets
 
 
+def _filter_preset_response(data: Any) -> Response:
+    """Wrap a successful filter-preset response, carrying any pending warning.
+
+    If the filter-presets backend had to recover from a corrupt storage
+    file during the request, the warning describing that recovery is
+    surfaced to the frontend in the top-level ``warning`` field so the
+    UI can present a user-visible notice.
+    """
+    warning = g.ledger.filter_presets.consume_warning()
+    payload: dict[str, Any] = {"data": data, "mtime": str(g.ledger.mtime)}
+    if warning:
+        payload["warning"] = warning
+    return jsonify(payload)
+
+
 @json_api.route("/filter_presets", methods=["GET"])
 def get_filter_presets() -> Response:
     """List all filter presets, optionally filtered by page type."""
     page = request.args.get("page", None)
     presets = g.ledger.filter_presets.list_presets(page)
-    return json_success(presets)
+    return _filter_preset_response(presets)
 
 
 @json_api.route("/filter_preset", methods=["GET"])
@@ -965,7 +980,7 @@ def get_filter_preset() -> Response:
     if not preset_id:
         return json_err("Parameter 'id' is missing.", HTTPStatus.BAD_REQUEST)
     preset = g.ledger.filter_presets.get_preset(preset_id)
-    return json_success(preset)
+    return _filter_preset_response(preset)
 
 
 @json_api.route("/filter_preset", methods=["PUT"])
@@ -983,7 +998,7 @@ def put_filter_preset() -> Response:
         )
     filters_dict = {k: str(v) for k, v in filters.items()}
     preset = g.ledger.filter_presets.create_preset(name, page, filters_dict)
-    return json_success(preset)
+    return _filter_preset_response(preset)
 
 
 @json_api.route("/filter_preset", methods=["POST"])
@@ -1021,7 +1036,7 @@ def post_filter_preset() -> Response:
         filters=filters_dict,
         expected_version=expected_version,
     )
-    return json_success(preset)
+    return _filter_preset_response(preset)
 
 
 @json_api.route("/filter_preset", methods=["DELETE"])
@@ -1047,4 +1062,4 @@ def delete_filter_preset() -> Response:
     g.ledger.filter_presets.delete_preset(
         preset_id, expected_version=expected_version
     )
-    return json_success(f"Deleted filter preset '{preset_id}'.")
+    return _filter_preset_response(f"Deleted filter preset '{preset_id}'.")

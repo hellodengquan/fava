@@ -772,3 +772,260 @@ def test_legacy_storage_without_version_upgrades(
     raw = json.loads(storage_path.read_text(encoding="utf-8"))
     assert raw["schema_version"] == 2
     assert raw["presets"][0]["version"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Atomic writes – a mid-write crash must never corrupt the storage file
+# ---------------------------------------------------------------------------
+
+
+def test_atomic_write_no_half_written_file_on_crash(
+    tmp_ledger_file: Path, storage_path: Path
+) -> None:
+    """Simulating a crash between write and rename leaves the original intact.
+
+    We monkey-patch ``os.replace`` so it raises an exception after the
+    temporary file has been written and fsynced but *before* the atomic
+    rename.  The original storage file must still be parseable and contain
+    the pre-write contents; no temporary file must remain behind.
+    """
+    module = FilterPresetsModule(tmp_ledger_file)
+    original = module.create_preset(
+        "Original", FilterPresetPageType.ALL, SAMPLE_FILTERS
+    )
+    # Ensure the original preset bytes are valid JSON on disk.
+    raw_before = storage_path.read_bytes()
+    json.loads(raw_before)  # must not raise
+
+    original_os_replace = os.replace
+    original_dir_contents_before = set(p.name for p in storage_path.parent.iterdir())
+
+    crash_hit: dict[str, bool] = {"flag": False}
+
+    def crashing_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:  # noqa: D401
+        crash_hit["flag"] = True
+        raise OSError("simulated disk failure mid-atomic-write")
+
+    try:
+        os.replace = crashing_replace  # type: ignore[assignment]
+        with pytest.raises(OSError):
+            module.update_preset(
+                original["id"],
+                filters={"account": "Hijacked", "filter": "", "time": "", "conversion": "", "interval": ""},
+            )
+    finally:
+        os.replace = original_os_replace  # type: ignore[assignment]
+
+    assert crash_hit["flag"], "crashing_replace was never invoked"
+
+    # Storage file must still be the original, fully parseable JSON.
+    raw_after = storage_path.read_bytes()
+    parsed_after = json.loads(raw_after)
+    assert len(parsed_after["presets"]) == 1
+    assert parsed_after["presets"][0]["id"] == original["id"]
+    assert parsed_after["presets"][0]["filters"]["account"] == SAMPLE_FILTERS["account"]
+
+    # No stray temporary files should be left in the directory.
+    final_names = {p.name for p in storage_path.parent.iterdir()}
+    stray_tmp = [n for n in final_names if n.startswith(".tmp-")]
+    assert stray_tmp == [], f"stray temp files left behind: {stray_tmp}"
+
+
+def test_atomic_write_no_partial_file_when_storage_missing(
+    tmp_ledger_file: Path, storage_path: Path
+) -> None:
+    """When the storage file does not yet exist, atomic create leaves no halves.
+
+    We create a brand-new module whose storage file does not yet exist and
+    trigger the initial placeholder write.  A crash between writing the
+    placeholder temp file and renaming it must not leave a half-written
+    ``.fava-filter-presets.json`` (though the temp file itself should be
+    cleaned up).
+
+    Note: ``FilterPresetsModule.__init__`` swallows ``OSError`` during
+    bootstrap so Fava as a whole never fails to start because of a broken
+    presets file.  We therefore do NOT assert that the exception bubbles
+    up, only that the side effects of the crash leave the filesystem in
+    a clean, well-defined state.
+    """
+    assert not storage_path.exists()
+
+    original_os_replace = os.replace
+    crash_hit: dict[str, bool] = {"flag": False}
+
+    def crashing_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:  # noqa: D401
+        crash_hit["flag"] = True
+        raise OSError("simulated crash before rename")
+
+    # The first write happens during `_read_storage_locked` when the file
+    # doesn't exist – force it via a clean module instantiation.
+    try:
+        os.replace = crashing_replace  # type: ignore[assignment]
+        # __init__ swallows OSError, so this won't raise – that's the
+        # intended resilience behaviour.
+        FilterPresetsModule(tmp_ledger_file)
+    finally:
+        os.replace = original_os_replace  # type: ignore[assignment]
+
+    assert crash_hit["flag"], "crashing_replace was never invoked"
+
+    # The target file must NOT exist – we crashed before the rename.
+    assert not storage_path.exists(), (
+        f"expected {storage_path.name} not to exist after a mid-rename crash"
+    )
+
+    # No stray temp file either.
+    stray_tmp = [
+        p.name for p in storage_path.parent.iterdir() if p.name.startswith(".tmp-")
+    ]
+    assert stray_tmp == [], f"stray temp files left behind: {stray_tmp}"
+
+
+# ---------------------------------------------------------------------------
+# Corrupt storage recovery – quarantines the bad file and warns the frontend
+# ---------------------------------------------------------------------------
+
+
+def test_corrupt_storage_is_quarantined_and_returns_empty_list(
+    tmp_ledger_file: Path, storage_path: Path
+) -> None:
+    """An unparseable storage file is renamed to .corrupt.<ts> and a warning set.
+
+    - The corrupt bytes are preserved in the quarantine file.
+    - The live storage is replaced with a valid empty preset list.
+    - :attr:`FilterPresetsModule.last_warning` carries a human-readable
+      description of the recovery for the frontend to surface.
+    - Subsequent reads do NOT re-trigger the quarantine (i.e. the warning
+      is transient and only reported once, via ``consume_warning``).
+    """
+    # Drop garbage bytes into the storage file to simulate a half-write.
+    garbage = b'{"schema_version": 2, "presets": [{"id": "deadbeef", "name": '
+    storage_path.write_bytes(garbage)
+    garbage_size = len(garbage)
+
+    module = FilterPresetsModule(tmp_ledger_file)
+
+    # 1. The in-memory list must be empty (graceful fallback).
+    assert module.list_presets() == []
+
+    # 2. The warning must be populated and describe the recovery.
+    warning = module.last_warning
+    assert warning is not None
+    assert "could not be parsed" in warning
+    assert ".corrupt." in warning
+
+    # 3. A quarantine file must exist next to the storage file and contain
+    #    the original garbage bytes.
+    quarantines = sorted(
+        storage_path.parent.glob(f"{storage_path.name}.corrupt.*")
+    )
+    assert quarantines, "no .corrupt backup was created"
+    quarantine = quarantines[-1]
+    assert quarantine.read_bytes()[:garbage_size] == garbage
+
+    # 4. The live storage must now be a valid empty payload.
+    live = json.loads(storage_path.read_text(encoding="utf-8"))
+    assert live["schema_version"] == FilterPresetsModule.SCHEMA_VERSION
+    assert live["presets"] == []
+
+    # 5. ``consume_warning`` clears the warning.
+    assert module.consume_warning() == warning
+    assert module.consume_warning() is None
+
+    # 6. Re-reading the (now valid) storage does not re-trigger recovery.
+    reread = FilterPresetsModule(tmp_ledger_file)
+    assert reread.last_warning is None
+    assert reread.list_presets() == []
+
+
+def test_json_api_carries_warning_after_corruption_recovery(
+    app_in_tmp_dir,  # noqa: ANN001
+) -> None:
+    """Corrupt storage must surface the warning field in the JSON response.
+
+    After the backend recovers from a corrupt storage file, the next
+    filter-preset API response must carry a top-level ``warning`` field
+    so the frontend can notify the user.  Subsequent calls must NOT
+    include the warning (it was consumed by the first response).
+    """
+    from fava.context import g  # noqa: PLC0415
+
+    client = app_in_tmp_dir.test_client()
+    ledger = app_in_tmp_dir.config["LEDGERS"]["edit-example"]
+    storage_path = ledger.filter_presets.storage_path
+
+    # Corrupt the storage.
+    storage_path.write_bytes(b"this is not { valid json at all!")
+
+    # 1. First call – the response should carry `warning`.
+    first = client.get("/edit-example/api/filter_presets")
+    assert first.status_code == HTTPStatus.OK.value, first.data
+    assert first.json is not None
+    assert first.json["data"] == []
+    assert "warning" in first.json
+    assert "could not be parsed" in first.json["warning"]
+
+    # 2. A quarantine file must have been created.
+    quarantines = list(storage_path.parent.glob(f"{storage_path.name}.corrupt.*"))
+    assert quarantines
+
+    # 3. Second call – warning has been consumed and is no longer present.
+    second = client.get("/edit-example/api/filter_presets")
+    assert second.status_code == HTTPStatus.OK.value
+    assert second.json is not None
+    assert second.json["data"] == []
+    assert "warning" not in second.json
+
+    # 4. Now that storage is clean we can write a new preset normally.
+    create_resp = client.put(
+        "/edit-example/api/filter_preset",
+        json={"name": "Recovered", "page": "all", "filters": SAMPLE_FILTERS},
+    )
+    assert create_resp.status_code == HTTPStatus.OK.value
+    assert create_resp.json is not None
+    assert create_resp.json["data"]["name"] == "Recovered"
+    # A freshly recovered write must carry no warning.
+    assert "warning" not in create_resp.json
+
+
+def test_multiple_corruptions_get_distinct_backups(
+    tmp_ledger_file: Path, storage_path: Path
+) -> None:
+    """Repeated corruptions each get their own quarantine file.
+
+    If the storage file keeps getting corrupted (e.g. by some other buggy
+    process) each recovery must use a unique backup name so no previous
+    evidence is overwritten.
+    """
+    # Corruption #1
+    storage_path.write_bytes(b"garbage version one")
+    m1 = FilterPresetsModule(tmp_ledger_file)
+    assert m1.last_warning is not None
+    backups_1 = list(storage_path.parent.glob(f"{storage_path.name}.corrupt.*"))
+    assert len(backups_1) == 1
+
+    # Corruption #2 – write different garbage into the *live* path again.
+    storage_path.write_bytes(b"garbage version two")
+    m2 = FilterPresetsModule(tmp_ledger_file)
+    assert m2.last_warning is not None
+    backups_2 = list(storage_path.parent.glob(f"{storage_path.name}.corrupt.*"))
+    assert len(backups_2) == 2
+
+    # Both quarantines must still be on disk and carry distinct content.
+    contents = {p.read_bytes() for p in backups_2}
+    assert b"garbage version one" in contents
+    assert b"garbage version two" in contents
+
+
+def test_unicode_decode_error_is_treated_as_corruption(
+    tmp_ledger_file: Path, storage_path: Path
+) -> None:
+    """Binary (non-UTF-8) storage must also be quarantined, not 500."""
+    # Non-UTF-8 bytes that happen to not be valid JSON either.
+    storage_path.write_bytes(b"\xff\xfe\x00\x01not utf-8 at all")
+
+    module = FilterPresetsModule(tmp_ledger_file)
+    assert module.list_presets() == []
+    assert module.last_warning is not None
+    assert list(storage_path.parent.glob(f"{storage_path.name}.corrupt.*"))
+

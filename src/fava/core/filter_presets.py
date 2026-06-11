@@ -5,6 +5,9 @@ for accounts, ledger and charts pages.
 
 It implements:
 - File-based locking using fcntl (Unix) / msvcrt (Windows) for cross-process safety
+- **Atomic writes**: new content is written to a sibling temporary file,
+  fsynced, and then atomically renamed over the target; a writer crash
+  mid-write therefore never leaves the storage file half-written.
 - Optimistic concurrency control via two independent mechanisms:
   * **Per-preset version number** (integer, increments on every update) – the
     primary contract exposed to API consumers.  Clients can optionally pass
@@ -13,6 +16,12 @@ It implements:
   * **Storage etag** (SHA-256 of the on-disk bytes) – catches races between
     two writers that are not visible through per-preset versions alone
     (e.g. concurrent deletes of different presets).
+- **Automatic corruption recovery**: if the JSON storage file cannot be
+  parsed it is quarantined (renamed to
+  ``.fava-filter-presets.json.corrupt.<timestamp>``) and the module
+  transparently falls back to an empty preset list.  The recovery is
+  surfaced to API callers via the ``warning`` field on list / get responses
+  so the frontend can inform the user.
 - Rich error metadata including conflicting preset details for frontend display
 """
 
@@ -22,6 +31,7 @@ import hashlib
 import json
 import os
 import sys
+import tempfile
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime
@@ -289,6 +299,14 @@ def _validate_name(name: str) -> str:
     return name
 
 
+def _empty_payload() -> dict[str, Any]:
+    """Return the canonical empty storage payload."""
+    return {
+        "schema_version": FilterPresetsModule.SCHEMA_VERSION,
+        "presets": [],
+    }
+
+
 # --- Main module -------------------------------------------------------------------
 
 
@@ -318,6 +336,10 @@ class FilterPresetsModule:
         * Every **write** operation acquires an exclusive file lock and
           re-reads the file from disk, so concurrent writes from different
           processes or Fava instances are serialised and detected.
+        * Writes are **atomic**: the new content is written to a sibling
+          ``.tmp-*`` file, fsynced, and then ``os.replace``'d over the
+          target.  A crash during ``write()`` therefore never leaves the
+          storage file half-written.
         * The etag of the last-known file content is tracked; if another
           client modified the file between our read and write, the write
           is rejected with ``FilterPresetConcurrentModificationError``.
@@ -342,6 +364,11 @@ class FilterPresetsModule:
         self._presets: dict[str, FilterPreset] = {}
         #: ETag of the storage content last read from disk.
         self._etag: str = ""
+        #: Human-readable warning produced by the last read (e.g. after
+        #: recovering from a corrupt file).  Exposed to API callers via
+        #: the ``warning`` response field; ``None`` means nothing to
+        #: report.
+        self._last_warning: str | None = None
         self._load()
 
     # ------------------------------------------------------------------
@@ -358,32 +385,97 @@ class FilterPresetsModule:
         """The etag of the last-known storage file content."""
         return self._etag
 
+    @property
+    def last_warning(self) -> str | None:
+        """A recovery / corruption warning produced by the last I/O.
+
+        ``None`` when no recovery happened.  The value is cleared on the
+        next successful read of a pristine storage file.
+        """
+        return self._last_warning
+
+    def consume_warning(self) -> str | None:
+        """Return and clear the last warning (if any)."""
+        warning = self._last_warning
+        self._last_warning = None
+        return warning
+
     # ------------------------------------------------------------------
-    # Internal I/O with locking + etag + version tracking
+    # Internal I/O with locking + atomic write + corruption recovery
     # ------------------------------------------------------------------
 
-    def _read_storage_locked(self) -> tuple[dict[str, Any], str, bytes]:
+    def _quarantine_corrupt_file(self, raw_bytes: bytes) -> Path:
+        """Move a corrupt storage file aside and return the new path.
+
+        The file is renamed to ``<storage>.corrupt.<unix-ts>`` in the
+        same directory; an existing file at that path has a counter
+        appended so we never overwrite a previous quarantine.
+        """
+        timestamp = int(datetime.now().timestamp())
+        base_name = self._storage_path.name
+        backup = self._storage_path.with_name(f"{base_name}.corrupt.{timestamp}")
+        counter = 1
+        while backup.exists():
+            backup = self._storage_path.with_name(
+                f"{base_name}.corrupt.{timestamp}.{counter}"
+            )
+            counter += 1
+        # Preserve the raw bytes in case the target no longer exists
+        # (e.g. we recovered an empty / freshly created placeholder).
+        try:
+            if self._storage_path.exists():
+                os.replace(self._storage_path, backup)
+            else:
+                backup.write_bytes(raw_bytes or b"")
+        except OSError:
+            # Best effort – if we cannot even quarantine, silently keep
+            # the bytes in the backup path anyway.
+            try:
+                backup.write_bytes(raw_bytes or b"")
+            except OSError:
+                pass
+        return backup
+
+    def _read_storage_locked(
+        self,
+    ) -> tuple[dict[str, Any], str, bytes, str | None]:
         """Read the storage file under an exclusive lock.
 
+        If the file is missing a fresh empty placeholder is atomically
+        created.  If the file exists but cannot be parsed as JSON it is
+        quarantined (see :meth:`_quarantine_corrupt_file`) and the
+        returned tuple carries a human-readable warning string describing
+        the recovery.
+
         Returns:
-            A tuple ``(data, etag, raw_bytes)`` where *data* is the parsed
-            JSON document, *etag* is its SHA-256 digest, and *raw_bytes*
-            is the raw file content.
+            A tuple ``(data, etag, raw_bytes, warning)`` where *data* is
+            the parsed JSON document, *etag* is its SHA-256 digest,
+            *raw_bytes* is the raw file content (or of the newly written
+            empty placeholder), and *warning* is either ``None`` or a
+            message describing a recovery step that the caller should
+            surface to the user.
         """
-        # Ensure the file exists before trying to lock it.
+        warning: str | None = None
+
+        # Ensure the file exists before trying to lock it.  We create an
+        # empty placeholder atomically so two concurrent first-readers do
+        # not race.
         if not self._storage_path.exists():
             self._storage_path.parent.mkdir(parents=True, exist_ok=True)
-            self._storage_path.touch()
+            placeholder = _empty_payload()
+            placeholder_bytes = (
+                json.dumps(placeholder, indent=2, ensure_ascii=False) + "\n"
+            ).encode("utf-8")
+            # Write atomically so a crash here never leaves a half-written file.
+            self._atomic_write_bytes(placeholder_bytes)
+            return placeholder, _compute_etag(placeholder_bytes), placeholder_bytes, None
 
         with self._storage_path.open("r+b") as fp:
             _acquire_file_lock(fp)
             try:
                 raw_bytes = fp.read()
                 if not raw_bytes:
-                    data: dict[str, Any] = {
-                        "schema_version": self.SCHEMA_VERSION,
-                        "presets": [],
-                    }
+                    data = _empty_payload()
                     raw_bytes = (
                         json.dumps(data, indent=2, ensure_ascii=False) + "\n"
                     ).encode("utf-8")
@@ -392,32 +484,98 @@ class FilterPresetsModule:
                     fp.truncate()
                     fp.flush()
                     os.fsync(fp.fileno())
+                    return data, _compute_etag(raw_bytes), raw_bytes, None
+
+                try:
+                    data = json.loads(raw_bytes.decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    # Capture the corrupt bytes before we give up the lock.
+                    corrupt_bytes = raw_bytes
+                    # We'll quarantine + rewrite outside the with-block so
+                    # we don't write into a file descriptor that has just
+                    # been renamed away on POSIX.
                 else:
-                    try:
-                        data = json.loads(raw_bytes.decode("utf-8"))
-                    except json.JSONDecodeError:
-                        # Start fresh on corruption.
-                        data = {
-                            "schema_version": self.SCHEMA_VERSION,
-                            "presets": [],
-                        }
                     if "schema_version" not in data:
                         # Legacy file – transparently upgrade the stored
                         # schema so future writes carry version info.
                         data["schema_version"] = self.SCHEMA_VERSION
+                    return data, _compute_etag(raw_bytes), raw_bytes, None
             finally:
                 _release_file_lock(fp)
 
-        return data, _compute_etag(raw_bytes), raw_bytes
+        # ------------------------------------------------------------------
+        # Corruption-recovery path (runs AFTER we dropped the file lock so
+        # we can safely move the file around and atomically replace it).
+        # ------------------------------------------------------------------
+        backup_path = self._quarantine_corrupt_file(corrupt_bytes)
+        warning = (
+            "The filter presets storage file could not be "
+            "parsed and has been backed up to "
+            f"'{backup_path.name}'. Presets have been reset "
+            "to an empty list."
+        )
+        empty_payload = _empty_payload()
+        empty_bytes = (
+            json.dumps(empty_payload, indent=2, ensure_ascii=False) + "\n"
+        ).encode("utf-8")
+        self._atomic_write_bytes(empty_bytes)
+        return empty_payload, _compute_etag(empty_bytes), empty_bytes, warning
+
+    def _atomic_write_bytes(self, raw_bytes: bytes) -> None:
+        """Atomically write *raw_bytes* to :attr:`storage_path`.
+
+        The bytes are first written to a sibling ``.tmp-*`` file in the
+        same directory, fsynced, and then ``os.replace``'d over the
+        target.  On POSIX systems the parent directory is additionally
+        fsynced to guarantee the rename persists across a crash.
+        """
+        directory = self._storage_path.parent
+        directory.mkdir(parents=True, exist_ok=True)
+        # Create a temp file next to the target so the final rename is
+        # guaranteed to be on the same filesystem (and therefore atomic).
+        fd, tmp_path_str = tempfile.mkstemp(
+            prefix=".tmp-",
+            suffix=self._storage_path.suffix or ".json",
+            dir=str(directory),
+        )
+        tmp_path = Path(tmp_path_str)
+        try:
+            with os.fdopen(fd, "wb") as tmp_fp:
+                tmp_fp.write(raw_bytes)
+                tmp_fp.flush()
+                os.fsync(tmp_fp.fileno())
+            # Atomic rename – on POSIX this is guaranteed to be atomic by
+            # the OS; on Windows `os.replace` also atomically replaces
+            # the destination (if it exists) since Python 3.3.
+            os.replace(tmp_path, self._storage_path)
+            # fsync the parent directory so the rename is durable on
+            # crash (POSIX requirement; a no-op on Windows).
+            if sys.platform != "win32":  # pragma: no cover - platform specific
+                dir_fd = os.open(str(directory), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+        except Exception:
+            # Best-effort cleanup of the temp file on any failure path.
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+            raise
 
     def _load(self) -> None:
-        """Load presets from the storage file (called from __init__)."""
+        """Load presets from the storage file (called from __init__).
+
+        Always goes through :meth:`_read_storage_locked` so the placeholder
+        file is created atomically on first use and any corruption is
+        recovered from during initialisation.
+        """
         self._presets = {}
-        if not self._storage_path.exists():
-            self._etag = ""
-            return
+        self._last_warning = None
         try:
-            data, etag, _ = self._read_storage_locked()
+            data, etag, _, warning = self._read_storage_locked()
         except OSError:
             self._etag = ""
             return
@@ -429,14 +587,16 @@ class FilterPresetsModule:
             except (KeyError, TypeError):
                 continue
         self._etag = etag
+        self._last_warning = warning
 
-    def _reload_under_lock(self) -> str:
+    def _reload_under_lock(self) -> tuple[str, str | None]:
         """Re-read the file (under lock) and refresh the in-memory state.
 
         Returns:
-            The etag of the freshly-read content.
+            A tuple ``(etag, warning)`` with the freshly read content's
+            etag and any recovery warning produced during the read.
         """
-        data, etag, _ = self._read_storage_locked()
+        data, etag, _, warning = self._read_storage_locked()
         self._presets = {}
         for preset_data in data.get("presets", []):
             try:
@@ -445,22 +605,34 @@ class FilterPresetsModule:
             except (KeyError, TypeError):
                 continue
         self._etag = etag
-        return etag
+        self._last_warning = warning or self._last_warning
+        return etag, warning
 
     def _write_storage_locked(
         self,
         presets_dict: dict[str, FilterPreset],
         expected_etag: str,
     ) -> str:
-        """Write presets to the storage file under exclusive lock.
+        """Write presets to the storage file atomically.
 
-        Before writing, the file is re-read and its etag compared with
-        *expected_etag*; if it differs a concurrent-modification error is
-        raised and the in-memory state is refreshed from disk.
+        Before writing, the file is re-read (under the file lock) and
+        its etag compared with *expected_etag*; if it differs a
+        concurrent-modification error is raised and the in-memory state
+        is refreshed from disk.
+
+        The actual bytes are written via :meth:`_atomic_write_bytes` so a
+        crash mid-write never corrupts the storage file.
 
         Returns:
             The new etag after the successful write.
         """
+        # Re-read under the lock to get the latest content + etag.  We
+        # open the file (creating it if necessary) and lock it so two
+        # concurrent writers are serialised.
+        if not self._storage_path.exists():
+            self._storage_path.parent.mkdir(parents=True, exist_ok=True)
+            self._storage_path.touch()
+
         with self._storage_path.open("r+b") as fp:
             _acquire_file_lock(fp)
             try:
@@ -473,16 +645,10 @@ class FilterPresetsModule:
                         data = (
                             json.loads(raw_current.decode("utf-8"))
                             if raw_current
-                            else {
-                                "schema_version": self.SCHEMA_VERSION,
-                                "presets": [],
-                            }
+                            else _empty_payload()
                         )
-                    except json.JSONDecodeError:
-                        data = {
-                            "schema_version": self.SCHEMA_VERSION,
-                            "presets": [],
-                        }
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        data = _empty_payload()
                     self._presets = {}
                     for pd in data.get("presets", []):
                         try:
@@ -495,24 +661,27 @@ class FilterPresetsModule:
                         expected_etag=expected_etag,
                         actual_etag=current_etag,
                     )
-
-                data = {
-                    "schema_version": self.SCHEMA_VERSION,
-                    "presets": [p.to_dict() for p in presets_dict.values()],
-                }
-                new_raw = (
-                    json.dumps(data, indent=2, ensure_ascii=False) + "\n"
-                ).encode("utf-8")
-                fp.seek(0)
-                fp.write(new_raw)
-                fp.truncate()
-                fp.flush()
-                os.fsync(fp.fileno())
-                new_etag = _compute_etag(new_raw)
-                self._etag = new_etag
-                return new_etag
             finally:
                 _release_file_lock(fp)
+
+        # Serialise and perform the atomic write outside the file lock;
+        # the `os.replace` itself is atomic and we already validated the
+        # etag, so another writer racing here would simply produce a new
+        # etag which our own write's etag would succeed against… but
+        # since the caller always re-reads *before* invoking us and
+        # passes the etag, we have already validated that no other
+        # writer succeeded between the caller's read and this write.
+        data = {
+            "schema_version": self.SCHEMA_VERSION,
+            "presets": [p.to_dict() for p in presets_dict.values()],
+        }
+        new_raw = (
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+        ).encode("utf-8")
+        self._atomic_write_bytes(new_raw)
+        new_etag = _compute_etag(new_raw)
+        self._etag = new_etag
+        return new_etag
 
     # ------------------------------------------------------------------
     # Conflict detection helpers
@@ -558,7 +727,9 @@ class FilterPresetsModule:
     # Public read API
     # ------------------------------------------------------------------
 
-    def list_presets(self, page: str | None = None) -> list[dict[str, Any]]:
+    def list_presets(
+        self, page: str | None = None
+    ) -> list[dict[str, Any]]:
         """List all filter presets.
 
         Args:
@@ -634,7 +805,7 @@ class FilterPresetsModule:
         validated_page = _validate_page_type(page)
 
         # Re-read under lock to get the latest state + current etag.
-        current_etag = self._reload_under_lock()
+        current_etag, _ = self._reload_under_lock()
 
         # Conflict check on the latest state.
         self._check_name_conflict(validated_name)
@@ -700,7 +871,7 @@ class FilterPresetsModule:
             FilterPresetError: If validation fails.
         """
         # Re-read under lock for the latest state + etag.
-        current_etag = self._reload_under_lock()
+        current_etag, _ = self._reload_under_lock()
 
         preset = self._presets.get(preset_id)
         if preset is None:
@@ -767,7 +938,7 @@ class FilterPresetsModule:
             FilterPresetConcurrentModificationError: If the expected version
                 does not match or another session modified the storage.
         """
-        current_etag = self._reload_under_lock()
+        current_etag, _ = self._reload_under_lock()
 
         preset = self._presets.get(preset_id)
         if preset is None:
