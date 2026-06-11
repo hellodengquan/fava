@@ -45,6 +45,63 @@ export function getReviewedAt(doc: Document): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+export const statusLabels: Record<ReviewStatus, string> = {
+  pending: "待复核",
+  approved: "已通过",
+  rejected: "已拒绝",
+};
+
+export const statusColors: Record<ReviewStatus, string> = {
+  pending: "#fbbf24",
+  approved: "#10b981",
+  rejected: "#ef4444",
+};
+
+export const categoryLabels: Record<ReviewCategory, string> = {
+  account_mismatch: "账户问题",
+  amount_discrepancy: "金额差异",
+  missing_fields: "缺失字段",
+};
+
+export function updateJournalReviewBadge(
+  container: HTMLElement | Document,
+  entryHash: string,
+  status: ReviewStatus | null,
+): boolean {
+  const row = container.querySelector(`li[data-entry-hash="${entryHash}"]`);
+  if (!row) return false;
+
+  const description = row.querySelector(":scope > p > .description");
+  if (!description) return false;
+
+  const existingBadge = description.querySelector(".review-status-badge");
+
+  if (status === null) {
+    if (existingBadge) {
+      existingBadge.remove();
+    }
+    return true;
+  }
+
+  const label = statusLabels[status] ?? status;
+  const color = statusColors[status] ?? "#6b7280";
+
+  if (existingBadge) {
+    existingBadge.textContent = label;
+    existingBadge.setAttribute("title", label);
+    (existingBadge as HTMLElement).style.backgroundColor = color;
+  } else {
+    const badge = document.createElement("span");
+    badge.className = "review-status-badge";
+    badge.textContent = label;
+    badge.setAttribute("title", label);
+    badge.style.backgroundColor = color;
+    description.appendChild(badge);
+  }
+
+  return true;
+}
+
 export function detectIssues(
   doc: Document,
   transactions: Transaction[],
@@ -195,21 +252,3 @@ export function getPendingDocuments(
     return issues.length > 0;
   });
 }
-
-export const categoryLabels: Record<ReviewCategory, string> = {
-  account_mismatch: "账户问题",
-  amount_discrepancy: "金额差异",
-  missing_fields: "缺失字段",
-};
-
-export const statusLabels: Record<ReviewStatus, string> = {
-  pending: "待复核",
-  approved: "已通过",
-  rejected: "已拒绝",
-};
-
-export const statusColors: Record<ReviewStatus, string> = {
-  pending: "#fbbf24",
-  approved: "#10b981",
-  rejected: "#ef4444",
-};

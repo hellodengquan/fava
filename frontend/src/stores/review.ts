@@ -77,7 +77,7 @@ export const getDocumentReviewInfo = (doc: Document) => {
 async function refreshReviewDocuments(): Promise<void> {
   try {
     const docs = await get_documents({});
-    $reviewDocuments = docs;
+    reviewDocuments.set(docs);
   } catch (error) {
     console.error("Failed to refresh review documents:", error);
   }

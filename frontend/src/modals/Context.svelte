@@ -13,11 +13,12 @@
 
   let shown = $derived($hash.startsWith("context"));
   let entry_hash = $derived(shown ? $hash.slice(8) : "");
-  let contextKey = $state(0);
+  let version = $state(0);
 
   $effect(() => {
-    if ($reviewStore.lastUpdatedHash) {
-      contextKey++;
+    const updatedHash = $reviewStore.lastUpdatedHash;
+    if (updatedHash && updatedHash === entry_hash) {
+      version++;
     }
   });
 </script>
@@ -25,33 +26,35 @@
 <ModalBase {shown}>
   <div class="content">
     {#if shown}
-      {#await get_context({ entry_hash })}
-        <p>Loading entry context...</p>
-      {:then { entry, balances_after, balances_before }}
-        <EntryContextLocation {entry} />
-        {#if balances_before}
-          <EntryContextBalances {balances_before} {balances_after} />
-        {/if}
-        {#if entry.t === "Document"}
-          <EntryContextReview entry={entry as Document} />
-        {/if}
-        {#if entry.meta.lineno !== "0" && !entry.meta.filename.startsWith("<")}
-          {#await Promise.all( [get_source_slice( { entry_hash }, ), import("../codemirror/beancount.ts")], )}
-            <p>Loading entry slice...</p>
-          {:then [{ slice, sha256sum }, codemirror_beancount]}
-            <SliceEditor
-              {entry_hash}
-              {slice}
-              {sha256sum}
-              {codemirror_beancount}
-            />
-          {:catch error}
-            <ReportLoadError title={_("Context")} {error} />
-          {/await}
-        {/if}
-      {:catch error}
-        <ReportLoadError title={_("Context")} {error} />
-      {/await}
+      {#key version}
+        {#await get_context({ entry_hash })}
+          <p>Loading entry context...</p>
+        {:then { entry, balances_after, balances_before }}
+          <EntryContextLocation {entry} />
+          {#if balances_before}
+            <EntryContextBalances {balances_before} {balances_after} />
+          {/if}
+          {#if entry.t === "Document"}
+            <EntryContextReview entry={entry as Document} />
+          {/if}
+          {#if entry.meta.lineno !== "0" && !entry.meta.filename.startsWith("<")}
+            {#await Promise.all( [get_source_slice( { entry_hash }, ), import("../codemirror/beancount.ts")], )}
+              <p>Loading entry slice...</p>
+            {:then [{ slice, sha256sum }, codemirror_beancount]}
+              <SliceEditor
+                {entry_hash}
+                {slice}
+                {sha256sum}
+                {codemirror_beancount}
+              />
+            {:catch error}
+              <ReportLoadError title={_("Context")} {error} />
+            {/await}
+          {/if}
+        {:catch error}
+          <ReportLoadError title={_("Context")} {error} />
+        {/await}
+      {/key}
     {/if}
   </div>
 </ModalBase>

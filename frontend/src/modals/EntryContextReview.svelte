@@ -117,9 +117,12 @@
   $effect(() => {
     const updatedHash = $reviewStore.lastUpdatedHash;
     const updatedStatus = $reviewStore.lastUpdatedStatus;
-    if (updatedHash === entry.entry_hash && updatedStatus !== null) {
-      if (reviewInfo) {
-        reviewInfo = { ...reviewInfo, status: updatedStatus ?? "pending" };
+    if (updatedHash === entry.entry_hash && reviewInfo) {
+      const newStatus = updatedStatus ?? "pending";
+      if (updatedStatus === null) {
+        reviewInfo = { ...reviewInfo, status: "pending", reviewed_at: undefined, notes: undefined };
+      } else {
+        reviewInfo = { ...reviewInfo, status: newStatus };
       }
     }
   });

@@ -4,6 +4,7 @@
   import { _ } from "../../i18n.ts";
   import { get_el } from "../../lib/dom.ts";
   import { shallow_equal } from "../../lib/equals.ts";
+  import { updateJournalReviewBadge } from "../../lib/review.ts";
   import { log_error } from "../../log.ts";
   import { is_supported_datatransfer } from "../../modals/document-upload.ts";
   import { is_loading, loading_state } from "../../router.ts";
@@ -12,6 +13,7 @@
     journal_sort,
     type JournalSort,
   } from "../../stores/journal.ts";
+  import { reviewStore } from "../../stores/review.ts";
   import { get_account_from_url } from "../accounts/index.ts";
   import { handle_journal_click } from "./click_handler.ts";
   import JournalFilters from "./JournalFilters.svelte";
@@ -34,6 +36,14 @@
   }: Props = $props();
 
   let ol: HTMLOListElement | undefined = $state();
+
+  $effect(() => {
+    const entryHash = $reviewStore.lastUpdatedHash;
+    const status = $reviewStore.lastUpdatedStatus;
+    if (entryHash && ol) {
+      updateJournalReviewBadge(ol, entryHash, status);
+    }
+  });
 
   /** Set the data attributes for drag-and-drop on dragenter */
   function ondragenter(event: DragEvent) {
