@@ -22,6 +22,8 @@ from fava.beans.account import account_tester
 from fava.beans.account import get_entry_accounts
 from fava.beans.funcs import get_position
 from fava.beans.funcs import hash_entry
+from fava.beans.helpers import filter_actual_transactions
+from fava.beans.helpers import is_actual_transaction
 from fava.beans.helpers import slice_entry_dates
 from fava.beans.load import load_uncached
 from fava.beans.prices import FavaPriceMap
@@ -189,6 +191,24 @@ class FilteredLedger:
     def entries_without_prices(self) -> Sequence[Directive]:
         """The filtered entries, without prices for journals."""
         return [e for e in self.entries if not isinstance(e, Price)]
+
+    @cached_property
+    def actual_transactions(self) -> Sequence[Transaction]:
+        """Actual user transactions, excluding system-generated entries.
+
+        System-generated entries include opening balance summarizations,
+        transfer entries, and conversion entries added by clamp operations.
+        These entries are not actual user transactions and should be excluded
+        from transaction statistics.
+
+        All entries returned are within the date range [begin, end).
+        """
+        transactions = filter_actual_transactions(self.entries)
+        if self.date_range:
+            transactions = slice_entry_dates(
+                transactions, self.date_range.begin, self.date_range.end
+            )
+        return transactions
 
     @cached_property
     def root_tree(self) -> Tree:

@@ -23,6 +23,7 @@ from fava.beans.abc import Position
 from fava.beans.abc import Transaction
 from fava.beans.account import account_tester
 from fava.beans.flags import FLAG_UNREALIZED
+from fava.beans.helpers import is_actual_transaction
 from fava.beans.helpers import slice_entry_dates
 from fava.core.conversion import conversion_from_str
 from fava.core.inventory import CounterInventory
@@ -152,6 +153,8 @@ class ChartModule(FavaModule):
                 CounterInventory,
             )
             for entry in entries:
+                if not is_actual_transaction(entry):
+                    continue
                 for posting in getattr(entry, "postings", []):
                     if posting.account.startswith(accounts):
                         account_inventories[posting.account].add_position(
