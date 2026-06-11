@@ -81,3 +81,39 @@ plugin "beancount.plugins.auto_accounts"
 2012-12-15 document Expenses:Food "./receipt.pdf"
 
 2014-01-01 close Assets:Account1
+
+; ============================================================
+; 预算回归测试：分类 + 多币种 + 三种状态（ok/near/over）
+; 周期：2012-12-01 ~ 2012-12-31（monthly）
+; ============================================================
+
+; 分类: "living" — 日常生活（多币种 EUR + USD，近超支 + 超支）
+2012-11-01 custom "budget" Expenses:Food:Groceries  "monthly"  500.00 EUR "living"
+2012-11-01 custom "budget" Expenses:Food:Groceries  "monthly"  120.00 USD "living"
+2012-11-01 custom "budget" Expenses:Food:Restaurant "monthly"  300.00 EUR "living"
+
+; 分类: "transport" — 交通（正常状态）
+2012-11-01 custom "budget" Expenses:Transport:Public "monthly" 200.00 EUR "transport"
+2012-11-01 custom "budget" Expenses:Transport:Taxi   "monthly"  80.00 EUR "transport"
+
+; 实际支出（2012-12 月内，覆盖三种状态）
+2012-12-05 * "Supermarket" "Weekly groceries EUR only — near threshold"
+    Expenses:Food:Groceries        420.00 EUR   ; 500 EUR × 84% → near
+    Assets:Account1
+
+2012-12-08 * "Market" "Imported goods USD — over threshold"
+    Expenses:Food:Groceries        135.00 USD   ; 120 USD × 112.5% → over
+    Assets:Account1
+
+2012-12-14 * "Chez Pierre" "Fine dining — over threshold"
+    Expenses:Food:Restaurant       360.00 EUR   ; 300 EUR × 120% → over
+    Assets:Account1
+
+2012-12-20 * "Metro" "Monthly pass — ok"
+    Expenses:Transport:Public       90.00 EUR   ; 200 EUR × 45% → ok
+    Assets:Account1
+
+2012-12-25 * "Yellow Cab" "Ride home — ok"
+    Expenses:Transport:Taxi         30.00 EUR   ; 80 EUR × 37.5% → ok
+    Assets:Account1
+

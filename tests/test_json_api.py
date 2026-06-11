@@ -857,6 +857,48 @@ def test_api_filter_error(
         ),
         ("statistics", "/long-example/api/statistics"),
         ("options", "/long-example/api/options"),
+        (
+            "account_report_budget_categories_monthly",
+            (
+                "/example/api/account_report"
+                "?interval=month&a=Expenses&r=changes"
+            ),
+        ),
+        (
+            "account_report_budget_categories_monthly_balances",
+            (
+                "/example/api/account_report"
+                "?interval=month&a=Expenses&r=balances"
+            ),
+        ),
+        (
+            "account_report_budget_categories_weekly",
+            (
+                "/example/api/account_report"
+                "?interval=week&a=Expenses&r=balances"
+            ),
+        ),
+        (
+            "account_report_budget_multicurrency_parent",
+            (
+                "/example/api/account_report"
+                "?interval=month&a=Expenses:Food&r=changes"
+            ),
+        ),
+        (
+            "account_report_budget_multicurrency_leaf",
+            (
+                "/example/api/account_report"
+                "?interval=month&a=Expenses:Food:Groceries&r=changes"
+            ),
+        ),
+        (
+            "account_report_budget_transport_category",
+            (
+                "/example/api/account_report"
+                "?interval=month&a=Expenses:Transport&r=balances"
+            ),
+        ),
     ],
 )
 def test_api(
@@ -869,3 +911,180 @@ def test_api(
     data = assert_api_success(response)
     assert data
     snapshot(data, name=name, json=True)
+
+
+STATUS_RANK = {"ok": 0, "near": 1, "over": 2}
+
+
+def _worst_status(*statuses: str) -> str:
+    return max(statuses, key=lambda s: STATUS_RANK.get(s, -1), default="ok")
+
+
+def test_account_report_budget_consistency(
+    test_client: FlaskClient,
+) -> None:
+    """Assert that budget statuses, ratios, category fields and
+    periodic boundaries are consistent across:
+    - charts vs interval_balances
+    - r=changes vs r=balances
+    - multi-currency leaf accounts vs their parent aggregations
+    """
+    base_changes = (
+        "/example/api/account_report"
+        "?interval=month&a=Expenses:Food&r=changes"
+    )
+    base_balances = (
+        "/example/api/account_report"
+        "?interval=month&a=Expenses:Food&r=balances"
+    )
+
+    changes_data = assert_api_success(test_client.get(base_changes))
+    balances_data = assert_api_success(test_client.get(base_balances))
+
+    # (1) Both tree-view responses must carry budget fields.
+    for payload, label in [
+        (changes_data, "changes"),
+        (balances_data, "balances"),
+    ]:
+        assert "budget_categories" in payload, label
+        assert "budgets" in payload, label
+        assert "dates" in payload, label
+        assert "charts" in payload, label
+        assert "interval_balances" in payload, label
+        assert "living" in payload["budget_categories"], label
+
+    dates_changes = changes_data["dates"]
+    dates_balances = balances_data["dates"]
+    budgets_changes = changes_data["budgets"]
+    budgets_balances = balances_data["budgets"]
+
+    # (2) Period boundaries must be identical for r=changes / r=balances.
+    assert dates_changes == dates_balances, (
+        "period boundaries differ between changes/balances views"
+    )
+    n_intervals = len(dates_changes)
+    assert n_intervals >= 2
+
+    # Dates are sorted DESC — the first entry is the latest (our 2012-12
+    # test interval where all budget transactions occur).
+    dec_idx = 0
+    assert dates_changes[dec_idx]["begin"] == "2012-12-01"
+    assert dates_changes[dec_idx]["end"] == "2013-01-01"
+
+    # (3) Charts: 2 charts (balances + interval_totals/Changes).
+    charts = changes_data["charts"]
+    assert len(charts) == 2
+    # Bar chart (Changes) has one bar per interval — match interval count.
+    bar_chart = next(c for c in charts if c["type"] == "bar")
+    assert len(bar_chart["data"]) == n_intervals
+    # First bar date == first interval begin, modulo end-of-month offset
+    # used by d3-scale for the bar position.
+    # Assert every interval has a matching bar by iterating both.
+    for bar, daterange in zip(bar_chart["data"], dates_changes):
+        # bar["budgets"] should equal children-aggregated budget for root
+        assert "budgets" in bar
+        assert "balance" in bar
+
+    # (4) Leaf account Expenses:Food:Groceries has multi-currency
+    #     (EUR near, USD over). Assert the exact statuses + ratios.
+    leaf_account = "Expenses:Food:Groceries"
+    leaf_budgets = budgets_changes[leaf_account]
+    assert len(leaf_budgets) == n_intervals
+    leaf_last = leaf_budgets[dec_idx]
+    assert leaf_last["category"] == "living"
+    assert set(leaf_last["budget"].keys()) == {"EUR", "USD"}
+    # EUR budget = 500, actual 420 => 0.84 => near
+    assert leaf_last["status"]["EUR"] == "near"
+    assert abs(float(leaf_last["ratio"]["EUR"]) - 0.84) < 1e-9
+    # USD budget = 120, actual 135 => 1.125 => over
+    assert leaf_last["status"]["USD"] == "over"
+    assert abs(float(leaf_last["ratio"]["USD"]) - 1.125) < 1e-9
+
+    # (5) Leaf account Expenses:Food:Restaurant has EUR over only.
+    rest_account = "Expenses:Food:Restaurant"
+    rest_last = budgets_changes[rest_account][dec_idx]
+    assert rest_last["category"] == "living"
+    assert rest_last["budget"].keys() == {"EUR"}
+    assert rest_last["status"]["EUR"] == "over"
+    assert abs(float(rest_last["ratio"]["EUR"]) - 1.2) < 1e-9
+
+    # (6) Parent Expenses:Food — no direct budget. children totals
+    #     aggregate both leaves, and children fields are present.
+    #     The "worst badge" on the parent row is derived from its leaves
+    #     (done on the frontend from per-leaf statuses but we assert
+    #     that budget_children covers both currencies and both leaves).
+    parent_account = "Expenses:Food"
+    parent_last = budgets_changes[parent_account][dec_idx]
+    assert parent_last["budget"] == {}
+    # budget_children: 500+300 = 800 EUR and 120 USD.
+    assert float(parent_last["budget_children"]["EUR"]) == 800.0
+    assert float(parent_last["budget_children"]["USD"]) == 120.0
+    # Aggregate worst status: EUR is near+over => over; USD is over => over
+    eur_worst = _worst_status(
+        leaf_last["status"]["EUR"], rest_last["status"]["EUR"]
+    )
+    assert eur_worst == "over"
+    assert leaf_last["status"]["USD"] == "over"
+
+    # (7) r=changes vs r=balances must deliver the same budget fields
+    #     for the leaf account (category & budgeted amounts).
+    leaf_changes = budgets_changes[leaf_account][dec_idx]
+    leaf_balances = budgets_balances[leaf_account][dec_idx]
+    assert leaf_changes["category"] == leaf_balances["category"]
+    assert leaf_changes["budget"].keys() == leaf_balances["budget"].keys()
+    # r=changes: per-period budget.
+    assert float(leaf_changes["budget"]["EUR"]) == 500.0
+    assert float(leaf_changes["budget"]["USD"]) == 120.0
+    # r=balances: accumulated budget across all intervals (>= changes).
+    assert float(leaf_balances["budget"]["EUR"]) >= 500.0
+    assert float(leaf_balances["budget"]["USD"]) >= 120.0
+    # statuses are present in both views
+    assert "EUR" in leaf_balances["status"]
+    assert "USD" in leaf_balances["status"]
+    # ... but balances view accumulates, so ratio can differ.
+
+    # (8) Transport category account: Expenses:Transport.
+    transport_url = (
+        "/example/api/account_report"
+        "?interval=month&a=Expenses:Transport&r=changes"
+    )
+    transport_data = assert_api_success(test_client.get(transport_url))
+    transport_budgets = transport_data["budgets"]
+    # Two leaf accounts with ok status.
+    t_public = transport_budgets["Expenses:Transport:Public"][dec_idx]
+    t_taxi = transport_budgets["Expenses:Transport:Taxi"][dec_idx]
+    assert t_public["category"] == "transport"
+    assert t_public["status"]["EUR"] == "ok"
+    assert t_taxi["category"] == "transport"
+    assert t_taxi["status"]["EUR"] == "ok"
+    # Parent Expenses:Transport has no direct budget.
+    assert transport_budgets["Expenses:Transport"][dec_idx]["budget"] == {}
+
+    # (9) Weekly interval: budgeted amounts should differ from monthly
+    #     and statuses should stay self-consistent.
+    weekly_url = (
+        "/example/api/account_report"
+        "?interval=week&a=Expenses:Food:Groceries&r=changes"
+    )
+    weekly = assert_api_success(test_client.get(weekly_url))
+    assert len(weekly["dates"]) >= 4
+    weekly_budget = weekly["budgets"]["Expenses:Food:Groceries"]
+    # Weekly budget per period << monthly (500 EUR ≈ 115 EUR/week).
+    for entry in weekly_budget:
+        for cur, amount in entry["budget"].items():
+            assert float(amount) > 0, f"weekly budget for {cur} must be > 0"
+            if cur == "EUR":
+                assert 80 < float(amount) < 160
+
+    # (10) Bar chart total budgets must equal children aggregation of
+    #      the root account in the same interval.
+    for i, bar in enumerate(bar_chart["data"]):
+        root_budget_children = budgets_changes["Expenses:Food"][i][
+            "budget_children"
+        ]
+        # bar["budgets"] total == sum of children budgets per currency
+        for cur, val in bar["budgets"].items():
+            assert cur in root_budget_children
+            assert float(val) == float(root_budget_children[cur])
+
+
