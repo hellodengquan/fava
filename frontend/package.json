@@ -6,6 +6,9 @@
   "scripts": {
     "build": "node build.ts",
     "dev": "node build.ts --dev",
+    "check:i18n": "node --experimental-strip-types check-i18n.ts",
+    "check:i18n:strict": "node --experimental-strip-types check-i18n.ts --strict",
+    "check:i18n:report": "node --experimental-strip-types check-i18n.ts --report=i18n-missing-report.json",
     "sync-pre-commit": "node sync-pre-commit.ts",
     "test": "node --conditions browser --import ./setup.js test.ts",
     "test:watch": "node --conditions browser --import ./setup.js test.ts --watch"

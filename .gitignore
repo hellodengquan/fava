@@ -9,6 +9,7 @@
 /dist/
 /docs/api/
 /frontend/coverage/
+/frontend/i18n-missing-report.json
 /frontend/node_modules/
 /htmlcov/
 /src/fava.egg-info/

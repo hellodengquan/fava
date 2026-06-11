@@ -56,6 +56,16 @@ lint: frontend/node_modules ty
 	cd frontend; npm exec tsc
 	cd frontend; npm exec svelte-check
 
+# Check for missing i18n translations (report only).
+.PHONY: check-i18n
+check-i18n:
+	cd frontend; npm run check:i18n
+
+# Check for missing i18n translations (strict mode - fails CI).
+.PHONY: check-i18n-strict
+check-i18n-strict:
+	cd frontend; npm run check:i18n:strict
+
 # Run mypy for Python type-checking.
 .PHONY: mypy
 mypy:
