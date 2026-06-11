@@ -35,6 +35,7 @@ from fava.core.documents import filepath_in_document_folder
 from fava.core.documents import is_document_or_import_file
 from fava.core.file import GeneratedEntryError
 from fava.core.file import get_entry_slice
+from fava.core.filter_presets import FilterPresetCorruptStorageError
 from fava.core.filter_presets import FilterPresetError
 from fava.core.filter_presets import (
     FilterPresetConcurrentModificationError,
@@ -224,6 +225,16 @@ def _(error: FilterPresetConcurrentModificationError) -> Response:
     return json_err(
         error.message,
         HTTPStatus.CONFLICT,
+        code=error.code,
+        details=error.details,
+    )
+
+
+@json_api.errorhandler(FilterPresetCorruptStorageError)
+def _(error: FilterPresetCorruptStorageError) -> Response:
+    return json_err(
+        error.message,
+        HTTPStatus.SERVICE_UNAVAILABLE,
         code=error.code,
         details=error.details,
     )

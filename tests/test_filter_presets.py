@@ -11,6 +11,7 @@ Covers the four required scenarios:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -23,6 +24,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from fava.core.filter_presets import FilterPresetConcurrentModificationError
+from fava.core.filter_presets import FilterPresetCorruptStorageError
 from fava.core.filter_presets import FilterPresetNameConflictError
 from fava.core.filter_presets import FilterPresetNotFoundError
 from fava.core.filter_presets import FilterPresetsModule
@@ -1028,4 +1030,234 @@ def test_unicode_decode_error_is_treated_as_corruption(
     assert module.list_presets() == []
     assert module.last_warning is not None
     assert list(storage_path.parent.glob(f"{storage_path.name}.corrupt.*"))
+
+
+# ---------------------------------------------------------------------------
+# FAVA_FILTER_PRESET_AUTO_RECOVER environment variable
+# ---------------------------------------------------------------------------
+
+
+def test_auto_recover_disabled_raises_corrupt_storage_error(
+    tmp_ledger_file: Path, storage_path: Path
+) -> None:
+    """When FAVA_FILTER_PRESET_AUTO_RECOVER=0, corrupt storage raises
+    FilterPresetCorruptStorageError instead of silently recovering.
+    The corrupt file is still quarantined (evidence is preserved) but
+    the live storage is NOT replaced with an empty list.
+    """
+    garbage = b'{"schema_version": 2, "presets": [{"id": "bad", '
+    storage_path.write_bytes(garbage)
+
+    original_env = os.environ.get("FAVA_FILTER_PRESET_AUTO_RECOVER")
+    try:
+        os.environ["FAVA_FILTER_PRESET_AUTO_RECOVER"] = "0"
+
+        with pytest.raises(FilterPresetCorruptStorageError) as exc_info:
+            FilterPresetsModule(tmp_ledger_file)
+
+        err = exc_info.value
+        assert err.code == "corrupt_storage"
+        assert err.details["storage_path"] == str(storage_path)
+        assert err.details["file_size"] == len(garbage)
+        assert "backup_path" in err.details
+
+        # The corrupt file must still have been quarantined.
+        quarantines = list(storage_path.parent.glob(f"{storage_path.name}.corrupt.*"))
+        assert quarantines
+        assert quarantines[0].read_bytes()[:len(garbage)] == garbage
+
+        # The live storage must NOT have been replaced with a valid empty
+        # list – because auto-recovery is off the quarantine moved the
+        # corrupt file but did NOT write a fresh placeholder.
+        if storage_path.exists():
+            # If the file still exists (e.g. quarantine wrote a copy
+            # instead of moving), it must still contain the garbage.
+            assert storage_path.read_bytes()[:len(garbage)] == garbage
+        # Otherwise the file was moved to quarantine – that's fine too.
+    finally:
+        if original_env is None:
+            os.environ.pop("FAVA_FILTER_PRESET_AUTO_RECOVER", None)
+        else:
+            os.environ["FAVA_FILTER_PRESET_AUTO_RECOVER"] = original_env
+
+
+@pytest.mark.parametrize("falsy_value", ["0", "false", "no", "off", "FALSE", "No", "OFF"])
+def test_auto_recover_env_falsy_values(
+    tmp_ledger_file: Path, storage_path: Path, falsy_value: str
+) -> None:
+    """All documented falsy values for FAVA_FILTER_PRESET_AUTO_RECOVER
+    must disable auto-recovery (case-insensitive).
+    """
+    storage_path.write_bytes(b"not valid json")
+
+    original_env = os.environ.get("FAVA_FILTER_PRESET_AUTO_RECOVER")
+    try:
+        os.environ["FAVA_FILTER_PRESET_AUTO_RECOVER"] = falsy_value
+        with pytest.raises(FilterPresetCorruptStorageError):
+            FilterPresetsModule(tmp_ledger_file)
+    finally:
+        if original_env is None:
+            os.environ.pop("FAVA_FILTER_PRESET_AUTO_RECOVER", None)
+        else:
+            os.environ["FAVA_FILTER_PRESET_AUTO_RECOVER"] = original_env
+
+
+@pytest.mark.parametrize("truthy_value", ["1", "true", "yes", "on", "anything", ""])
+def test_auto_recover_env_truthy_values(
+    tmp_ledger_file: Path, storage_path: Path, truthy_value: str
+) -> None:
+    """Any value not in the falsy set (including unset/empty) enables
+    auto-recovery – the module falls back to an empty list with a warning.
+    """
+    storage_path.write_bytes(b"not valid json")
+
+    original_env = os.environ.get("FAVA_FILTER_PRESET_AUTO_RECOVER")
+    try:
+        if truthy_value == "":
+            os.environ.pop("FAVA_FILTER_PRESET_AUTO_RECOVER", None)
+        else:
+            os.environ["FAVA_FILTER_PRESET_AUTO_RECOVER"] = truthy_value
+
+        module = FilterPresetsModule(tmp_ledger_file)
+        assert module.list_presets() == []
+        assert module.last_warning is not None
+    finally:
+        if original_env is None:
+            os.environ.pop("FAVA_FILTER_PRESET_AUTO_RECOVER", None)
+        else:
+            os.environ["FAVA_FILTER_PRESET_AUTO_RECOVER"] = original_env
+
+
+def test_auto_recover_disabled_still_quarantines(
+    tmp_ledger_file: Path, storage_path: Path
+) -> None:
+    """Even when auto-recovery is off the corrupt file is quarantined so
+    the admin can inspect it, and the error details contain the backup path.
+    """
+    garbage = b"totally broken { json"
+    storage_path.write_bytes(garbage)
+
+    original_env = os.environ.get("FAVA_FILTER_PRESET_AUTO_RECOVER")
+    try:
+        os.environ["FAVA_FILTER_PRESET_AUTO_RECOVER"] = "off"
+
+        with pytest.raises(FilterPresetCorruptStorageError) as exc_info:
+            FilterPresetsModule(tmp_ledger_file)
+
+        backup_path_str = exc_info.value.details["backup_path"]
+        assert backup_path_str
+        backup_path = Path(backup_path_str)
+        assert backup_path.exists()
+        assert backup_path.read_bytes() == garbage
+    finally:
+        if original_env is None:
+            os.environ.pop("FAVA_FILTER_PRESET_AUTO_RECOVER", None)
+        else:
+            os.environ["FAVA_FILTER_PRESET_AUTO_RECOVER"] = original_env
+
+
+# ---------------------------------------------------------------------------
+# Structured "corrupt-recovery" logging
+# ---------------------------------------------------------------------------
+
+
+def test_corrupt_recovery_emits_structured_log(
+    tmp_ledger_file: Path, storage_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Corruption recovery must emit a warning-level log with the
+    'corrupt-recovery' tag and structured fields for SRE alerting.
+    """
+    garbage = b'{"broken": true'
+    storage_path.write_bytes(garbage)
+
+    with caplog.at_level(logging.WARNING, logger="fava.core.filter_presets"):
+        module = FilterPresetsModule(tmp_ledger_file)
+
+    assert module.list_presets() == []
+
+    corrupt_records = [
+        r
+        for r in caplog.records
+        if "corrupt-recovery" in r.getMessage()
+        or r.__dict__.get("tag") == "corrupt-recovery"
+    ]
+    assert corrupt_records, "no corrupt-recovery log record was emitted"
+
+    rec = corrupt_records[0]
+    # The extra fields are merged into the LogRecord __dict__.
+    assert getattr(rec, "tag", None) == "corrupt-recovery"
+    assert getattr(rec, "storage_path", None) == str(storage_path)
+    assert getattr(rec, "backup_path", None) is not None
+    assert getattr(rec, "file_size", None) == len(garbage)
+
+
+def test_corrupt_recovery_log_when_auto_recover_disabled(
+    tmp_ledger_file: Path, storage_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Even when auto-recovery is disabled, the structured log must still
+    be emitted so SRE teams can track corruption frequency before the
+    503 is returned.
+    """
+    garbage = b"not json at all"
+    storage_path.write_bytes(garbage)
+
+    original_env = os.environ.get("FAVA_FILTER_PRESET_AUTO_RECOVER")
+    try:
+        os.environ["FAVA_FILTER_PRESET_AUTO_RECOVER"] = "0"
+
+        with caplog.at_level(logging.WARNING, logger="fava.core.filter_presets"):
+            with pytest.raises(FilterPresetCorruptStorageError):
+                FilterPresetsModule(tmp_ledger_file)
+
+        corrupt_records = [
+            r
+            for r in caplog.records
+            if getattr(r, "tag", None) == "corrupt-recovery"
+        ]
+        assert corrupt_records
+        rec = corrupt_records[0]
+        assert rec.storage_path == str(storage_path)  # type: ignore[attr-defined]
+        assert rec.file_size == len(garbage)  # type: ignore[attr-defined]
+        assert rec.backup_path  # type: ignore[attr-defined]
+    finally:
+        if original_env is None:
+            os.environ.pop("FAVA_FILTER_PRESET_AUTO_RECOVER", None)
+        else:
+            os.environ["FAVA_FILTER_PRESET_AUTO_RECOVER"] = original_env
+
+
+# ---------------------------------------------------------------------------
+# HTTP API: FAVA_FILTER_PRESET_AUTO_RECOVER=0 → 503
+# ---------------------------------------------------------------------------
+
+
+def test_json_api_corrupt_storage_returns_503_when_auto_recover_disabled(
+    app_in_tmp_dir,  # noqa: ANN001
+) -> None:
+    """When auto-recovery is disabled, the API must return 503 with a
+    structured error body (code=corrupt_storage) instead of auto-recovering.
+    """
+    client = app_in_tmp_dir.test_client()
+    ledger = app_in_tmp_dir.config["LEDGERS"]["edit-example"]
+    storage_path = ledger.filter_presets.storage_path
+
+    # Corrupt the storage.
+    storage_path.write_bytes(b"broken { json")
+
+    original_env = os.environ.get("FAVA_FILTER_PRESET_AUTO_RECOVER")
+    try:
+        os.environ["FAVA_FILTER_PRESET_AUTO_RECOVER"] = "0"
+
+        resp = client.get("/edit-example/api/filter_presets")
+        assert resp.status_code == HTTPStatus.SERVICE_UNAVAILABLE.value, resp.data
+        assert resp.json is not None
+        assert resp.json["code"] == "corrupt_storage"
+        assert "storage_path" in resp.json["details"]
+        assert "backup_path" in resp.json["details"]
+        assert resp.json["details"]["file_size"] > 0
+    finally:
+        if original_env is None:
+            os.environ.pop("FAVA_FILTER_PRESET_AUTO_RECOVER", None)
+        else:
+            os.environ["FAVA_FILTER_PRESET_AUTO_RECOVER"] = original_env
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -42,6 +43,8 @@ from fava.helpers import FavaAPIError
 
 if TYPE_CHECKING:
     from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 # --- Platform-specific file locking ------------------------------------------------
@@ -143,6 +146,37 @@ class FilterPresetConcurrentModificationError(FilterPresetError):
         super().__init__(
             "The filter preset was modified by another session. "
             "Please reload the preset list and try again.",
+            **details,
+        )
+
+
+class FilterPresetCorruptStorageError(FilterPresetError):
+    """The storage file is corrupt and auto-recovery is disabled.
+
+    Raised when ``FAVA_FILTER_PRESET_AUTO_RECOVER`` is set to a falsy
+    value (``0``, ``false``, ``no``, ``off``) and the on-disk JSON file
+    cannot be parsed.  The API layer maps this to HTTP 503 so the
+    frontend can surface a "service unavailable – contact admin" message.
+    """
+
+    code = "corrupt_storage"
+
+    def __init__(
+        self,
+        *,
+        storage_path: str,
+        backup_path: str | None = None,
+        file_size: int = 0,
+    ) -> None:
+        details: dict[str, Any] = {
+            "storage_path": storage_path,
+            "file_size": file_size,
+        }
+        if backup_path is not None:
+            details["backup_path"] = backup_path
+        super().__init__(
+            "The filter presets storage file is corrupt and "
+            "auto-recovery is disabled. Please contact the administrator.",
             **details,
         )
 
@@ -305,6 +339,20 @@ def _empty_payload() -> dict[str, Any]:
         "schema_version": FilterPresetsModule.SCHEMA_VERSION,
         "presets": [],
     }
+
+
+def _auto_recover_enabled() -> bool:
+    """Check whether automatic corruption recovery is enabled.
+
+    Controlled by the ``FAVA_FILTER_PRESET_AUTO_RECOVER`` environment
+    variable.  When set to ``0``, ``false``, ``no`` or ``off``
+    (case-insensitive) auto-recovery is **disabled** and a corrupt
+    storage file instead causes a :class:`FilterPresetCorruptStorageError`
+    which the API layer surfaces as HTTP 503.  Any other value (including
+    the variable being unset) keeps auto-recovery enabled (the default).
+    """
+    val = os.environ.get("FAVA_FILTER_PRESET_AUTO_RECOVER", "").strip().lower()
+    return val not in {"0", "false", "no", "off"}
 
 
 # --- Main module -------------------------------------------------------------------
@@ -507,7 +555,29 @@ class FilterPresetsModule:
         # Corruption-recovery path (runs AFTER we dropped the file lock so
         # we can safely move the file around and atomically replace it).
         # ------------------------------------------------------------------
+
+        # Always quarantine the corrupt file regardless of the recovery
+        # mode so that the administrator can inspect the original data.
         backup_path = self._quarantine_corrupt_file(corrupt_bytes)
+
+        logger.warning(
+            "corrupt-recovery: storage file is corrupt",
+            extra={
+                "tag": "corrupt-recovery",
+                "storage_path": str(self._storage_path),
+                "backup_path": str(backup_path),
+                "file_size": len(corrupt_bytes),
+            },
+        )
+
+        if not _auto_recover_enabled():
+            # Admin has explicitly disabled auto-recovery – return 503.
+            raise FilterPresetCorruptStorageError(
+                storage_path=str(self._storage_path),
+                backup_path=str(backup_path),
+                file_size=len(corrupt_bytes),
+            )
+
         warning = (
             "The filter presets storage file could not be "
             "parsed and has been backed up to "
