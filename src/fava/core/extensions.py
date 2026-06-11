@@ -126,6 +126,15 @@ class ExtensionModule(FavaModule):
         for ext in self._exts:  # pragma: no cover
             ext.after_insert_metadata(entry, key, value)
 
+    def after_delete_metadata(
+        self,
+        entry: Directive,
+        key: str,
+    ) -> None:
+        """Run all `after_delete_metadata` hooks."""
+        for ext in self._exts:  # pragma: no cover
+            ext.after_delete_metadata(entry, key)
+
     def after_write_source(self, path: str, source: str) -> None:
         """Run all `after_write_source` hooks."""
         for ext in self._exts:

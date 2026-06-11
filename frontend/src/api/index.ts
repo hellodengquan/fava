@@ -55,6 +55,7 @@ type GetEndpoint =
   | "extract"
   | "imports"
   | "income_statement"
+  | "journal"
   | "journal_page"
   | "trial_balance"
   | "ledger_data"
@@ -70,10 +71,12 @@ type PutEndpoint =
   | "add_document"
   | "add_entries"
   | "attach_document"
+  | "clear_review_status"
   | "format_source"
   | "move"
   | "source"
   | "source_slice"
+  | "update_review_status"
   | "upload_import_file";
 
 type ApiEndpoint = DeleteEndpoint | GetEndpoint | PutEndpoint;
@@ -267,6 +270,11 @@ export const get_income_statement = define_endpoint(
   tree_report_validator,
   filters_conversion_interval,
 );
+export const get_journal = define_endpoint(
+  "journal",
+  array(entryValidator),
+  filters,
+);
 export const get_journal_page = define_endpoint(
   "journal_page",
   object({ journal: string, total_pages: number }),
@@ -347,6 +355,20 @@ export const put_source_slice: Put<{
   sha256sum: string;
 }> = define_put_json("source_slice");
 export const put_upload_import_file = define_put_form("upload_import_file");
+
+type PutUpdateReviewStatus = {
+  entry_hash: string;
+  status: string;
+  notes?: string;
+};
+export const put_update_review_status: Put<PutUpdateReviewStatus> =
+  define_put_json("update_review_status");
+
+type PutClearReviewStatus = {
+  entry_hash: string;
+};
+export const put_clear_review_status: Put<PutClearReviewStatus> =
+  define_put_json("clear_review_status");
 
 /**
  * Move a file, either in an import directory or a document.

@@ -6,7 +6,9 @@ interface for asynchronous functionality.
 
 from __future__ import annotations
 
+import datetime
 import logging
+import re
 import shutil
 from abc import abstractmethod
 from dataclasses import dataclass
@@ -511,6 +513,38 @@ def put_attach_document(filename: str, entry_hash: str) -> str:
     """Attach a document to an entry."""
     g.ledger.file.insert_metadata(entry_hash, "document", filename)
     return f"Attached '{filename}' to entry."
+
+
+@api_endpoint
+def put_update_review_status(
+    entry_hash: str, status: str, notes: str | None = None
+) -> str:
+    """Update the review status of a document entry."""
+    valid_statuses = {"pending", "approved", "rejected"}
+    if status not in valid_statuses:
+        raise FavaAPIError(f"Invalid review status: {status}")
+
+    g.ledger.file.insert_metadata(entry_hash, "review_status", status)
+    g.ledger.file.insert_metadata(
+        entry_hash, "reviewed_at", datetime.datetime.now().isoformat()
+    )
+
+    if notes is not None and notes.strip():
+        g.ledger.file.insert_metadata(entry_hash, "review_notes", notes.strip())
+
+    return f"Review status updated to '{status}'."
+
+
+@api_endpoint
+def put_clear_review_status(entry_hash: str) -> str:
+    """Clear the review status of a document entry."""
+    for key in ["review_status", "reviewed_at", "review_notes", "reviewed_by"]:
+        try:
+            g.ledger.file.delete_metadata(entry_hash, key)
+        except Exception:
+            pass
+
+    return "Review status cleared."
 
 
 @api_endpoint

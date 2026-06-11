@@ -194,6 +194,30 @@ class FileModule(FavaModule):
             self.ledger.watcher.notify(path)
             self.ledger.extensions.after_insert_metadata(entry, key, value)
 
+    def delete_metadata(
+        self,
+        entry_hash: str,
+        key: str,
+    ) -> bool:
+        """Delete metadata from an entry.
+
+        Args:
+            entry_hash: Hash of an entry.
+            key: The metadata key to delete.
+
+        Returns:
+            True if the metadata was found and deleted, False otherwise.
+        """
+        with self._lock:
+            self.ledger.changed()
+            entry = self.ledger.get_entry(entry_hash)
+            path, lineno = _get_position(entry)
+            result = delete_metadata_from_file(path, lineno, key)
+            if result:
+                self.ledger.watcher.notify(path)
+                self.ledger.extensions.after_delete_metadata(entry, key)
+            return result
+
     def save_entry_slice(
         self,
         entry_hash: str,
@@ -322,6 +346,38 @@ def insert_metadata_in_file(
     newline = _file_newline_character(path)
     with path.open("w", encoding="utf-8", newline=newline) as file:
         file.write("".join(contents))
+
+
+def delete_metadata_from_file(
+    path: Path,
+    lineno: int,
+    key: str,
+) -> bool:
+    """Delete the specified metadata from the file.
+
+    Args:
+        path: The path to the file.
+        lineno: The line number of the entry (1-based).
+        key: The metadata key to delete.
+
+    Returns:
+        True if the metadata was found and deleted, False otherwise.
+    """
+    with path.open(encoding="utf-8") as file:
+        contents = file.readlines()
+
+    entry_lines = find_entry_lines(contents, lineno - 1)
+    pattern = re.compile(rf'^\s*{re.escape(key)}\s*:\s*".*"\s*$')
+
+    for i, line in enumerate(entry_lines):
+        if pattern.match(line):
+            del contents[lineno - 1 + i]
+            newline = _file_newline_character(path)
+            with path.open("w", encoding="utf-8", newline=newline) as file:
+                file.write("".join(contents))
+            return True
+
+    return False
 
 
 def find_entry_lines(lines: Sequence[str], lineno: int) -> Sequence[str]:

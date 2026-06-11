@@ -76,6 +76,16 @@
             {{ _account_link(entry.account) }}
             <a class='filename' data-remote target=_blank href='{{ url_for('document', filename=entry.filename) }}'>{{ entry.filename|basename }}</a>
             {{ _render_tags_links(entry) }}
+            {% if entry.meta.review_status %}
+              {% set review_status = entry.meta.review_status %}
+              {% set status_config = {
+                'pending': {'label': '待复核', 'color': '#fbbf24'},
+                'approved': {'label': '已通过', 'color': '#10b981'},
+                'rejected': {'label': '已拒绝', 'color': '#ef4444'}
+              } %}
+              {% set config = status_config.get(review_status, {'label': review_status, 'color': '#6b7280'}) %}
+              <span class='review-status-badge' style='background-color: {{ config.color }}' title='{{ config.label }}'>{{ config.label }}</span>
+            {% endif %}
         {% elif type == 'balance' %}
             {{ _account_link(entry.account) }}
             {% if entry.diff_amount %}

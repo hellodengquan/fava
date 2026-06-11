@@ -6,7 +6,9 @@
   import { hash } from "../stores/url.ts";
   import EntryContextBalances from "./EntryContextBalances.svelte";
   import EntryContextLocation from "./EntryContextLocation.svelte";
+  import EntryContextReview from "./EntryContextReview.svelte";
   import ModalBase from "./ModalBase.svelte";
+  import type { Document } from "../entries/index.ts";
 
   let shown = $derived($hash.startsWith("context"));
   let entry_hash = $derived(shown ? $hash.slice(8) : "");
@@ -21,6 +23,9 @@
         <EntryContextLocation {entry} />
         {#if balances_before}
           <EntryContextBalances {balances_before} {balances_after} />
+        {/if}
+        {#if entry.t === "Document"}
+          <EntryContextReview entry={entry as Document} />
         {/if}
         {#if entry.meta.lineno !== "0" && !entry.meta.filename.startsWith("<")}
           {#await Promise.all( [get_source_slice( { entry_hash }, ), import("../codemirror/beancount.ts")], )}
