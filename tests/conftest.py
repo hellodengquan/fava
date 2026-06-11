@@ -226,6 +226,7 @@ def app(test_data_dir: Path) -> Flask:
                 "errors.beancount",
                 "off-by-one.beancount",
                 "invalid-unicode.beancount",
+                "case-consistency-test.beancount",
             ]
         ],
         load=True,
@@ -297,6 +298,7 @@ LedgerSlug: TypeAlias = Literal[
     "import",
     "off-by-one",
     "invalid-unicode",
+    "case-consistency-test-ledger",
 ]
 GetFavaLedger: TypeAlias = Callable[[LedgerSlug], FavaLedger]
 
