@@ -48,8 +48,43 @@ def slice_entry_dates(
     return entries[index_begin:index_end]
 
 
+def is_system_entry(entry: Directive) -> bool:
+    """Check if an entry is a system-generated entry.
+
+    System-generated entries include opening balance summarizations,
+    transfer entries from clamp operations, and conversion entries
+    added by Beancount's clamp_opt function. These entries are not
+    actual user transactions and should be excluded from transaction
+    statistics.
+
+    Identification rule:
+    - Transaction entries with meta.filename starting with '<' are
+      considered system-generated. The '<' prefix indicates the
+      entry was created programmatically rather than from a user's
+      ledger file.
+
+    Args:
+        entry: The directive to check.
+
+    Returns:
+        True if the entry is system-generated, False otherwise.
+        Only Transaction entries can be system-generated; all other
+        entry types (Open, Close, Note, Document, etc.) return False.
+    """
+    from fava.beans.abc import Transaction
+
+    if not isinstance(entry, Transaction):
+        return False
+    filename = entry.meta.get("filename", "")
+    return filename.startswith("<")
+
+
 def is_system_generated_transaction(entry: Directive) -> bool:
     """Check if an entry is a system-generated transaction.
+
+    .. deprecated::
+        Use :func:`is_system_entry` instead. This function is kept
+        for backward compatibility.
 
     System-generated transactions include opening balance summarizations,
     transfer entries from clamp operations, and conversion entries.
@@ -62,12 +97,7 @@ def is_system_generated_transaction(entry: Directive) -> bool:
     Returns:
         True if the entry is a system-generated transaction, False otherwise.
     """
-    from fava.beans.abc import Transaction
-
-    if not isinstance(entry, Transaction):
-        return False
-    filename = entry.meta.get("filename", "")
-    return filename.startswith("<")
+    return is_system_entry(entry)
 
 
 def is_actual_transaction(entry: Directive) -> bool:
@@ -86,7 +116,7 @@ def is_actual_transaction(entry: Directive) -> bool:
 
     if not isinstance(entry, Transaction):
         return False
-    return not is_system_generated_transaction(entry)
+    return not is_system_entry(entry)
 
 
 def filter_actual_transactions(entries: Sequence[Directive]) -> list[Transaction]:
@@ -107,7 +137,7 @@ def filter_actual_transactions(entries: Sequence[Directive]) -> list[Transaction
 
 
 def filter_system_generated(entries: Sequence[Directive]) -> list[Directive]:
-    """Filter a list of entries to exclude system-generated transactions.
+    """Filter a list of entries to exclude system-generated entries.
 
     This excludes system-generated transactions like opening balance
     summarizations, but preserves all other entry types (Open, Close,
@@ -117,6 +147,6 @@ def filter_system_generated(entries: Sequence[Directive]) -> list[Directive]:
         entries: A list of directives.
 
     Returns:
-        A list of directives with system-generated transactions removed.
+        A list of directives with system-generated entries removed.
     """
-    return [e for e in entries if not is_system_generated_transaction(e)]
+    return [e for e in entries if not is_system_entry(e)]

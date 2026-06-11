@@ -25,6 +25,7 @@ from fava.beans.funcs import hash_entry
 from fava.beans.helpers import filter_actual_transactions
 from fava.beans.helpers import filter_system_generated
 from fava.beans.helpers import is_actual_transaction
+from fava.beans.helpers import is_system_entry
 from fava.beans.helpers import slice_entry_dates
 from fava.beans.load import load_uncached
 from fava.beans.prices import FavaPriceMap

@@ -24,6 +24,7 @@ from fava.beans.abc import Transaction
 from fava.beans.account import account_tester
 from fava.beans.flags import FLAG_UNREALIZED
 from fava.beans.helpers import is_actual_transaction
+from fava.beans.helpers import is_system_entry
 from fava.beans.helpers import slice_entry_dates
 from fava.core.conversion import conversion_from_str
 from fava.core.inventory import CounterInventory
