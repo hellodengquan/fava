@@ -14,6 +14,7 @@ from beancount.core.position import Position
 from fava.core.conversion import UNITS
 
 if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Callable
     from typing import Any
     from typing import Literal
     from typing import TypeAlias
@@ -70,8 +71,16 @@ class BaseColumn:
     @staticmethod
     def serialise(
         val: QueryRowValue,
+        canonicalizer: Callable[[str], str] | None = None,
     ) -> SerialisedQueryRowValue:
-        """Serialiseable version of the column value."""
+        """Serialiseable version of the column value.
+
+        Args:
+            val: The value to serialise.
+            canonicalizer: Optional function to canonicalize commodity names,
+                ensuring consistent handling of aliases across holdings,
+                charts, and exports.
+        """
         return val  # type: ignore[no-any-return]
 
 
@@ -152,9 +161,21 @@ class InventoryColumn(BaseColumn):
     @staticmethod
     def serialise(
         val: Inventory | None,
+        canonicalizer: Callable[[str], str] | None = None,
     ) -> SimpleCounterInventory | None:
-        """Serialise an inventory."""
-        return UNITS.apply_inventory(val) if val is not None else None
+        """Serialise an inventory.
+
+        Args:
+            val: The inventory to serialise.
+            canonicalizer: Optional function to canonicalize commodity names.
+                When provided, ensures that aliases of the same commodity are
+                aggregated together, providing consistent totals across
+                holdings, charts, and exports.
+        """
+        if val is None:
+            return None
+        result = UNITS.apply_inventory(val, canonicalizer=canonicalizer)
+        return result
 
 
 COLUMNS = {

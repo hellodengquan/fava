@@ -103,6 +103,16 @@ class DateAndBalanceWithBudget:
 class ChartModule(FavaModule):
     """Return data for the various charts in Fava."""
 
+    @property
+    def _canonicalizer(self):
+        """Get the canonicalizer function for commodity names.
+
+        This provides unified commodity alias canonicalization across all
+        chart types, ensuring consistent aggregation between holdings,
+        charts, and export reports.
+        """
+        return self.ledger.commodities.canonical
+
     def hierarchy(
         self,
         filtered: FilteredLedger,
@@ -112,7 +122,10 @@ class ChartModule(FavaModule):
         """Render an account tree."""
         tree = filtered.root_tree
         return tree.get(account_name).serialise(
-            conversion, self.ledger.prices, filtered.end_date
+            conversion,
+            self.ledger.prices,
+            filtered.end_date,
+            canonicalizer=self._canonicalizer,
         )
 
     @listify
@@ -139,6 +152,7 @@ class ChartModule(FavaModule):
         """
         conv = conversion_from_str(conversion)
         prices = self.ledger.prices
+        canonicalizer = self._canonicalizer
 
         # limit the bar charts to 100 intervals
         intervals = filtered.interval_ranges(interval)[-100:]
@@ -162,12 +176,14 @@ class ChartModule(FavaModule):
                 inventory,
                 prices,
                 date_range.end_inclusive,
+                canonicalizer=canonicalizer,
             )
             account_balances = {
                 account: conv.apply(
                     acct_value,
                     prices,
                     date_range.end_inclusive,
+                    canonicalizer=canonicalizer,
                 )
                 for account, acct_value in account_inventories.items()
             }
@@ -213,6 +229,7 @@ class ChartModule(FavaModule):
             account at that date.
         """
         conv = conversion_from_str(conversion)
+        canonicalizer = self._canonicalizer
 
         def _balances() -> Iterable[tuple[date, CounterInventory]]:
             last_date = None
@@ -238,7 +255,9 @@ class ChartModule(FavaModule):
         prices = self.ledger.prices
 
         for d, running_bal in _balances():
-            balance = conv.apply(running_bal, prices, d)
+            balance = conv.apply(
+                running_bal, prices, d, canonicalizer=canonicalizer
+            )
             currencies = set(balance.keys())
             if last_currencies:
                 for currency in last_currencies - currencies:
@@ -266,6 +285,7 @@ class ChartModule(FavaModule):
             operating currencies.
         """
         conv = conversion_from_str(conversion)
+        canonicalizer = self._canonicalizer
         transactions = (
             entry
             for entry in filtered.entries
@@ -296,5 +316,6 @@ class ChartModule(FavaModule):
                     inventory,
                     prices,
                     date_range.end_inclusive,
+                    canonicalizer=canonicalizer,
                 ),
             )

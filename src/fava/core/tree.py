@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from operator import attrgetter
+from typing import Callable
 from typing import TYPE_CHECKING
 
 from fava.beans.abc import Open
@@ -65,6 +66,7 @@ class TreeNode:
         end: datetime.date | None,
         *,
         with_cost: bool = False,
+        canonicalizer: Callable[[str], str] | None = None,
     ) -> SerialisedTreeNode:
         """Serialise the account.
 
@@ -73,38 +75,70 @@ class TreeNode:
             prices: The price map to use.
             end: A date to use for cost conversions.
             with_cost: Additionally convert to cost.
+            canonicalizer: Optional function to canonicalize commodity names.
+                When provided, ensures consistent commodity aggregation across
+                aliases, aligning holdings, charts, and exports.
         """
         children = [
-            child.serialise(conversion, prices, end, with_cost=with_cost)
+            child.serialise(
+                conversion,
+                prices,
+                end,
+                with_cost=with_cost,
+                canonicalizer=canonicalizer,
+            )
             for child in sorted(self.children, key=attrgetter("name"))
         ]
         return (
             SerialisedTreeNode(
                 self.name,
-                conversion.apply(self.balance, prices, end),
-                conversion.apply(self.balance_children, prices, end),
+                conversion.apply(
+                    self.balance, prices, end, canonicalizer=canonicalizer
+                ),
+                conversion.apply(
+                    self.balance_children,
+                    prices,
+                    end,
+                    canonicalizer=canonicalizer,
+                ),
                 children,
                 self.has_txns,
-                AT_COST.apply(self.balance),
-                AT_COST.apply(self.balance_children),
+                AT_COST.apply(
+                    self.balance, canonicalizer=canonicalizer
+                ),
+                AT_COST.apply(
+                    self.balance_children, canonicalizer=canonicalizer
+                ),
             )
             if with_cost
             else SerialisedTreeNode(
                 self.name,
-                conversion.apply(self.balance, prices, end),
-                conversion.apply(self.balance_children, prices, end),
+                conversion.apply(
+                    self.balance, prices, end, canonicalizer=canonicalizer
+                ),
+                conversion.apply(
+                    self.balance_children,
+                    prices,
+                    end,
+                    canonicalizer=canonicalizer,
+                ),
                 children,
                 self.has_txns,
             )
         )
 
     def serialise_with_context(self) -> SerialisedTreeNode:
-        """Serialise, getting all parameters from Flask context."""
+        """Serialise, getting all parameters from Flask context.
+
+        Uses unified commodity alias canonicalization to ensure consistent
+        aggregation across holdings, charts, and exports.
+        """
         return self.serialise(
             g.conv,
             g.ledger.prices,
             g.filtered.end_date,
             with_cost=g.conv == AT_VALUE,
+            canonicalizer=g.ledger.commodities.canonical,
         )
 
 

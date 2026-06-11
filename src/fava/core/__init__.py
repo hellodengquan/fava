@@ -591,6 +591,7 @@ class FavaLedger:
         relevant_account = account_tester(
             account_name, with_children=with_children
         )
+        canonicalizer = self.commodities.canonical
 
         prices = self.prices
         balance = CounterInventory()
@@ -611,8 +612,12 @@ class FavaLedger:
                 yield (
                     index,
                     entry,
-                    conv.apply(change, prices, entry.date),
-                    conv.apply(balance, prices, entry.date),
+                    conv.apply(
+                        change, prices, entry.date, canonicalizer=canonicalizer
+                    ),
+                    conv.apply(
+                        balance, prices, entry.date, canonicalizer=canonicalizer
+                    ),
                 )
 
     def _get_entry(self, entry_hash: str) -> Directive:
@@ -682,14 +687,55 @@ class FavaLedger:
         after = {acc: visualise(inv) for acc, inv in balances.items()}
         return entry, before, after
 
+    def canonicalize_commodity(self, commodity: str) -> str:
+        """Canonicalize a commodity name using unified alias rules.
+
+        This is the single entry point for commodity alias canonicalization,
+        ensuring consistent handling across holdings, charts, and exports.
+
+        Args:
+            commodity: The commodity name or alias to canonicalize.
+
+        Returns:
+            The canonical commodity name.
+        """
+        return self.commodities.canonical(commodity)
+
+    def canonicalize_commodity_pair(
+        self, base: str, quote: str
+    ) -> tuple[str, str]:
+        """Canonicalize a commodity pair using unified alias rules.
+
+        Args:
+            base: The base commodity.
+            quote: The quote commodity.
+
+        Returns:
+            A tuple of (canonical_base, canonical_quote).
+        """
+        return (self.canonicalize_commodity(base), self.canonicalize_commodity(quote))
+
     def commodity_pairs(self) -> Sequence[tuple[str, str]]:
         """List pairs of commodities.
 
         Returns:
             A list of pairs of commodities. Pairs of operating currencies will
             be given in both directions not just in the one found in file.
+            Commodity names are canonicalized using alias rules.
         """
-        return self.prices.commodity_pairs(self.options["operating_currency"])
+        raw_pairs = self.prices.commodity_pairs(
+            self.options["operating_currency"]
+        )
+        canonical_pairs = []
+        seen = set()
+        for base, quote in raw_pairs:
+            canonical_base = self.canonicalize_commodity(base)
+            canonical_quote = self.canonicalize_commodity(quote)
+            pair = (canonical_base, canonical_quote)
+            if pair not in seen:
+                seen.add(pair)
+                canonical_pairs.append(pair)
+        return canonical_pairs
 
     def statement_path(self, entry_hash: str, metadata_key: str) -> str:
         """Get the path for a statement found in the specified entry.

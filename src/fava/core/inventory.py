@@ -77,6 +77,27 @@ class SimpleCounterInventory(dict[str, Decimal]):
             counter.add(amount.currency, amount.number)
         return counter
 
+    def canonicalized(
+        self, canonicalizer: Callable[[str], str]
+    ) -> SimpleCounterInventory:
+        """Return a new inventory with commodity names canonicalized.
+
+        This ensures that aliases of the same commodity are aggregated together,
+        providing consistent totals across holdings, charts, and exports.
+
+        Args:
+            canonicalizer: A function that maps commodity names to their
+                canonical form.
+
+        Returns:
+            A new SimpleCounterInventory with canonicalized commodity keys.
+        """
+        result = SimpleCounterInventory()
+        for currency, number in self.items():
+            canonical = canonicalizer(currency)
+            result.add(canonical, number)
+        return result
+
 
 class CounterInventory(dict[InventoryKey, Decimal]):
     """A lightweight inventory.
@@ -169,3 +190,38 @@ class CounterInventory(dict[InventoryKey, Decimal]):
                     self.pop(key, None)
                 else:
                     self[key] = new_num
+
+    def canonicalized(
+        self, canonicalizer: Callable[[str], str]
+    ) -> CounterInventory:
+        """Return a new inventory with commodity names canonicalized.
+
+        This ensures that aliases of the same commodity are aggregated together,
+        providing consistent totals across holdings, charts, and exports.
+
+        Both the position currency and the cost currency are canonicalized.
+
+        Args:
+            canonicalizer: A function that maps commodity names to their
+                canonical form.
+
+        Returns:
+            A new CounterInventory with canonicalized commodity keys.
+        """
+        result = CounterInventory()
+        for (currency, cost), number in self.items():
+            canonical_currency = canonicalizer(currency)
+            canonical_cost = None
+            if cost is not None:
+                canonical_cost_currency = canonicalizer(cost.currency)
+                if canonical_cost_currency != cost.currency:
+                    canonical_cost = _Cost(
+                        cost.number,
+                        canonical_cost_currency,
+                        cost.date,
+                        cost.label,
+                    )
+                else:
+                    canonical_cost = cost
+            result.add((canonical_currency, canonical_cost), number)
+        return result

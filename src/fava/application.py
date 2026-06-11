@@ -394,6 +394,7 @@ def _setup_routes(fava_app: Flask) -> None:  # noqa: PLR0915
             g.filtered.entries_with_all_prices,
             request.args.get("query_string", ""),
             result_format,
+            canonicalizer=g.ledger.commodities.canonical,
         )
 
         filename = f"{secure_filename(name.strip())}.{result_format}"

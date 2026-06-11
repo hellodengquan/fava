@@ -7,7 +7,10 @@ import shlex
 import textwrap
 from typing import TYPE_CHECKING
 
+from beancount.core.amount import Amount
 from beancount.core.display_context import DisplayContext
+from beancount.core.inventory import Inventory
+from beancount.core.position import Position
 from beanquery import CompilationError
 from beanquery import connect
 from beanquery import Cursor
@@ -26,6 +29,7 @@ from fava.util.excel import to_csv
 from fava.util.excel import to_excel
 
 if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Callable
     from collections.abc import Sequence
     from typing import TypeVar
 
@@ -165,13 +169,20 @@ class QueryShell(FavaModule):
         self.shell = FavaBQLShell(ledger)
 
     def execute_query_serialised(
-        self, entries: Sequence[Directive], query: str
+        self,
+        entries: Sequence[Directive],
+        query: str,
+        *,
+        canonicalizer: Callable[[str], str] | None = None,
     ) -> QueryResultTable | QueryResultText:
         """Run a query and returns its serialised result.
 
         Arguments:
             entries: The entries to run the query on.
             query: A query string.
+            canonicalizer: Optional function to canonicalize commodity names.
+                When provided, ensures consistent handling of aliases across
+                holdings, charts, and exports.
 
         Returns:
             Either a table or a text result (depending on the query).
@@ -181,7 +192,9 @@ class QueryShell(FavaModule):
         """
         res = self.shell.run(entries, query)
         return (
-            QueryResultText(res) if isinstance(res, str) else _serialise(res)
+            QueryResultText(res)
+            if isinstance(res, str)
+            else _serialise(res, canonicalizer=canonicalizer)
         )
 
     def query_to_file(
@@ -189,6 +202,8 @@ class QueryShell(FavaModule):
         entries: Sequence[Directive],
         query_string: str,
         result_format: str,
+        *,
+        canonicalizer: Callable[[str], str] | None = None,
     ) -> tuple[str, io.BytesIO]:
         """Get query result as file.
 
@@ -196,6 +211,9 @@ class QueryShell(FavaModule):
             entries: The entries to run the query on.
             query_string: A string, the query to run.
             result_format: The file format to save to.
+            canonicalizer: Optional function to canonicalize commodity names.
+                When provided, ensures consistent handling of aliases across
+                holdings, charts, and exports.
 
         Returns:
             A tuple (name, data), where name is either 'query_result' or the
@@ -229,6 +247,15 @@ class QueryShell(FavaModule):
         dformat = dcontext.build()
         types, rows = numberify_results(rtypes, rrows, dformat)
 
+        if canonicalizer is not None:
+            rows = [
+                tuple(
+                    self._canonicalize_value(val, canonicalizer)
+                    for val in row
+                )
+                for row in rows
+            ]
+
         if result_format == "csv":
             data = to_csv(types, rows)
         else:
@@ -238,16 +265,62 @@ class QueryShell(FavaModule):
             data = to_excel(types, rows, result_format, query_string)
         return name, data
 
+    @staticmethod
+    def _canonicalize_value(
+        val: Any, canonicalizer: Callable[[str], str]
+    ) -> Any:
+        """Canonicalize commodity names in a query result value.
 
-def _serialise(cursor: Cursor) -> QueryResultTable:
-    """Serialise the query result."""
+        Args:
+            val: The value to canonicalize.
+            canonicalizer: Function to canonicalize commodity names.
+
+        Returns:
+            The value with commodity names canonicalized if applicable.
+        """
+        if isinstance(val, str):
+            return canonicalizer(val)
+        if isinstance(val, Amount):
+            return Amount(val.number, canonicalizer(val.currency))
+        if isinstance(val, Inventory):
+            result = Inventory()
+            for pos in val:
+                canonical_currency = canonicalizer(pos.units.currency)
+                if canonical_currency != pos.units.currency:
+                    new_pos = Position(
+                        Amount(pos.units.number, canonical_currency),
+                        pos.cost,
+                    )
+                    result.add_position(new_pos)
+                else:
+                    result.add_position(pos)
+            return result
+        return val
+
+
+def _serialise(
+    cursor: Cursor,
+    *,
+    canonicalizer: Callable[[str], str] | None = None,
+) -> QueryResultTable:
+    """Serialise the query result.
+
+    Args:
+        cursor: The query cursor to serialise.
+        canonicalizer: Optional function to canonicalize commodity names.
+            When provided, ensures consistent handling of aliases across
+            holdings, charts, and exports.
+    """
     dtypes = [
         COLUMNS.get(c.datatype, ObjectColumn)(c.name)
         for c in cursor.description
     ]
     mappers = [d.serialise for d in dtypes]
     mapped_rows = [
-        tuple(mapper(row[i]) for i, mapper in enumerate(mappers))
+        tuple(
+            mapper(row[i], canonicalizer=canonicalizer)
+            for i, mapper in enumerate(mappers)
+        )
         for row in cursor
     ]
     return QueryResultTable(dtypes, mapped_rows)  # ty:ignore[invalid-argument-type]
