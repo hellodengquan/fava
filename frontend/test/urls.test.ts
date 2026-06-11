@@ -23,7 +23,10 @@ test("get URL", () => {
 
 test("get path for account", () => {
   const $urlForAccount = store_get(urlForAccount);
-  equal($urlForAccount("Assets"), "/long-example/account/Assets/");
+  equal(
+    $urlForAccount("Assets"),
+    "/long-example/account/Assets/?conversion=at_cost&interval=month",
+  );
 });
 
 test("extract relative path from URL", () => {

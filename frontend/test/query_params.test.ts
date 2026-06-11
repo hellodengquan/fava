@@ -7,6 +7,8 @@ import {
   DEFAULT_CONVERSION,
   SYNCED_QUERY_PARAM_NAMES,
   QUERY_PARAM_SCHEMA,
+  CONVERSION_ALIASES,
+  EXPLICIT_PARAM_NAME,
   type QueryParams,
   type Filters,
   type FiltersConversionInterval,
@@ -20,11 +22,15 @@ import {
   normalizeInterval,
   normalizeCharts,
   normalizeQueryString,
+  normalizeExplicit,
   setQueryParamOnURL,
   getFilters,
   getFiltersConversionInterval,
   getFiltersFromURL,
   getFiltersConversionIntervalFromURL,
+  isExplicitURL,
+  markExplicit,
+  unmarkExplicit,
 } from "../src/lib/query_params.ts";
 
 export const ROUNDTRIP_TEST_CASES: Array<{
@@ -235,8 +241,9 @@ test("synced params match schema", () => {
 
 test("schema defaults match DEFAULT_QUERY_PARAMS", () => {
   for (const [key, schema] of Object.entries(QUERY_PARAM_SCHEMA)) {
+    const attrName = key === "_e" ? "explicit" : key;
     equal(
-      DEFAULT_QUERY_PARAMS[key as keyof typeof DEFAULT_QUERY_PARAMS],
+      DEFAULT_QUERY_PARAMS[attrName as keyof typeof DEFAULT_QUERY_PARAMS],
       schema.default,
       `default mismatch for ${key}`,
     );
@@ -252,6 +259,7 @@ test("schema normalizeFn produce same results as standalone functions", () => {
     interval: "YEAR",
     charts: "false",
     query_string: "SELECT *",
+    _e: "1",
   };
 
   const standalone = {
@@ -262,11 +270,13 @@ test("schema normalizeFn produce same results as standalone functions", () => {
     interval: normalizeInterval(testInputs.interval),
     charts: normalizeCharts(testInputs.charts),
     query_string: normalizeQueryString(testInputs.query_string),
+    explicit: normalizeExplicit(testInputs._e),
   };
 
   for (const [key, schema] of Object.entries(QUERY_PARAM_SCHEMA)) {
     const fromSchema = schema.normalizeFn(testInputs[key]);
-    const fromStandalone = standalone[key as keyof typeof standalone];
+    const attrName = key === "_e" ? "explicit" : key;
+    const fromStandalone = standalone[attrName as keyof typeof standalone];
     equal(
       fromSchema,
       fromStandalone,
@@ -674,4 +684,230 @@ test("plus sign in filter round-trip (should be literal, not space)", () => {
     original,
     "plus sign should survive URL round-trip",
   );
+});
+
+test("conversion alias mapping (Fava 0.x compatibility)", () => {
+  equal(CONVERSION_ALIASES["unit"], "units");
+  equal(CONVERSION_ALIASES["units"], "units");
+  equal(CONVERSION_ALIASES["cost"], "at_cost");
+  equal(CONVERSION_ALIASES["value"], "at_value");
+
+  equal(normalizeConversion("unit"), "units");
+  equal(normalizeConversion("UNIT"), "units");
+  equal(normalizeConversion("  unit  "), "units");
+  equal(normalizeConversion("cost"), "at_cost");
+  equal(normalizeConversion("COST"), "at_cost");
+  equal(normalizeConversion("value"), "at_value");
+  equal(normalizeConversion("VALUE"), "at_value");
+  equal(normalizeConversion("units"), "units");
+  equal(normalizeConversion("at_cost"), "at_cost");
+  equal(normalizeConversion("at_value"), "at_value");
+});
+
+test("normalizeExplicit flag values", () => {
+  equal(normalizeExplicit(null), false);
+  equal(normalizeExplicit(undefined), false);
+  equal(normalizeExplicit(""), false);
+  equal(normalizeExplicit("0"), false);
+  equal(normalizeExplicit("false"), false);
+  equal(normalizeExplicit("False"), false);
+  equal(normalizeExplicit("1"), true);
+  equal(normalizeExplicit("true"), true);
+  equal(normalizeExplicit("True"), true);
+});
+
+test("parseQueryParams with explicit flag", () => {
+  const paramsWithExplicit = parseQueryParams({ _e: "1" });
+  equal(paramsWithExplicit.explicit, true);
+
+  const paramsWithExplicitTrue = parseQueryParams({ _e: "true" });
+  equal(paramsWithExplicitTrue.explicit, true);
+
+  const paramsWithoutExplicit = parseQueryParams({});
+  equal(paramsWithoutExplicit.explicit, false);
+});
+
+test("serialize default params without explicit flag", () => {
+  const serialized = serializeQueryParams(DEFAULT_QUERY_PARAMS, {
+    includeCharts: true,
+  });
+  const serializedObj = Object.fromEntries(serialized.entries());
+  ok("conversion" in serializedObj);
+  ok("interval" in serializedObj);
+  ok(!("_e" in serializedObj));
+});
+
+test("serialize default params with explicit flag", () => {
+  const params = { ...DEFAULT_QUERY_PARAMS, explicit: true };
+  const serialized = serializeQueryParams(params, {
+    includeCharts: true,
+  });
+  const serializedObj = Object.fromEntries(serialized.entries());
+  equal(serializedObj["_e"], "1");
+});
+
+test("serialize with explicit option", () => {
+  const params = { ...DEFAULT_QUERY_PARAMS, time: "2024" };
+  const serialized = serializeQueryParams(params, {
+    includeCharts: true,
+    explicit: true,
+  });
+  const serializedObj = Object.fromEntries(serialized.entries());
+  equal(serializedObj["_e"], "1");
+  equal(serializedObj["time"], "2024");
+});
+
+test("all defaults round-trip with explicit flag", () => {
+  const original: QueryParams = {
+    ...DEFAULT_QUERY_PARAMS,
+    explicit: true,
+  };
+
+  const serialized = serializeQueryParams(original, {
+    includeCharts: true,
+  });
+  const serializedObj = Object.fromEntries(serialized.entries());
+  equal(serializedObj["_e"], "1");
+
+  const reparsed = parseQueryParams(serialized);
+  equal(reparsed.explicit, true);
+  equal(reparsed.time, "");
+  equal(reparsed.account, "");
+  equal(reparsed.filter, "");
+  equal(reparsed.conversion, "at_cost");
+  equal(reparsed.interval, "month");
+  equal(reparsed.charts, true);
+});
+
+test("distinguish default vs explicit default", () => {
+  const implicitDefault = parseQueryParams({});
+  equal(implicitDefault.explicit, false);
+
+  const explicitDefault = parseQueryParams({ _e: "1" });
+  equal(explicitDefault.explicit, true);
+
+  equal(implicitDefault.conversion, explicitDefault.conversion);
+  equal(implicitDefault.interval, explicitDefault.interval);
+  ok(implicitDefault.explicit !== explicitDefault.explicit);
+});
+
+test("setQueryParamOnURL for explicit flag", () => {
+  const url = new URL("http://localhost/");
+
+  setQueryParamOnURL(url, "_e", true);
+  equal(url.searchParams.get("_e"), "1");
+
+  setQueryParamOnURL(url, "_e", false);
+  equal(url.searchParams.get("_e"), null);
+
+  setQueryParamOnURL(url, "_e", "1");
+  equal(url.searchParams.get("_e"), "1");
+
+  setQueryParamOnURL(url, "_e", "false");
+  equal(url.searchParams.get("_e"), null);
+});
+
+test("isExplicitURL helper", () => {
+  const urlWithExplicit = new URL("http://localhost/?_e=1");
+  equal(isExplicitURL(urlWithExplicit), true);
+
+  const urlWithExplicitTrue = new URL("http://localhost/?_e=true");
+  equal(isExplicitURL(urlWithExplicitTrue), true);
+
+  const urlWithoutExplicit = new URL("http://localhost/");
+  equal(isExplicitURL(urlWithoutExplicit), false);
+
+  const urlWithOtherParams = new URL("http://localhost/?time=2024");
+  equal(isExplicitURL(urlWithOtherParams), false);
+});
+
+test("markExplicit and unmarkExplicit helpers", () => {
+  const url = new URL("http://localhost/");
+
+  markExplicit(url);
+  equal(url.searchParams.get("_e"), "1");
+
+  unmarkExplicit(url);
+  equal(url.searchParams.get("_e"), null);
+});
+
+test("legacy URL conversion alias round-trip", () => {
+  const legacyParams = parseQueryParams({ conversion: "unit" });
+  equal(legacyParams.conversion, "units");
+
+  const serialized = serializeQueryParams(legacyParams, {
+    includeCharts: true,
+  });
+  const serializedObj = Object.fromEntries(serialized.entries());
+  equal(serializedObj["conversion"], "units");
+
+  const reparsed = parseQueryParams(serialized);
+  equal(reparsed.conversion, "units");
+});
+
+test("legacy URL conversion cost alias", () => {
+  const legacyParams = parseQueryParams({ conversion: "cost" });
+  equal(legacyParams.conversion, "at_cost");
+
+  const serialized = serializeQueryParams(legacyParams, {
+    includeCharts: true,
+  });
+  const serializedObj = Object.fromEntries(serialized.entries());
+  equal(serializedObj["conversion"], "at_cost");
+});
+
+test("legacy URL conversion value alias", () => {
+  const legacyParams = parseQueryParams({ conversion: "value" });
+  equal(legacyParams.conversion, "at_value");
+
+  const serialized = serializeQueryParams(legacyParams, {
+    includeCharts: true,
+  });
+  const serializedObj = Object.fromEntries(serialized.entries());
+  equal(serializedObj["conversion"], "at_value");
+});
+
+test("round-trip with explicit and Chinese account name", () => {
+  const original: QueryParams = {
+    ...DEFAULT_QUERY_PARAMS,
+    account: "资产:现金",
+    conversion: "units",
+    explicit: true,
+  };
+
+  const serialized = serializeQueryParams(original, {
+    includeCharts: true,
+  });
+  const serializedObj = Object.fromEntries(serialized.entries());
+
+  equal(serializedObj["account"], "资产:现金");
+  equal(serializedObj["conversion"], "units");
+  equal(serializedObj["_e"], "1");
+
+  const reparsed = parseQueryParams(serialized);
+  equal(reparsed.account, "资产:现金");
+  equal(reparsed.conversion, "units");
+  equal(reparsed.explicit, true);
+});
+
+test("conversion alias with whitespace", () => {
+  equal(normalizeConversion("  unit  "), "units");
+  equal(normalizeConversion("  COST  "), "at_cost");
+  equal(normalizeConversion("\tvalue\n"), "at_value");
+});
+
+test("QUERY_PARAM_NAMES includes EXPLICIT", () => {
+  equal(QUERY_PARAM_NAMES.EXPLICIT, "_e");
+  equal(EXPLICIT_PARAM_NAME, "_e");
+});
+
+test("schema includes conversion aliases", () => {
+  ok("aliases" in QUERY_PARAM_SCHEMA.conversion);
+  ok(QUERY_PARAM_SCHEMA.conversion.aliases !== undefined);
+  deepEqual(QUERY_PARAM_SCHEMA.conversion.aliases, {
+    unit: "units",
+    units: "units",
+    cost: "at_cost",
+    value: "at_value",
+  });
 });

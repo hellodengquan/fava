@@ -10,7 +10,17 @@ export const QUERY_PARAM_NAMES = {
   INTERVAL: "interval",
   CHARTS: "charts",
   QUERY_STRING: "query_string",
+  EXPLICIT: "_e",
 } as const;
+
+export const EXPLICIT_PARAM_NAME = QUERY_PARAM_NAMES.EXPLICIT;
+
+export const CONVERSION_ALIASES: Readonly<Record<string, string>> = {
+  unit: "units",
+  units: "units",
+  cost: "at_cost",
+  value: "at_value",
+};
 
 export type QueryParamName =
   (typeof QUERY_PARAM_NAMES)[keyof typeof QUERY_PARAM_NAMES];
@@ -25,6 +35,7 @@ export interface QueryParams {
   interval: Interval;
   charts: boolean;
   query_string: string;
+  explicit: boolean;
 }
 
 export const DEFAULT_QUERY_PARAMS: QueryParams = {
@@ -35,6 +46,7 @@ export const DEFAULT_QUERY_PARAMS: QueryParams = {
   interval: DEFAULT_INTERVAL,
   charts: true,
   query_string: "",
+  explicit: false,
 };
 
 export function normalizeTime(value: string | null | undefined): string {
@@ -54,15 +66,27 @@ export function normalizeFilter(value: string | null | undefined): string {
 
 export function normalizeConversion(value: string | null | undefined): string {
   const trimmed = value?.trim() ?? "";
-  return trimmed || DEFAULT_CONVERSION;
+  if (!trimmed) {
+    return DEFAULT_CONVERSION;
+  }
+  const lower = trimmed.toLowerCase();
+  const aliased = CONVERSION_ALIASES[lower];
+  if (aliased !== undefined && aliased !== trimmed) {
+    log_warn(
+      `[query_params] Deprecated conversion value: "${trimmed}", using alias "${aliased}"`,
+    );
+    return aliased;
+  }
+  return trimmed;
 }
 
 export function normalizeInterval(value: string | null | undefined): Interval {
-  const normalized = getInterval(value);
+  const trimmed = value?.trim().toLowerCase();
+  const normalized = getInterval(trimmed ?? null);
   if (
     value != null &&
     value !== "" &&
-    !INTERVALS.includes(value as Interval)
+    !INTERVALS.includes(trimmed as Interval)
   ) {
     log_warn(
       `[query_params] Invalid interval value: "${value}", falling back to default "${DEFAULT_INTERVAL}"`,
@@ -77,6 +101,11 @@ export function normalizeCharts(value: string | null | undefined): boolean {
 
 export function normalizeQueryString(value: string | null | undefined): string {
   return value ?? "";
+}
+
+export function normalizeExplicit(value: string | null | undefined): boolean {
+  if (value === null || value === undefined) return false;
+  return value === "1" || value.toLowerCase() === "true";
 }
 
 export const SYNCED_QUERY_PARAM_NAMES: QueryParamName[] = [
@@ -95,9 +124,10 @@ export interface QueryParamSchema {
   normalizeFn: (value: string | null | undefined) => string | boolean | Interval;
   serializableDefault: boolean;
   validValues?: readonly string[];
+  aliases?: Readonly<Record<string, string>>;
 }
 
-export const QUERY_PARAM_SCHEMA: Record<QueryParamName, QueryParamSchema> = {
+export const QUERY_PARAM_SCHEMA: Record<string, QueryParamSchema> = {
   time: {
     default: "",
     type: "string",
@@ -125,6 +155,7 @@ export const QUERY_PARAM_SCHEMA: Record<QueryParamName, QueryParamSchema> = {
     synced: true,
     normalizeFn: normalizeConversion,
     serializableDefault: true,
+    aliases: CONVERSION_ALIASES,
   },
   interval: {
     default: DEFAULT_INTERVAL,
@@ -148,6 +179,13 @@ export const QUERY_PARAM_SCHEMA: Record<QueryParamName, QueryParamSchema> = {
     normalizeFn: normalizeQueryString,
     serializableDefault: false,
   },
+  _e: {
+    default: false,
+    type: "boolean",
+    synced: false,
+    normalizeFn: normalizeExplicit,
+    serializableDefault: false,
+  },
 };
 
 export function parseQueryParams(
@@ -168,6 +206,7 @@ export function parseQueryParams(
     interval: normalizeInterval(get(QUERY_PARAM_NAMES.INTERVAL)),
     charts: normalizeCharts(get(QUERY_PARAM_NAMES.CHARTS)),
     query_string: normalizeQueryString(get(QUERY_PARAM_NAMES.QUERY_STRING)),
+    explicit: normalizeExplicit(get(QUERY_PARAM_NAMES.EXPLICIT)),
   };
 }
 
@@ -175,6 +214,7 @@ export interface SerializeOptions {
   omitDefaults?: boolean;
   includeCharts?: boolean;
   includeQueryString?: boolean;
+  explicit?: boolean;
 }
 
 export function serializeQueryParams(
@@ -185,6 +225,7 @@ export function serializeQueryParams(
     omitDefaults = false,
     includeCharts = true,
     includeQueryString = false,
+    explicit = false,
   } = options;
 
   const result = new URLSearchParams();
@@ -236,6 +277,19 @@ export function serializeQueryParams(
     }
   }
 
+  const hasExplicitParam = params.explicit === true;
+  const allDefaults =
+    time === DEFAULT_QUERY_PARAMS.time &&
+    account === DEFAULT_QUERY_PARAMS.account &&
+    filter === DEFAULT_QUERY_PARAMS.filter &&
+    conversion === DEFAULT_QUERY_PARAMS.conversion &&
+    interval === DEFAULT_QUERY_PARAMS.interval &&
+    (!includeCharts || normalizeCharts("") === DEFAULT_QUERY_PARAMS.charts);
+
+  if (explicit || hasExplicitParam || (allDefaults && params.explicit === true)) {
+    result.set(EXPLICIT_PARAM_NAME, "1");
+  }
+
   return result;
 }
 
@@ -245,6 +299,15 @@ export function setQueryParamOnURL(
   rawValue: string | boolean | Interval,
 ): void {
   let value: string;
+
+  if (key === QUERY_PARAM_NAMES.EXPLICIT) {
+    if (rawValue === true || rawValue === "1" || rawValue === "true") {
+      url.searchParams.set(key, "1");
+    } else {
+      url.searchParams.delete(key);
+    }
+    return;
+  }
 
   if (key === QUERY_PARAM_NAMES.CHARTS) {
     value = rawValue === false ? "false" : "";
@@ -329,4 +392,17 @@ export function getFiltersConversionIntervalFromURL(
   url: URL,
 ): FiltersConversionInterval {
   return getFiltersConversionInterval(parseQueryParams(url.searchParams));
+}
+
+export function isExplicitURL(url: URL): boolean {
+  const value = url.searchParams.get(EXPLICIT_PARAM_NAME);
+  return normalizeExplicit(value);
+}
+
+export function markExplicit(url: URL): void {
+  url.searchParams.set(EXPLICIT_PARAM_NAME, "1");
+}
+
+export function unmarkExplicit(url: URL): void {
+  url.searchParams.delete(EXPLICIT_PARAM_NAME);
 }

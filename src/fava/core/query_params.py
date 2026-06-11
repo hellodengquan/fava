@@ -33,6 +33,16 @@ QUERY_PARAM_NAMES = {
     "INTERVAL": "interval",
     "CHARTS": "charts",
     "QUERY_STRING": "query_string",
+    "EXPLICIT": "_e",
+}
+
+EXPLICIT_PARAM_NAME = QUERY_PARAM_NAMES["EXPLICIT"]
+
+CONVERSION_ALIASES = {
+    "unit": "units",
+    "units": "units",
+    "cost": "at_cost",
+    "value": "at_value",
 }
 
 QueryParamName = Literal[
@@ -43,6 +53,7 @@ QueryParamName = Literal[
     "interval",
     "charts",
     "query_string",
+    "_e",
 ]
 
 DEFAULT_CONVERSION = "at_cost"
@@ -68,6 +79,7 @@ class QueryParams:
     interval: Interval = Month
     charts: bool = True
     query_string: str = ""
+    explicit: bool = False
 
     def as_filters(self) -> Filters:
         """Return the three entry filters."""
@@ -135,6 +147,7 @@ QUERY_PARAM_SCHEMA: dict[str, dict[str, object]] = {
         "synced": True,
         "normalize_fn": "normalize_conversion",
         "serializable_default": True,
+        "aliases": CONVERSION_ALIASES,
     },
     "interval": {
         "default": "month",
@@ -156,6 +169,13 @@ QUERY_PARAM_SCHEMA: dict[str, dict[str, object]] = {
         "type": "string",
         "synced": False,
         "normalize_fn": "normalize_query_string",
+        "serializable_default": False,
+    },
+    "_e": {
+        "default": False,
+        "type": "bool",
+        "synced": False,
+        "normalize_fn": "normalize_explicit",
         "serializable_default": False,
     },
 }
@@ -189,13 +209,32 @@ def normalize_filter(value: object | None) -> str:
 
 
 def normalize_conversion(value: object | None) -> str:
-    """Normalize the conversion string, falling back to the default."""
+    """Normalize the conversion string, falling back to the default.
+
+    Handles deprecated alias values from older Fava 0.x versions
+    (e.g. ``"unit"`` → ``"units"``, ``"cost"`` → ``"at_cost"``).
+    """
     if value is None:
         return DEFAULT_CONVERSION
     if isinstance(value, str):
         trimmed = value.strip()
-        return trimmed or DEFAULT_CONVERSION
-    return str(value).strip() or DEFAULT_CONVERSION
+    else:
+        trimmed = str(value).strip()
+
+    if not trimmed:
+        return DEFAULT_CONVERSION
+
+    lower = trimmed.lower()
+    aliased = CONVERSION_ALIASES.get(lower)
+    if aliased is not None and aliased != trimmed:
+        log.warning(
+            "Deprecated conversion value: '%s', using alias '%s'",
+            trimmed,
+            aliased,
+        )
+        return aliased
+
+    return trimmed
 
 
 def normalize_interval(value: object | None) -> Interval:
@@ -249,6 +288,22 @@ def normalize_query_string(value: object | None) -> str:
     return str(value)
 
 
+def normalize_explicit(value: object | None) -> bool:
+    """Normalize the explicit flag.
+
+    The flag is set when the query string contains ``_e=1`` or ``_e=true``,
+    indicating that the default values were explicitly set by the user
+    (as opposed to being implicit from the URL having no query string).
+    """
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value == "1" or value.lower() == "true"
+    return False
+
+
 def parse_query_params(
     params: Mapping[str, object] | None = None,
 ) -> QueryParams:
@@ -270,6 +325,7 @@ def parse_query_params(
         interval=normalize_interval(_get("interval")),
         charts=normalize_charts(_get("charts")),
         query_string=normalize_query_string(_get("query_string")),
+        explicit=normalize_explicit(_get("_e")),
     )
 
 
@@ -280,6 +336,7 @@ class SerializeOptions:
     omit_defaults: bool = False
     include_charts: bool = True
     include_query_string: bool = False
+    explicit: bool = False
 
 
 def serialize_query_params(
@@ -353,6 +410,19 @@ def serialize_query_params(
         if query_string:
             result.append(("query_string", query_string))
 
+    explicit = getattr(parsed, "explicit", False)
+    all_defaults = (
+        time == DEFAULT_QUERY_PARAMS.time
+        and account == DEFAULT_QUERY_PARAMS.account
+        and filter_ == DEFAULT_QUERY_PARAMS.filter
+        and conversion == DEFAULT_QUERY_PARAMS.conversion
+        and interval is DEFAULT_QUERY_PARAMS.interval
+        and (not opts.include_charts or charts == DEFAULT_QUERY_PARAMS.charts)
+    )
+
+    if opts.explicit or explicit or (all_defaults and explicit):
+        result.append((EXPLICIT_PARAM_NAME, "1"))
+
     return result
 
 
@@ -375,6 +445,13 @@ def set_query_param_on_dict(
     Empty values (that match the default semantics) are removed, which
     mirrors the frontend ``set_query_param`` behaviour.
     """
+    if key == "_e":
+        if raw_value is True or raw_value == "1" or raw_value == "true":
+            values["_e"] = "1"
+        else:
+            values.pop("_e", None)
+        return
+
     if key == "charts":
         if raw_value is False or (isinstance(raw_value, str) and raw_value == "false"):
             values["charts"] = "false"
@@ -425,3 +502,18 @@ def get_filters_conversion_interval_from_mapping(
 ) -> FiltersConversionInterval:
     """Extract filters + conversion + interval from a mapping."""
     return parse_query_params(params).as_filters_conversion_interval()
+
+
+def is_explicit_url(params: Mapping[str, object] | None) -> bool:
+    """Check if the URL parameters have the explicit flag set."""
+    return parse_query_params(params).explicit
+
+
+def mark_explicit(values: dict[str, str]) -> None:
+    """Add the explicit flag to a values dict."""
+    values[EXPLICIT_PARAM_NAME] = "1"
+
+
+def unmark_explicit(values: dict[str, str]) -> None:
+    """Remove the explicit flag from a values dict."""
+    values.pop(EXPLICIT_PARAM_NAME, None)

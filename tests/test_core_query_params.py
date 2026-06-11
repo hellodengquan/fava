@@ -21,9 +21,12 @@ from fava.core.query_params import (
     SYNCED_QUERY_PARAM_NAMES,
     get_filters_conversion_interval_from_mapping,
     get_filters_from_mapping,
+    is_explicit_url,
+    mark_explicit,
     normalize_account,
     normalize_charts,
     normalize_conversion,
+    normalize_explicit,
     normalize_filter,
     normalize_interval,
     normalize_query_string,
@@ -32,6 +35,7 @@ from fava.core.query_params import (
     query_params_to_query_string,
     serialize_query_params,
     set_query_param_on_dict,
+    unmark_explicit,
 )
 from fava.util.date import Month, Year
 
@@ -253,7 +257,8 @@ def test_synced_params_match_schema():
 def test_schema_defaults_match_default_query_params():
     """Schema defaults must match DEFAULT_QUERY_PARAMS."""
     for key, schema in QUERY_PARAM_SCHEMA.items():
-        default = getattr(DEFAULT_QUERY_PARAMS, key)
+        attr_name = "explicit" if key == "_e" else key
+        default = getattr(DEFAULT_QUERY_PARAMS, attr_name)
         if key == "interval":
             assert _interval_str(default) == schema["default"]
         else:
@@ -263,7 +268,8 @@ def test_schema_defaults_match_default_query_params():
 def test_schema_types_match():
     """Schema type declarations describe the wire (URL string) type."""
     for key, schema in QUERY_PARAM_SCHEMA.items():
-        default = getattr(DEFAULT_QUERY_PARAMS, key)
+        attr_name = "explicit" if key == "_e" else key
+        default = getattr(DEFAULT_QUERY_PARAMS, attr_name)
         if key == "interval":
             assert _interval_str(default) == schema["default"]
         elif schema["type"] == "string":
@@ -591,3 +597,262 @@ def test_empty_params_produce_defaults():
     assert params.account == ""
     assert params.filter == ""
     assert params.query_string == ""
+
+
+def test_conversion_alias_mapping():
+    """Deprecated conversion aliases from Fava 0.x should map to canonical values."""
+    from fava.core.query_params import CONVERSION_ALIASES
+
+    assert CONVERSION_ALIASES["unit"] == "units"
+    assert CONVERSION_ALIASES["units"] == "units"
+    assert CONVERSION_ALIASES["cost"] == "at_cost"
+    assert CONVERSION_ALIASES["value"] == "at_value"
+
+    assert normalize_conversion("unit") == "units"
+    assert normalize_conversion("UNIT") == "units"
+    assert normalize_conversion("  unit  ") == "units"
+    assert normalize_conversion("cost") == "at_cost"
+    assert normalize_conversion("COST") == "at_cost"
+    assert normalize_conversion("value") == "at_value"
+    assert normalize_conversion("VALUE") == "at_value"
+    assert normalize_conversion("units") == "units"
+    assert normalize_conversion("at_cost") == "at_cost"
+    assert normalize_conversion("at_value") == "at_value"
+
+
+def test_conversion_alias_logs_warning(caplog):
+    """Deprecated conversion values should log a warning."""
+    with caplog.at_level("WARNING"):
+        result = normalize_conversion("unit")
+    assert result == "units"
+    assert "Deprecated conversion value" in caplog.text
+    assert "'unit'" in caplog.text
+    assert "'units'" in caplog.text
+
+
+def test_normalize_explicit():
+    """Explicit flag normalization."""
+    assert normalize_explicit(None) is False
+    assert normalize_explicit("") is False
+    assert normalize_explicit("0") is False
+    assert normalize_explicit("false") is False
+    assert normalize_explicit("False") is False
+    assert normalize_explicit("1") is True
+    assert normalize_explicit("true") is True
+    assert normalize_explicit("True") is True
+    assert normalize_explicit(True) is True
+    assert normalize_explicit(False) is False
+
+
+def test_parse_query_params_with_explicit():
+    """Query params with _e=1 should have explicit=True."""
+    params_with_explicit = parse_query_params({"_e": "1"})
+    assert params_with_explicit.explicit is True
+
+    params_with_explicit_true = parse_query_params({"_e": "true"})
+    assert params_with_explicit_true.explicit is True
+
+    params_without_explicit = parse_query_params({})
+    assert params_without_explicit.explicit is False
+
+
+def test_serialize_default_params_without_explicit():
+    """All default params without explicit flag should produce non-empty query string."""
+    from fava.core.query_params import SerializeOptions
+
+    params = DEFAULT_QUERY_PARAMS
+    serialized = serialize_query_params(
+        params,
+        SerializeOptions(include_charts=True),
+    )
+    serialized_dict = dict(serialized)
+    assert "conversion" in serialized_dict
+    assert "interval" in serialized_dict
+    assert "_e" not in serialized_dict
+
+
+def test_serialize_default_params_with_explicit_flag():
+    """All default params with explicit=True should include _e=1."""
+    from fava.core.query_params import SerializeOptions
+
+    params = QueryParams(explicit=True)
+    serialized = serialize_query_params(
+        params,
+        SerializeOptions(include_charts=True),
+    )
+    serialized_dict = dict(serialized)
+    assert serialized_dict.get("_e") == "1"
+
+
+def test_serialize_with_explicit_option():
+    """SerializeOptions.explicit=True should add _e=1 even for non-default params."""
+    from fava.core.query_params import SerializeOptions
+
+    params = QueryParams(time="2024")
+    serialized = serialize_query_params(
+        params,
+        SerializeOptions(explicit=True, include_charts=True),
+    )
+    serialized_dict = dict(serialized)
+    assert serialized_dict.get("_e") == "1"
+    assert serialized_dict.get("time") == "2024"
+
+
+def test_all_defaults_roundtrip_with_explicit():
+    """All default values with explicit flag should round-trip correctly."""
+    from fava.core.query_params import SerializeOptions
+
+    original = QueryParams(explicit=True)
+    assert original.time == ""
+    assert original.account == ""
+    assert original.filter == ""
+    assert original.conversion == "at_cost"
+    assert original.interval is Month
+    assert original.charts is True
+    assert original.explicit is True
+
+    serialized = serialize_query_params(
+        original,
+        SerializeOptions(include_charts=True),
+    )
+    serialized_dict = dict(serialized)
+    assert serialized_dict.get("_e") == "1"
+
+    reparsed = parse_query_params(serialized_dict)
+    assert reparsed.explicit is True
+    assert reparsed.time == ""
+    assert reparsed.account == ""
+    assert reparsed.filter == ""
+    assert reparsed.conversion == "at_cost"
+    assert reparsed.interval is Month
+    assert reparsed.charts is True
+
+
+def test_distinguish_default_vs_explicit_default():
+    """With explicit flag, we can distinguish implicit vs explicit default values."""
+    implicit_default = parse_query_params({})
+    assert implicit_default.explicit is False
+
+    explicit_default = parse_query_params({"_e": "1"})
+    assert explicit_default.explicit is True
+
+    assert implicit_default.conversion == explicit_default.conversion
+    assert implicit_default.interval is explicit_default.interval
+    assert implicit_default.explicit != explicit_default.explicit
+
+
+def test_set_query_param_on_dict_for_explicit():
+    """set_query_param_on_dict should handle the '_e' key."""
+    values: dict[str, str] = {}
+
+    set_query_param_on_dict(values, "_e", True)
+    assert values.get("_e") == "1"
+
+    set_query_param_on_dict(values, "_e", False)
+    assert "_e" not in values
+
+    set_query_param_on_dict(values, "_e", "1")
+    assert values.get("_e") == "1"
+
+    set_query_param_on_dict(values, "_e", "false")
+    assert "_e" not in values
+
+
+def test_is_explicit_url_helper():
+    """is_explicit_url helper should correctly detect the flag."""
+    assert is_explicit_url({"_e": "1"}) is True
+    assert is_explicit_url({"_e": "true"}) is True
+    assert is_explicit_url({}) is False
+    assert is_explicit_url({"time": "2024"}) is False
+
+
+def test_mark_unmark_explicit_helpers():
+    """mark_explicit and unmark_explicit helpers."""
+    values: dict[str, str] = {}
+
+    mark_explicit(values)
+    assert values.get("_e") == "1"
+
+    unmark_explicit(values)
+    assert "_e" not in values
+
+
+def test_legacy_url_conversion_alias_roundtrip():
+    """Legacy URL with 'unit' should parse correctly and serialize as 'units'."""
+    from fava.core.query_params import SerializeOptions
+
+    legacy_params = parse_query_params({"conversion": "unit"})
+    assert legacy_params.conversion == "units"
+
+    serialized = serialize_query_params(
+        legacy_params,
+        SerializeOptions(include_charts=True),
+    )
+    serialized_dict = dict(serialized)
+    assert serialized_dict.get("conversion") == "units"
+
+    reparsed = parse_query_params(serialized_dict)
+    assert reparsed.conversion == "units"
+
+
+def test_legacy_url_conversion_cost_alias():
+    """Legacy URL with 'cost' should parse as 'at_cost'."""
+    from fava.core.query_params import SerializeOptions
+
+    legacy_params = parse_query_params({"conversion": "cost"})
+    assert legacy_params.conversion == "at_cost"
+
+    serialized = serialize_query_params(
+        legacy_params,
+        SerializeOptions(include_charts=True),
+    )
+    serialized_dict = dict(serialized)
+    assert serialized_dict.get("conversion") == "at_cost"
+
+
+def test_legacy_url_conversion_value_alias():
+    """Legacy URL with 'value' should parse as 'at_value'."""
+    from fava.core.query_params import SerializeOptions
+
+    legacy_params = parse_query_params({"conversion": "value"})
+    assert legacy_params.conversion == "at_value"
+
+    serialized = serialize_query_params(
+        legacy_params,
+        SerializeOptions(include_charts=True),
+    )
+    serialized_dict = dict(serialized)
+    assert serialized_dict.get("conversion") == "at_value"
+
+
+def test_roundtrip_with_explicit_and_chinese():
+    """Explicit flag should survive round-trip with Chinese account name."""
+    from fava.core.query_params import SerializeOptions
+
+    original = QueryParams(
+        account="资产:现金",
+        conversion="units",
+        explicit=True,
+    )
+    serialized = serialize_query_params(
+        original,
+        SerializeOptions(include_charts=True),
+    )
+    serialized_dict = dict(serialized)
+
+    assert serialized_dict.get("account") == "资产:现金"
+    assert serialized_dict.get("conversion") == "units"
+    assert serialized_dict.get("_e") == "1"
+
+    reparsed = parse_query_params(serialized_dict)
+    assert reparsed.account == "资产:现金"
+    assert reparsed.conversion == "units"
+    assert reparsed.explicit is True
+
+
+def test_conversion_alias_with_whitespace():
+    """Aliases with whitespace should be trimmed and normalized."""
+    assert normalize_conversion("  unit  ") == "units"
+    assert normalize_conversion("  COST  ") == "at_cost"
+    assert normalize_conversion("\tvalue\n") == "at_value"
+
