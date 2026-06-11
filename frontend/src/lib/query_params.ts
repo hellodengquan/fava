@@ -1,5 +1,6 @@
+import { log_warn } from "../log.ts";
 import type { Interval } from "./interval.ts";
-import { DEFAULT_INTERVAL, getInterval } from "./interval.ts";
+import { DEFAULT_INTERVAL, INTERVALS, getInterval } from "./interval.ts";
 
 export const QUERY_PARAM_NAMES = {
   TIME: "time",
@@ -36,15 +37,6 @@ export const DEFAULT_QUERY_PARAMS: QueryParams = {
   query_string: "",
 };
 
-export const SYNCED_QUERY_PARAM_NAMES: QueryParamName[] = [
-  QUERY_PARAM_NAMES.ACCOUNT,
-  QUERY_PARAM_NAMES.CHARTS,
-  QUERY_PARAM_NAMES.CONVERSION,
-  QUERY_PARAM_NAMES.FILTER,
-  QUERY_PARAM_NAMES.INTERVAL,
-  QUERY_PARAM_NAMES.TIME,
-];
-
 export function normalizeTime(value: string | null | undefined): string {
   const trimmed = value?.trim() ?? "";
   return trimmed;
@@ -66,7 +58,17 @@ export function normalizeConversion(value: string | null | undefined): string {
 }
 
 export function normalizeInterval(value: string | null | undefined): Interval {
-  return getInterval(value);
+  const normalized = getInterval(value);
+  if (
+    value != null &&
+    value !== "" &&
+    !INTERVALS.includes(value as Interval)
+  ) {
+    log_warn(
+      `[query_params] Invalid interval value: "${value}", falling back to default "${DEFAULT_INTERVAL}"`,
+    );
+  }
+  return normalized;
 }
 
 export function normalizeCharts(value: string | null | undefined): boolean {
@@ -76,6 +78,77 @@ export function normalizeCharts(value: string | null | undefined): boolean {
 export function normalizeQueryString(value: string | null | undefined): string {
   return value ?? "";
 }
+
+export const SYNCED_QUERY_PARAM_NAMES: QueryParamName[] = [
+  QUERY_PARAM_NAMES.ACCOUNT,
+  QUERY_PARAM_NAMES.CHARTS,
+  QUERY_PARAM_NAMES.CONVERSION,
+  QUERY_PARAM_NAMES.FILTER,
+  QUERY_PARAM_NAMES.INTERVAL,
+  QUERY_PARAM_NAMES.TIME,
+];
+
+export interface QueryParamSchema {
+  default: string | boolean;
+  type: "string" | "boolean";
+  synced: boolean;
+  normalizeFn: (value: string | null | undefined) => string | boolean | Interval;
+  serializableDefault: boolean;
+  validValues?: readonly string[];
+}
+
+export const QUERY_PARAM_SCHEMA: Record<QueryParamName, QueryParamSchema> = {
+  time: {
+    default: "",
+    type: "string",
+    synced: true,
+    normalizeFn: normalizeTime,
+    serializableDefault: false,
+  },
+  account: {
+    default: "",
+    type: "string",
+    synced: true,
+    normalizeFn: normalizeAccount,
+    serializableDefault: false,
+  },
+  filter: {
+    default: "",
+    type: "string",
+    synced: true,
+    normalizeFn: normalizeFilter,
+    serializableDefault: false,
+  },
+  conversion: {
+    default: DEFAULT_CONVERSION,
+    type: "string",
+    synced: true,
+    normalizeFn: normalizeConversion,
+    serializableDefault: true,
+  },
+  interval: {
+    default: DEFAULT_INTERVAL,
+    type: "string",
+    synced: true,
+    normalizeFn: normalizeInterval,
+    serializableDefault: true,
+    validValues: INTERVALS,
+  },
+  charts: {
+    default: true,
+    type: "boolean",
+    synced: true,
+    normalizeFn: normalizeCharts,
+    serializableDefault: false,
+  },
+  query_string: {
+    default: "",
+    type: "string",
+    synced: false,
+    normalizeFn: normalizeQueryString,
+    serializableDefault: false,
+  },
+};
 
 export function parseQueryParams(
   params: URLSearchParams | Record<string, string | null | undefined>,

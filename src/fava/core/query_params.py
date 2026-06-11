@@ -8,6 +8,7 @@ with the TypeScript module ``frontend/src/lib/query_params.ts``.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from typing import Literal
@@ -21,6 +22,8 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from fava.util.date import Interval
+
+log = logging.getLogger(__name__)
 
 QUERY_PARAM_NAMES = {
     "TIME": "time",
@@ -104,6 +107,59 @@ class FiltersConversionInterval(Filters):
 
 DEFAULT_QUERY_PARAMS = QueryParams()
 
+QUERY_PARAM_SCHEMA: dict[str, dict[str, object]] = {
+    "time": {
+        "default": "",
+        "type": "string",
+        "synced": True,
+        "normalize_fn": "normalize_time",
+        "serializable_default": False,
+    },
+    "account": {
+        "default": "",
+        "type": "string",
+        "synced": True,
+        "normalize_fn": "normalize_account",
+        "serializable_default": False,
+    },
+    "filter": {
+        "default": "",
+        "type": "string",
+        "synced": True,
+        "normalize_fn": "normalize_filter",
+        "serializable_default": False,
+    },
+    "conversion": {
+        "default": "at_cost",
+        "type": "string",
+        "synced": True,
+        "normalize_fn": "normalize_conversion",
+        "serializable_default": True,
+    },
+    "interval": {
+        "default": "month",
+        "type": "string",
+        "synced": True,
+        "normalize_fn": "normalize_interval",
+        "serializable_default": True,
+        "valid_values": list(INTERVALS.keys()),
+    },
+    "charts": {
+        "default": True,
+        "type": "bool",
+        "synced": True,
+        "normalize_fn": "normalize_charts",
+        "serializable_default": False,
+    },
+    "query_string": {
+        "default": "",
+        "type": "string",
+        "synced": False,
+        "normalize_fn": "normalize_query_string",
+        "serializable_default": False,
+    },
+}
+
 
 def normalize_time(value: object | None) -> str:
     """Normalize the time filter value."""
@@ -143,12 +199,30 @@ def normalize_conversion(value: object | None) -> str:
 
 
 def normalize_interval(value: object | None) -> Interval:
-    """Normalize the interval string, falling back to the default."""
+    """Normalize the interval string, falling back to the default.
+
+    Accepts either a string name (e.g. ``"year"``, ``"monthly"``) or an
+    existing interval instance.  Unknown strings fall back to ``Month``
+    with a warning log.
+    """
     if value is None:
         return Month
+
+    if value in INTERVALS.values():
+        return value  # type: ignore[return-value]
+
     if isinstance(value, str):
-        return INTERVALS.get(value.strip().lower(), Month)
-    return INTERVALS.get(str(value).strip().lower(), Month)
+        normalized = value.strip().lower()
+    else:
+        normalized = str(value).strip().lower()
+
+    result = INTERVALS.get(normalized, Month)
+    if result is Month and normalized not in INTERVALS and normalized != "":
+        log.warning(
+            "Invalid interval value: '%s', falling back to default 'month'",
+            value,
+        )
+    return result
 
 
 def normalize_charts(value: object | None) -> bool:
