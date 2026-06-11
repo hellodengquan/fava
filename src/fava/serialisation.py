@@ -22,6 +22,8 @@ from fava.beans import create
 from fava.beans.abc import Balance
 from fava.beans.abc import Custom
 from fava.beans.abc import Directive
+from fava.beans.abc import Document
+from fava.beans.abc import Note
 from fava.beans.abc import Posting
 from fava.beans.abc import Price
 from fava.beans.abc import Transaction
@@ -89,6 +91,28 @@ def _(entry: Balance) -> Any:
     ret["entry_hash"] = hash_entry(entry)
     amt = ret["amount"]
     ret["amount"] = {"number": str(amt.number), "currency": amt.currency}
+    return ret
+
+
+@serialise.register(Document)
+def _(entry: Document) -> Any:
+    ret = entry._asdict()  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
+    ret["meta"] = dict(entry.meta) if entry.meta else {}
+    ret["t"] = "Document"
+    ret["entry_hash"] = hash_entry(entry)
+    ret["tags"] = list(entry.tags) if entry.tags else None
+    ret["links"] = list(entry.links) if entry.links else None
+    return ret
+
+
+@serialise.register(Note)
+def _(entry: Note) -> Any:
+    ret = entry._asdict()  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
+    ret["meta"] = dict(entry.meta) if entry.meta else {}
+    ret["t"] = "Note"
+    ret["entry_hash"] = hash_entry(entry)
+    ret["tags"] = list(entry.tags) if entry.tags else None
+    ret["links"] = list(entry.links) if entry.links else None
     return ret
 
 

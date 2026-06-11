@@ -194,6 +194,35 @@ class FileModule(FavaModule):
             self.ledger.watcher.notify(path)
             self.ledger.extensions.after_insert_metadata(entry, key, value)
 
+    def set_metadata(
+        self,
+        entry_hash: str,
+        key: str,
+        value: str,
+    ) -> bool:
+        """Set metadata for an entry, updating if exists or inserting if not.
+
+        Args:
+            entry_hash: Hash of an entry.
+            key: Key to set metadata for.
+            value: Metadata value to set.
+
+        Returns:
+            True if an existing value was updated, False if inserted.
+        """
+        with self._lock:
+            self.ledger.changed()
+            entry = self.ledger.get_entry(entry_hash)
+            indent = self.ledger.fava_options.indent
+            path, lineno = _get_position(entry)
+            updated = set_metadata_in_file(path, lineno, indent, key, value)
+            self.ledger.watcher.notify(path)
+            if updated:
+                self.ledger.extensions.after_insert_metadata(entry, key, value)
+            else:
+                self.ledger.extensions.after_insert_metadata(entry, key, value)
+            return updated
+
     def delete_metadata(
         self,
         entry_hash: str,
@@ -348,6 +377,48 @@ def insert_metadata_in_file(
         file.write("".join(contents))
 
 
+def set_metadata_in_file(
+    path: Path,
+    lineno: int,
+    indent: int,
+    key: str,
+    value: str,
+) -> bool:
+    """Set a metadata value in the file, updating if exists or inserting if not.
+
+    Args:
+        path: The path to the file.
+        lineno: The line number of the entry (1-based).
+        indent: The indentation to use.
+        key: The metadata key.
+        value: The metadata value.
+
+    Returns:
+        True if an existing value was updated, False if inserted.
+    """
+    with path.open(encoding="utf-8") as file:
+        contents = file.readlines()
+
+    entry_lines = find_entry_lines(contents, lineno - 1)
+    pattern = re.compile(rf'^(\s*){re.escape(key)}\s*:\s*(?:".*"|\S+)\s*$')
+
+    for i, line in enumerate(entry_lines):
+        match = pattern.match(line)
+        if match:
+            indent_space = match.group(1)
+            contents[lineno - 1 + i] = f'{indent_space}{key}: "{value}"\n'
+            newline = _file_newline_character(path)
+            with path.open("w", encoding="utf-8", newline=newline) as file:
+                file.write("".join(contents))
+            return True
+
+    contents.insert(lineno, f'{" " * indent}{key}: "{value}"\n')
+    newline = _file_newline_character(path)
+    with path.open("w", encoding="utf-8", newline=newline) as file:
+        file.write("".join(contents))
+    return False
+
+
 def delete_metadata_from_file(
     path: Path,
     lineno: int,
@@ -367,7 +438,7 @@ def delete_metadata_from_file(
         contents = file.readlines()
 
     entry_lines = find_entry_lines(contents, lineno - 1)
-    pattern = re.compile(rf'^\s*{re.escape(key)}\s*:\s*".*"\s*$')
+    pattern = re.compile(rf'^\s*{re.escape(key)}\s*:\s*(?:".*"|\S+)\s*$')
 
     for i, line in enumerate(entry_lines):
         if pattern.match(line):

@@ -524,13 +524,18 @@ def put_update_review_status(
     if status not in valid_statuses:
         raise FavaAPIError(f"Invalid review status: {status}")
 
-    g.ledger.file.insert_metadata(entry_hash, "review_status", status)
-    g.ledger.file.insert_metadata(
+    g.ledger.file.set_metadata(entry_hash, "review_status", status)
+    g.ledger.file.set_metadata(
         entry_hash, "reviewed_at", datetime.datetime.now().isoformat()
     )
 
     if notes is not None and notes.strip():
-        g.ledger.file.insert_metadata(entry_hash, "review_notes", notes.strip())
+        g.ledger.file.set_metadata(entry_hash, "review_notes", notes.strip())
+    else:
+        try:
+            g.ledger.file.delete_metadata(entry_hash, "review_notes")
+        except Exception:
+            pass
 
     return f"Review status updated to '{status}'."
 
