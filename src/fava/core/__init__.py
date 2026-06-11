@@ -199,7 +199,10 @@ class FilteredLedger:
     def root_tree_closed(self) -> Tree:
         """A root tree for the balance sheet."""
         tree = Tree(self.entries)
-        tree.cap(self.ledger.options)
+        tree.cap(
+            self.ledger.options,
+            canonicalizer=self.ledger.commodities.canonical,
+        )
         return tree
 
     def interval_ranges(self, interval: Interval) -> Sequence[DateRange]:

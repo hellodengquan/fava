@@ -258,18 +258,27 @@ class Tree(dict[str, TreeNode]):
 
         return net_profit.get(account_name)
 
-    def cap(self, options: BeancountOptions) -> None:
+    def cap(
+        self,
+        options: BeancountOptions,
+        canonicalizer: Callable[[str], str] | None = None,
+    ) -> None:
         """Transfer Income and Expenses, add conversions and unrealized gains.
 
         Args:
             options: The Beancount options.
+            canonicalizer: Optional function to canonicalize commodity names.
+                When provided, ensures consistent commodity aggregation in
+                the conversions calculation, aligning with holdings, charts,
+                and exports.
         """
         equity = options["name_equity"]
         conversions = CounterInventory(
             {
                 (currency, None): -number
                 for currency, number in AT_COST.apply(
-                    self.get("").balance_children
+                    self.get("").balance_children,
+                    canonicalizer=canonicalizer,
                 ).items()
             },
         )
