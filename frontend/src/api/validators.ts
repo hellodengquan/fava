@@ -144,6 +144,9 @@ export const context_validator = object({
 const account_budget = object({
   budget: record(number),
   budget_children: record(number),
+  status: record(string),
+  ratio: record(number),
+  category: optional(string),
 });
 export type AccountBudget = ValidationT<typeof account_budget>;
 
@@ -171,6 +174,7 @@ export const account_report_validator = object({
   dates: optional(array(date_range)),
   interval_balances: optional(array(account_hierarchy_validator)),
   budgets: optional(record(array(account_budget))),
+  budget_categories: optional(array(string)),
 });
 
 export const statistics_validator = object({

@@ -5,24 +5,32 @@
   import type { AccountBudget } from "../api/validators.ts";
   import type { AccountTreeNode } from "../charts/hierarchy.ts";
   import { urlForAccount } from "../helpers.ts";
+  import { _ } from "../i18n.ts";
   import type { NonEmptyArray } from "../lib/array.ts";
   import { currentTimeFilterDateFormat } from "../stores/format.ts";
   import AccountCellHeader from "./AccountCellHeader.svelte";
   import { get_not_shown, setTreeTableNotShownContext } from "./helpers.ts";
   import IntervalTreeTableNode from "./IntervalTreeTableNode.svelte";
 
+  type BudgetStatus = "ok" | "near" | "over";
+
   interface Props {
-    /** The account trees to show. */
     trees: NonEmptyArray<AccountTreeNode>;
-    /** The dates. */
     dates: { begin: Date; end: Date }[];
-    /** The budgets (per account a list per date range). */
     budgets: Record<string, AccountBudget[]>;
-    /** Whether this is cumulative. */
     accumulate: boolean;
+    filter_status?: BudgetStatus | "all";
+    filter_category?: string | "all";
   }
 
-  let { trees, dates, budgets, accumulate }: Props = $props();
+  let {
+    trees,
+    dates,
+    budgets,
+    accumulate,
+    filter_status = "all",
+    filter_category = "all",
+  }: Props = $props();
 
   const not_shown = writable(new Set<string>());
   setTreeTableNotShownContext(not_shown);
@@ -48,6 +56,18 @@
         : [title, title];
     }),
   );
+
+  let filtered_budgets = $derived(() => {
+    if (filter_category === "all") return budgets;
+    const result: Record<string, AccountBudget[]> = {};
+    for (const [acc, arr] of Object.entries(budgets)) {
+      const cat = arr?.[0]?.category;
+      if (cat === filter_category) {
+        result[acc] = arr;
+      }
+    }
+    return result;
+  });
 </script>
 
 <ol class="flex-table tree-table-new">
@@ -63,7 +83,7 @@
       {/each}
     </p>
   </li>
-  <IntervalTreeTableNode nodes={trees} {budgets} />
+  <IntervalTreeTableNode nodes={trees} budgets={filtered_budgets} filter_status={filter_status} />
 </ol>
 
 <style>

@@ -6,8 +6,10 @@ from datetime import date
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from fava.core.budgets import BudgetStatus
 from fava.core.budgets import calculate_budget
 from fava.core.budgets import calculate_budget_children
+from fava.core.budgets import calculate_budget_status
 from fava.core.budgets import parse_budgets
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -23,7 +25,7 @@ def test_budgets(load_doc_custom_entries: list[Custom]) -> None:
     2016-01-01 custom "budget" Expenses:Groceries "weekly"
     2016-06-01 custom "budget" Expenses:Groceries 10.00 EUR
     """
-    budgets, errors = parse_budgets(load_doc_custom_entries)
+    budgets, _by_cat, _cats, errors = parse_budgets(load_doc_custom_entries)
 
     assert len(errors) == 3
 
@@ -145,3 +147,63 @@ def test_budgets_children(budgets_doc: BudgetDict) -> None:
         date(2017, 1, 2),
     )
     assert budget["USD"] == Decimal("2.00")
+
+
+def test_budgets_with_category(load_doc_custom_entries: list[Custom]) -> None:
+    """
+    2016-01-01 custom "budget" Expenses:Food     "monthly" 300.00 EUR "living"
+    2016-01-01 custom "budget" Expenses:Transport "monthly" 150.00 EUR "living"
+    2016-01-01 custom "budget" Expenses:Holiday   "yearly"  2000 EUR "travel"
+    """
+    budgets, by_cat, cats, errors = parse_budgets(load_doc_custom_entries)
+    assert len(errors) == 0
+    assert "living" in cats
+    assert "travel" in cats
+    assert "living" in by_cat
+    assert "travel" in by_cat
+
+    living_budgets = by_cat["living"]
+    assert len(living_budgets) == 2
+    accounts_with_living = {b.account for b in living_budgets}
+    assert accounts_with_living == {"Expenses:Food", "Expenses:Transport"}
+
+    cat0 = living_budgets[0]
+    assert cat0.category == "living"
+
+    food_no_cat = calculate_budget(
+        budgets,
+        "Expenses:Food",
+        date(2016, 1, 1),
+        date(2016, 2, 1),
+    )
+    assert round(food_no_cat["EUR"] - Decimal("300.00"), 10) == 0
+
+    food_with_wrong_cat = calculate_budget(
+        budgets,
+        "Expenses:Food",
+        date(2016, 1, 1),
+        date(2016, 2, 1),
+        category="travel",
+    )
+    assert "EUR" not in food_with_wrong_cat
+
+    food_with_right_cat = calculate_budget(
+        budgets,
+        "Expenses:Food",
+        date(2016, 1, 1),
+        date(2016, 2, 1),
+        category="living",
+    )
+    assert round(food_with_right_cat["EUR"] - Decimal("300.00"), 10) == 0
+
+
+def test_calculate_budget_status() -> None:
+    assert calculate_budget_status(Decimal(100), Decimal(0)) == BudgetStatus.OK
+    assert calculate_budget_status(Decimal(100), Decimal(50)) == BudgetStatus.OK
+    assert calculate_budget_status(Decimal(100), Decimal(79)) == BudgetStatus.OK
+    assert calculate_budget_status(Decimal(100), Decimal(80)) == BudgetStatus.NEAR
+    assert calculate_budget_status(Decimal(100), Decimal(95)) == BudgetStatus.NEAR
+    assert calculate_budget_status(Decimal(100), Decimal(100)) == BudgetStatus.OVER
+    assert calculate_budget_status(Decimal(100), Decimal(120)) == BudgetStatus.OVER
+    assert calculate_budget_status(Decimal(0), Decimal(100)) == BudgetStatus.OK
+    assert calculate_budget_status(Decimal(-1), Decimal(100)) == BudgetStatus.OK

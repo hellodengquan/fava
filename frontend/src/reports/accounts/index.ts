@@ -23,6 +23,7 @@ export interface AccountReportProps {
   interval_balances: AccountTreeNode[] | null;
   dates: { begin: Date; end: Date }[] | null;
   budgets: Record<string, AccountBudget[]> | null;
+  budget_categories: string[] | null;
 }
 
 class NotAnAccountUrlError extends Error {
@@ -52,7 +53,7 @@ export const account_report = new Route<AccountReportProps>(
   async (url) => {
     const account = get_account_from_url(url).unwrap();
     const report_type = to_report_type(url.searchParams.get("r"));
-    const { charts, journal, interval_balances, dates, budgets } =
+    const { charts, journal, interval_balances, dates, budgets, budget_categories } =
       await get_account_report({
         ...getURLFilters(url),
         a: account,
@@ -65,6 +66,7 @@ export const account_report = new Route<AccountReportProps>(
       interval_balances,
       dates,
       budgets,
+      budget_categories: budget_categories ?? null,
       account,
       report_type,
     };

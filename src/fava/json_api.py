@@ -11,6 +11,8 @@ import shutil
 from abc import abstractmethod
 from dataclasses import dataclass
 from dataclasses import fields
+from datetime import date
+from decimal import Decimal
 from functools import wraps
 from http import HTTPStatus
 from inspect import Parameter
@@ -20,6 +22,7 @@ from pprint import pformat
 from typing import Any
 from typing import TYPE_CHECKING
 
+from beancount.core.amount import Amount
 from flask import Blueprint
 from flask import get_template_attribute
 from flask import jsonify
@@ -30,6 +33,7 @@ from fava.beans.abc import Document
 from fava.beans.abc import Event
 from fava.context import g
 from fava.core import EntryNotFoundForHashError
+from fava.core.budgets import calculate_budget_status
 from fava.core.conversion import UNITS
 from fava.core.documents import filepath_in_document_folder
 from fava.core.documents import is_document_or_import_file
@@ -744,11 +748,25 @@ def get_trial_balance() -> TreeReport:
 
 
 @dataclass(frozen=True)
+class CurrencyBudgetStatus:
+    """Budget status for a single currency."""
+
+    budget: Decimal
+    actual: Decimal
+    remaining: Decimal
+    status: str
+    ratio: Decimal
+
+
+@dataclass(frozen=True)
 class AccountBudget:
-    """Budgets for an account."""
+    """Budgets for an account with status info."""
 
     budget: Mapping[str, Decimal]
     budget_children: Mapping[str, Decimal]
+    status: Mapping[str, str]
+    ratio: Mapping[str, Decimal]
+    category: str | None
 
 
 @dataclass(frozen=True)
@@ -767,6 +785,7 @@ class AccountReportTree:
     interval_balances: Sequence[SerialisedTreeNode]
     budgets: Mapping[str, Sequence[AccountBudget]]
     dates: Sequence[DateRange]
+    budget_categories: Sequence[str]
 
 
 @api_endpoint
@@ -802,25 +821,62 @@ def get_account_report() -> AccountReportJournal | AccountReportTree:
             a for a in all_accounts if a.startswith(account_name)
         ]
         budgets_mod = g.ledger.budgets
-        first_date_range = dates[-1]
-        budgets = {
-            account: [
-                AccountBudget(
-                    budgets_mod.calculate(
-                        account,
-                        (first_date_range if accumulate else date_range).begin,
-                        date_range.end,
-                    ),
-                    budgets_mod.calculate_children(
-                        account,
-                        (first_date_range if accumulate else date_range).begin,
-                        date_range.end,
-                    ),
+        budget_entries = budgets_mod._budget_entries
+
+        first_date_range = dates[-1] if dates else None
+        budgets: dict[str, list[AccountBudget]] = {}
+        for account in budget_accounts:
+            account_budgets: list[AccountBudget] = []
+            first_entry = budget_entries.get(account, [])[0] if budget_entries.get(account) else None
+            category = first_entry.category if first_entry else None
+
+            for tree_idx, date_range in enumerate(dates):
+                budget_begin = (
+                    first_date_range.begin if (accumulate and first_date_range) else date_range.begin
                 )
-                for date_range in dates
-            ]
-            for account in budget_accounts
-        }
+                budget_end = date_range.end
+                budget = budgets_mod.calculate(
+                    account,
+                    budget_begin,
+                    budget_end,
+                )
+                budget_children = budgets_mod.calculate_children(
+                    account,
+                    budget_begin,
+                    budget_end,
+                )
+
+                actual_balance = {}
+                if tree_idx < len(interval_balances):
+                    tree = interval_balances[tree_idx]
+                    node = tree.get(account) if hasattr(tree, "get") else None
+                    if node is not None and hasattr(node, "balance"):
+                        bal = UNITS.apply(node.balance)
+                        actual_balance = {
+                            c: abs(Decimal(str(v))) for c, v in bal.items()
+                        }
+
+                status: dict[str, str] = {}
+                ratio: dict[str, Decimal] = {}
+                for currency, budgeted_amt in budget.items():
+                    actual_amt = actual_balance.get(currency, Decimal("0"))
+                    status[currency] = calculate_budget_status(
+                        budgeted_amt, actual_amt
+                    ).value
+                    ratio[currency] = (
+                        actual_amt / budgeted_amt if budgeted_amt > 0 else Decimal("0")
+                    )
+
+                account_budgets.append(
+                    AccountBudget(
+                        budget=budget,
+                        budget_children=budget_children,
+                        status=status,
+                        ratio=ratio,
+                        category=category,
+                    )
+                )
+            budgets[account] = account_budgets
 
         return AccountReportTree(
             charts,
@@ -837,6 +893,7 @@ def get_account_report() -> AccountReportJournal | AccountReportTree:
             ],
             dates=dates,
             budgets=budgets,
+            budget_categories=budgets_mod.all_categories,
         )
 
     journal_table_contents = get_template_attribute(

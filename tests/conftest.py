@@ -283,7 +283,7 @@ def load_doc_custom_entries(
 @pytest.fixture
 def budgets_doc(load_doc_custom_entries: Sequence[Custom]) -> BudgetDict:
     """Load the budgets from the custom entries in the docstring."""
-    budgets, _ = parse_budgets(load_doc_custom_entries)
+    budgets, _, _, _ = parse_budgets(load_doc_custom_entries)
     return budgets
 
 
