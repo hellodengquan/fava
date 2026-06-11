@@ -147,8 +147,18 @@ class ObjectColumn(BaseColumn):
     dtype: str = "object"
 
     @staticmethod
-    def serialise(val: object) -> str:
-        """Serialise an object of unknown type to a string."""
+    def serialise(
+        val: object,
+        canonicalizer: Callable[[str], str] | None = None,
+    ) -> str:
+        """Serialise an object of unknown type to a string.
+
+        Args:
+            val: The value to serialise.
+            canonicalizer: Optional function to canonicalize commodity names.
+                Not used for generic object serialisation but accepted for
+                interface consistency.
+        """
         return str(val)
 
 

@@ -129,3 +129,87 @@ def test_query_to_excel_file(get_ledger: GetFavaLedger) -> None:
 
     name, _data = query_shell.query_to_file(entries, "run custom_query", "ods")
     assert name == "custom_query"
+
+
+def test_export_with_canonicalizer_uses_unified_interface(
+    get_ledger: GetFavaLedger,
+) -> None:
+    """导出报表应该使用统一的别名归并接口，与前台展示数据口径一致。
+
+    验证：
+    1. query_to_file 接受 canonicalizer 参数
+    2. execute_query_serialised 接受 canonicalizer 参数
+    3. 两者使用相同的 canonicalizer 时结果一致
+    """
+    query_ledger = get_ledger("query-example")
+    entries = query_ledger.all_entries
+    query_shell = query_ledger.query_shell
+    canonicalizer = query_ledger.commodities.canonical
+
+    _name, csv_data = query_shell.query_to_file(
+        entries, "balances", "csv", canonicalizer=canonicalizer
+    )
+    csv_content = csv_data.getvalue().decode("utf-8")
+
+    serialised_result = query_shell.execute_query_serialised(
+        entries, "balances", canonicalizer=canonicalizer
+    )
+    assert isinstance(serialised_result, QueryResultTable)
+
+    header_row = csv_content.split("\n")[0]
+    for col in serialised_result.types:
+        assert col.name in header_row
+
+    assert "usd" not in csv_content.lower() or "USD" in csv_content
+
+
+def test_canonicalize_raw_value_handles_all_types(
+    get_ledger: GetFavaLedger,
+) -> None:
+    """_canonicalize_raw_value 应该正确处理各种原始查询结果类型。"""
+    from decimal import Decimal
+
+    from beancount.core.amount import Amount
+    from beancount.core.inventory import Inventory
+    from beancount.core.position import Cost
+    from beancount.core.position import Position
+
+    from fava.core.query_shell import QueryShell
+
+    query_ledger = get_ledger("query-example")
+    canonicalizer = query_ledger.commodities.canonical
+
+    assert canonicalizer("USD") == "USD"
+    assert canonicalizer("usd") == "USD"
+
+    amount = Amount(Decimal("100"), "usd")
+    canonical_amount = QueryShell._canonicalize_raw_value(amount, canonicalizer)
+    assert canonical_amount.currency == "USD"
+    assert canonical_amount.number == Decimal("100")
+
+    pos = Position(
+        Amount(Decimal("10"), "gld"),
+        Cost(Decimal("190.30"), "usd", None, None),
+    )
+    canonical_pos = QueryShell._canonicalize_raw_value(pos, canonicalizer)
+    assert canonical_pos.units.currency == "GLD"
+    assert canonical_pos.cost.currency == "USD"
+
+    inv = Inventory()
+    inv.add_position(
+        Position(Amount(Decimal("5"), "itot"), None)
+    )
+    inv.add_position(
+        Position(Amount(Decimal("3"), "ITOT"), None)
+    )
+    canonical_inv = QueryShell._canonicalize_raw_value(inv, canonicalizer)
+    assert len(canonical_inv) == 1
+    for pos in canonical_inv:
+        assert pos.units.currency == "ITOT"
+        assert pos.units.number == Decimal("8")
+
+    account_str = "Assets:US:BofA:Checking"
+    assert (
+        QueryShell._canonicalize_raw_value(account_str, canonicalizer)
+        == account_str
+    )

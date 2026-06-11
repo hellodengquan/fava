@@ -245,16 +245,17 @@ class QueryShell(FavaModule):
         dcontext = self.ledger.options["dcontext"]
         assert isinstance(dcontext, DisplayContext)  # noqa: S101
         dformat = dcontext.build()
-        types, rows = numberify_results(rtypes, rrows, dformat)
 
         if canonicalizer is not None:
-            rows = [
+            rrows = [
                 tuple(
-                    self._canonicalize_value(val, canonicalizer)
+                    self._canonicalize_raw_value(val, canonicalizer)
                     for val in row
                 )
-                for row in rows
+                for row in rrows
             ]
+
+        types, rows = numberify_results(rtypes, rrows, dformat)
 
         if result_format == "csv":
             data = to_csv(types, rows)
@@ -266,35 +267,80 @@ class QueryShell(FavaModule):
         return name, data
 
     @staticmethod
-    def _canonicalize_value(
+    def _canonicalize_raw_value(
         val: Any, canonicalizer: Callable[[str], str]
     ) -> Any:
-        """Canonicalize commodity names in a query result value.
+        """Canonicalize commodity names in a raw query result value.
+
+        This is applied BEFORE numberify_results, so it handles the raw
+        Beancount types (Amount, Position, Inventory) directly, preserving
+        the structure while normalizing commodity names.
 
         Args:
-            val: The value to canonicalize.
+            val: The raw value to canonicalize.
             canonicalizer: Function to canonicalize commodity names.
 
         Returns:
             The value with commodity names canonicalized if applicable.
+            String values are NOT modified (to avoid corrupting account
+            names, dates, etc.).
         """
-        if isinstance(val, str):
-            return canonicalizer(val)
         if isinstance(val, Amount):
-            return Amount(val.number, canonicalizer(val.currency))
+            canonical_currency = canonicalizer(val.currency)
+            if canonical_currency != val.currency:
+                return Amount(val.number, canonical_currency)
+            return val
         if isinstance(val, Inventory):
             result = Inventory()
             for pos in val:
                 canonical_currency = canonicalizer(pos.units.currency)
                 if canonical_currency != pos.units.currency:
+                    canonical_cost = None
+                    if pos.cost is not None:
+                        canonical_cost_currency = canonicalizer(
+                            pos.cost.currency
+                        )
+                        if canonical_cost_currency != pos.cost.currency:
+                            from beancount.core.position import Cost
+
+                            canonical_cost = Cost(
+                                pos.cost.number,
+                                canonical_cost_currency,
+                                pos.cost.date,
+                                pos.cost.label,
+                            )
+                        else:
+                            canonical_cost = pos.cost
                     new_pos = Position(
                         Amount(pos.units.number, canonical_currency),
-                        pos.cost,
+                        canonical_cost,
                     )
                     result.add_position(new_pos)
                 else:
                     result.add_position(pos)
             return result
+        if isinstance(val, Position):
+            canonical_currency = canonicalizer(val.units.currency)
+            if canonical_currency != val.units.currency:
+                canonical_cost = None
+                if val.cost is not None:
+                    canonical_cost_currency = canonicalizer(val.cost.currency)
+                    if canonical_cost_currency != val.cost.currency:
+                        from beancount.core.position import Cost
+
+                        canonical_cost = Cost(
+                            val.cost.number,
+                            canonical_cost_currency,
+                            val.cost.date,
+                            val.cost.label,
+                        )
+                    else:
+                        canonical_cost = val.cost
+                return Position(
+                    Amount(val.units.number, canonical_currency),
+                    canonical_cost,
+                )
+            return val
         return val
 
 
