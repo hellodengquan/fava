@@ -91,7 +91,14 @@ def _error_context(query_text: str, pos: int, endpos: int) -> str:
     start = max(0, pos - 10)
     end = min(len(query_text), endpos + 10)
     snippet = query_text[start:end]
-    return f' Near "...{snippet}..."'
+    snippet = (
+        snippet.replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(query_text) else ""
+    return f' Near "{prefix}{snippet}{suffix}"'
 
 
 class NonExportableQueryError(FavaShellError):

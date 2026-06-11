@@ -153,6 +153,40 @@ def test_query_unclosed_string(
     assert "Near" in msg
 
 
+def test_query_error_context_at_start(
+    run_query: Callable[[str], QueryResult],
+) -> None:
+    with pytest.raises(QueryParseError) as exc_info:
+        run_query("asdf")
+    msg = str(exc_info.value)
+    assert 'Near "asdf"' in msg
+    assert 'Near "...asdf"' not in msg
+    assert 'Near "asdf..."' not in msg
+
+
+def test_query_error_context_at_end(
+    run_query: Callable[[str], QueryResult],
+) -> None:
+    with pytest.raises(QueryParseError) as exc_info:
+        run_query("SELECT date FROM")
+    msg = str(exc_info.value)
+    assert "Near" in msg
+    assert '"...' in msg
+    assert '..."' not in msg
+
+
+def test_query_error_context_multiline(
+    run_query: Callable[[str], QueryResult],
+) -> None:
+    query = "SELECT\n  date\nWHERE\n  ac'ount"
+    with pytest.raises(QueryParseError) as exc_info:
+        run_query(query)
+    msg = str(exc_info.value)
+    assert "Near" in msg
+    assert "\\n" in msg
+    assert "\n" not in msg.split("Near")[1]
+
+
 def test_query_parse_error_position(
     run_query: Callable[[str], QueryResult],
 ) -> None:
