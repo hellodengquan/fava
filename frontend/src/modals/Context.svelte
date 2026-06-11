@@ -4,6 +4,7 @@
   import { _ } from "../i18n.ts";
   import ReportLoadError from "../reports/ReportLoadError.svelte";
   import { hash } from "../stores/url.ts";
+  import { reviewStore } from "../stores/review.ts";
   import EntryContextBalances from "./EntryContextBalances.svelte";
   import EntryContextLocation from "./EntryContextLocation.svelte";
   import EntryContextReview from "./EntryContextReview.svelte";
@@ -12,6 +13,13 @@
 
   let shown = $derived($hash.startsWith("context"));
   let entry_hash = $derived(shown ? $hash.slice(8) : "");
+  let contextKey = $state(0);
+
+  $effect(() => {
+    if ($reviewStore.lastUpdatedHash) {
+      contextKey++;
+    }
+  });
 </script>
 
 <ModalBase {shown}>

@@ -13,8 +13,13 @@
     type ReviewStatus,
     type ReviewInfo,
   } from "../lib/review.ts";
-  import { notify, notify_err } from "../notifications.ts";
-  import { reviewStore, updateDocumentReviewStatus, clearDocumentReviewStatus, reviewDocuments } from "../stores/review.ts";
+  import { notify } from "../notifications.ts";
+  import {
+    reviewStore,
+    updateDocumentReviewStatus,
+    clearDocumentReviewStatus,
+    fetchEntryReviewInfo,
+  } from "../stores/review.ts";
   import { accounts } from "../stores/index.ts";
 
   interface Props {
@@ -37,26 +42,36 @@
   async function loadReviewData() {
     isLoading = true;
     try {
+      const serverInfo = await fetchEntryReviewInfo(entry.entry_hash);
+      if (serverInfo) {
+        reviewInfo = serverInfo;
+        reviewNotes = serverInfo.notes ?? "";
+      }
+
       const entries: Entry[] = await get_journal({});
       transactions = entries.filter(
         (e): e is Transaction => e.t === "Transaction",
       );
 
-      const issues = detectIssues(entry, transactions, $accounts);
-      const status = getReviewStatus(entry) ?? "pending";
-      const notes = entry.meta.get("review_notes")?.toString();
-      const reviewed_at = entry.meta.get("reviewed_at")?.toString();
-      const reviewed_by = entry.meta.get("reviewed_by")?.toString();
+      if (!serverInfo) {
+        const issues = detectIssues(entry, transactions, $accounts);
+        const status = getReviewStatus(entry) ?? "pending";
+        const notes = entry.meta.get("review_notes")?.toString();
+        const reviewed_at = entry.meta.get("reviewed_at")?.toString();
+        const reviewed_by = entry.meta.get("reviewed_by")?.toString();
 
-      reviewInfo = {
-        status,
-        issues,
-        notes,
-        reviewed_at,
-        reviewed_by,
-      };
-
-      reviewNotes = notes ?? "";
+        reviewInfo = {
+          status,
+          issues,
+          notes,
+          reviewed_at,
+          reviewed_by,
+        };
+        reviewNotes = notes ?? "";
+      } else {
+        const issues = detectIssues(entry, transactions, $accounts);
+        reviewInfo = { ...serverInfo, issues };
+      }
     } catch (error) {
       console.error("Failed to load review data:", error);
     } finally {
@@ -72,9 +87,7 @@
       reviewNotes || undefined,
     );
     if (success) {
-      reviewInfo.status = "approved";
-      reviewInfo.reviewed_at = new Date().toISOString();
-      reviewInfo.notes = reviewNotes || undefined;
+      await loadReviewData();
       notify("文档已通过复核");
     }
   }
@@ -87,9 +100,7 @@
       reviewNotes || undefined,
     );
     if (success) {
-      reviewInfo.status = "rejected";
-      reviewInfo.reviewed_at = new Date().toISOString();
-      reviewInfo.notes = reviewNotes || undefined;
+      await loadReviewData();
       notify("文档已拒绝复核");
     }
   }
@@ -98,29 +109,18 @@
     if (!reviewInfo) return;
     const success = await clearDocumentReviewStatus(entry);
     if (success) {
-      reviewInfo.status = "pending";
-      reviewInfo.reviewed_at = undefined;
-      reviewInfo.notes = undefined;
-      reviewNotes = "";
+      await loadReviewData();
       notify("复核状态已清除");
     }
   }
 
   $effect(() => {
-    if (entry.t === "Document" && transactions.length > 0) {
-      const issues = detectIssues(entry, transactions, $accounts);
-      const status = getReviewStatus(entry) ?? "pending";
-      const notes = entry.meta.get("review_notes")?.toString();
-      const reviewed_at = entry.meta.get("reviewed_at")?.toString();
-      const reviewed_by = entry.meta.get("reviewed_by")?.toString();
-
-      reviewInfo = {
-        status,
-        issues,
-        notes,
-        reviewed_at,
-        reviewed_by,
-      };
+    const updatedHash = $reviewStore.lastUpdatedHash;
+    const updatedStatus = $reviewStore.lastUpdatedStatus;
+    if (updatedHash === entry.entry_hash && updatedStatus !== null) {
+      if (reviewInfo) {
+        reviewInfo = { ...reviewInfo, status: updatedStatus ?? "pending" };
+      }
     }
   });
 </script>

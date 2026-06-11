@@ -32,7 +32,11 @@ def meta_items(meta: Meta | None) -> list[tuple[str, MetaValue]]:
     return [
         (key, value)
         for key, value in meta.items()
-        if not (key in {"filename", "lineno"} or key.startswith("__"))
+        if not (
+            key in {"filename", "lineno"}
+            or key.startswith("__")
+            or key.startswith("review_")
+        )
     ]
 
 

@@ -29,31 +29,20 @@ const REVIEWED_BY_KEY = "reviewed_by";
 
 export function getReviewStatus(doc: Document): ReviewStatus | null {
   const status = doc.meta.get(REVIEW_STATUS_KEY);
-  if (status === "pending" || status === "approved" || status === "rejected") {
+  if (typeof status === "string" && (status === "pending" || status === "approved" || status === "rejected")) {
     return status;
   }
   return null;
 }
 
-export function setReviewStatus(
-  doc: Document,
-  status: ReviewStatus,
-  notes?: string,
-): Document {
-  let updated = doc.set_meta(REVIEW_STATUS_KEY, status);
-  updated = updated.set_meta(REVIEWED_AT_KEY, new Date().toISOString());
-  if (notes) {
-    updated = updated.set_meta(REVIEW_NOTES_KEY, notes);
-  }
-  return updated;
+export function getReviewNotes(doc: Document): string | undefined {
+  const value = doc.meta.get(REVIEW_NOTES_KEY);
+  return typeof value === "string" ? value : undefined;
 }
 
-export function clearReviewStatus(doc: Document): Document {
-  let updated = doc.meta.delete(REVIEW_STATUS_KEY);
-  updated = updated.delete(REVIEW_NOTES_KEY);
-  updated = updated.delete(REVIEWED_AT_KEY);
-  updated = updated.delete(REVIEWED_BY_KEY);
-  return doc.set("meta", updated);
+export function getReviewedAt(doc: Document): string | undefined {
+  const value = doc.meta.get(REVIEWED_AT_KEY);
+  return typeof value === "string" ? value : undefined;
 }
 
 export function detectIssues(
@@ -156,8 +145,8 @@ export function getReviewInfo(
   const status = getReviewStatus(doc) ?? "pending";
   const issues = detectIssues(doc, transactions, accounts);
 
-  const notes = doc.meta.get(REVIEW_NOTES_KEY)?.toString();
-  const reviewed_at = doc.meta.get(REVIEWED_AT_KEY)?.toString();
+  const notes = getReviewNotes(doc);
+  const reviewed_at = getReviewedAt(doc);
   const reviewed_by = doc.meta.get(REVIEWED_BY_KEY)?.toString();
 
   return {
