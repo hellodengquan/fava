@@ -8,8 +8,7 @@ from typing import TYPE_CHECKING
 from flask import request
 
 from fava.core.conversion import conversion_from_str
-from fava.util.date import INTERVALS
-from fava.util.date import Month
+from fava.core.query_params import parse_query_params
 
 if TYPE_CHECKING:  # pragma: no cover
     from fava.core import FavaLedger
@@ -30,9 +29,14 @@ class Context:
     extension: FavaExtensionBase | None
 
     @cached_property
+    def _query_params(self):
+        """The parsed query parameters."""
+        return parse_query_params(request.args)
+
+    @cached_property
     def conversion(self) -> str:
         """Conversion to apply (raw string)."""
-        return request.args.get("conversion", "") or "at_cost"
+        return self._query_params.conversion
 
     @cached_property
     def conv(self) -> Conversion:
@@ -42,14 +46,14 @@ class Context:
     @cached_property
     def interval(self) -> Interval:
         """Interval to group by."""
-        return INTERVALS.get(request.args.get("interval", "").lower(), Month)
+        return self._query_params.interval
 
     @cached_property
     def filtered(self) -> FilteredLedger:
         """The filtered ledger."""
-        args = request.args
+        params = self._query_params
         return self.ledger.get_filtered(
-            account=args.get("account", ""),
-            filter=args.get("filter", ""),
-            time=args.get("time", ""),
+            account=params.account,
+            filter=params.filter,
+            time=params.time,
         )

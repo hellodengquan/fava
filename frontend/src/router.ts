@@ -13,6 +13,11 @@ import { getUrlPath } from "./helpers.ts";
 import { get_el } from "./lib/dom.ts";
 import { assert_is_error } from "./lib/errors.ts";
 import { log_error } from "./log.ts";
+import {
+  QUERY_PARAM_NAMES,
+  setQueryParamOnURL,
+  type QueryParamName,
+} from "./lib/query_params.ts";
 import type { RenderedReport } from "./reports/route.ts";
 import {
   backend_route,
@@ -39,17 +44,9 @@ const is_external_link = (link: HTMLAnchorElement | SVGAElement) =>
 /** The navigation API is still rather new so only optionally depend on it for now. */
 const navigation_api = "navigation" in globalThis ? navigation : null;
 
-/**
- * The various query parameters used in Fava.
- */
-type FavaQueryParameters =
-  | "account"
-  | "charts"
-  | "conversion"
-  | "filter"
-  | "interval"
-  | "query_string"
-  | "time";
+export type FavaQueryParameters = QueryParamName;
+
+export { QUERY_PARAM_NAMES };
 
 /** Set a query parameter, mutating the URL in place. */
 export function set_query_param(
@@ -57,11 +54,7 @@ export function set_query_param(
   key: FavaQueryParameters,
   value: string,
 ): void {
-  if (value) {
-    url.searchParams.set(key, value);
-  } else {
-    url.searchParams.delete(key);
-  }
+  setQueryParamOnURL(url, key, value);
 }
 
 class LoadingState {

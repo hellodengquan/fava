@@ -1,52 +1,64 @@
 import { derived } from "svelte/store";
 
+import {
+  DEFAULT_CONVERSION,
+  DEFAULT_QUERY_PARAMS,
+  getFilters,
+  getFiltersConversionInterval,
+  parseQueryParams,
+  QUERY_PARAM_NAMES,
+  type Filters,
+  type FiltersConversionInterval,
+  type QueryParams,
+} from "../lib/query_params.ts";
 import { searchParams } from "./url.ts";
 
-/** The time filter. */
+export { DEFAULT_CONVERSION };
+export type { Filters, FiltersConversionInterval, QueryParams };
+
+const parsedParams = derived(searchParams, ($searchParams) =>
+  parseQueryParams($searchParams),
+);
+
 export const time_filter = derived(
-  searchParams,
-  ($searchParams) => $searchParams.get("time") ?? "",
+  parsedParams,
+  ($params) => $params.time,
 );
-/** The account filter. */
+
 export const account_filter = derived(
-  searchParams,
-  ($searchParams) => $searchParams.get("account") ?? "",
+  parsedParams,
+  ($params) => $params.account,
 );
-/** The filter with our custom query syntax. */
+
 export const fql_filter = derived(
-  searchParams,
-  ($searchParams) => $searchParams.get("filter") ?? "",
+  parsedParams,
+  ($params) => $params.filter,
 );
 
-/** The three entry filters that Fava supports. */
-export interface Filters extends Record<string, string> {
-  account: string;
-  filter: string;
-  time: string;
-}
+export const conversion = derived(
+  parsedParams,
+  ($params) => $params.conversion,
+);
 
-/** The three filters as well as conversion and interval. */
-export interface FiltersConversionInterval extends Filters {
-  conversion: string;
-  interval: string;
-}
+export const interval = derived(
+  parsedParams,
+  ($params) => $params.interval,
+);
 
-/** The current filters, can be used as URL parameters. */
+export const show_charts = derived(
+  parsedParams,
+  ($params) => $params.charts,
+);
+
+export const query_params = parsedParams;
+
 export const filter_params = derived(
-  [time_filter, account_filter, fql_filter],
-  ([$time_filter, $account_filter, $fql_filter]): Filters => ({
-    time: $time_filter,
-    account: $account_filter,
-    filter: $fql_filter,
-  }),
+  parsedParams,
+  ($params): Filters => getFilters($params),
 );
 
 export function getURLFilters(url: URL): FiltersConversionInterval {
-  return {
-    account: url.searchParams.get("account") ?? "",
-    filter: url.searchParams.get("filter") ?? "",
-    time: url.searchParams.get("time") ?? "",
-    conversion: url.searchParams.get("conversion") ?? "",
-    interval: url.searchParams.get("interval") ?? "",
-  };
+  return getFiltersConversionInterval(parseQueryParams(url.searchParams));
 }
+
+export { DEFAULT_QUERY_PARAMS, QUERY_PARAM_NAMES };

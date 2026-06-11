@@ -188,6 +188,8 @@ _cached_url_for = lru_cache(2048)(flask_url_for)
 
 
 def _inject_filters(endpoint: str, values: dict[str, str]) -> None:
+    from fava.core.query_params import SYNCED_QUERY_PARAM_NAMES
+
     if (
         "bfile" not in values
         and current_app.url_map.is_endpoint_expecting(endpoint, "bfile")
@@ -196,7 +198,7 @@ def _inject_filters(endpoint: str, values: dict[str, str]) -> None:
         values["bfile"] = g.beancount_file_slug
     if endpoint in {"static", "index"}:
         return
-    for name in ("conversion", "interval", "account", "filter", "time"):
+    for name in SYNCED_QUERY_PARAM_NAMES:
         if name not in values:
             val = request.args.get(name)
             if val is not None:
