@@ -5,6 +5,7 @@ from __future__ import annotations
 from bisect import bisect_left
 from operator import attrgetter
 from typing import Any
+from typing import Callable
 from typing import TYPE_CHECKING
 from typing import TypeVar
 
@@ -48,6 +49,107 @@ def slice_entry_dates(
     return entries[index_begin:index_end]
 
 
+# ============================================================================
+# System entry identification with pluggable rules
+# ============================================================================
+
+_SystemEntryRule = Callable[["Directive"], bool]
+"""Type alias for a system entry identification rule."""
+
+_system_entry_rules: list[_SystemEntryRule] = []
+"""List of registered rules for identifying system-generated entries."""
+
+
+def _rule_filename_angular_bracket(entry: Directive) -> bool:
+    """Rule: Transaction with meta.filename starting with '<'.
+
+    Beancount's clamp_opt function creates summarization entries with
+    filenames like '<internal>', '<conversion>', etc. The leading '<'
+    indicates a programmatically generated entry rather than one from
+    a user's ledger file.
+
+    Args:
+        entry: The directive to check.
+
+    Returns:
+        True if the entry is a Transaction with a '<' prefixed filename.
+    """
+    from fava.beans.abc import Transaction
+
+    if not isinstance(entry, Transaction):
+        return False
+    filename = entry.meta.get("filename", "")
+    return filename.startswith("<")
+
+
+def _rule_meta_system_flag(entry: Directive) -> bool:
+    """Rule: Entry with a 'system' flag in its meta dict.
+
+    Entries marked with meta.system = True are considered system-generated.
+    This provides a standard way for plugins and modules to tag entries
+    as system-generated without relying on filename patterns.
+
+    The 'system' key can be:
+    - A boolean True value
+    - A truthy string (e.g. "true", "1", "yes")
+    - Any truthy value
+
+    Args:
+        entry: The directive to check.
+
+    Returns:
+        True if the entry's meta dict contains a truthy 'system' key.
+    """
+    from fava.beans.abc import Transaction
+
+    if not isinstance(entry, Transaction):
+        return False
+    system_flag = entry.meta.get("system", False)
+    return bool(system_flag)
+
+
+def register_system_entry_rule(rule: _SystemEntryRule) -> None:
+    """Register a new rule for identifying system-generated entries.
+
+    Rules are callables that take a Directive and return True if the
+    entry should be considered system-generated. All registered rules
+    are checked in order, and *any* rule returning True will cause
+    the entry to be classified as system-generated.
+
+    Built-in rules (registered by default):
+    1. Filename angular bracket rule: meta.filename starts with '<'
+    2. Meta system flag rule: meta.system is truthy
+
+    Args:
+        rule: A callable that takes a Directive and returns a bool.
+              True means the entry is system-generated.
+
+    Example::
+
+        from fava.beans.helpers import register_system_entry_rule
+
+        def my_custom_rule(entry):
+            return entry.meta.get("source") == "auto-generated"
+
+        register_system_entry_rule(my_custom_rule)
+
+    """
+    if rule not in _system_entry_rules:
+        _system_entry_rules.append(rule)
+
+
+def reset_system_entry_rules() -> None:
+    """Reset system entry rules to the default set.
+
+    This removes all custom-registered rules and restores only the
+    built-in default rules. Useful for testing or when you need to
+    clear all custom rules.
+    """
+    _system_entry_rules.clear()
+    register_system_entry_rule(_rule_filename_angular_bracket)
+    register_system_entry_rule(_rule_meta_system_flag)
+
+
 def is_system_entry(entry: Directive) -> bool:
     """Check if an entry is a system-generated entry.
 
@@ -57,11 +159,14 @@ def is_system_entry(entry: Directive) -> bool:
     actual user transactions and should be excluded from transaction
     statistics.
 
-    Identification rule:
-    - Transaction entries with meta.filename starting with '<' are
-      considered system-generated. The '<' prefix indicates the
-      entry was created programmatically rather than from a user's
-      ledger file.
+    Identification uses a pluggable rule system. See
+    :func:`register_system_entry_rule` for adding custom rules.
+
+    Default identification rules:
+    1. **Filename angular bracket rule**: Transaction entries with
+       ``meta.filename`` starting with ``'<'`` are system-generated.
+    2. **Meta system flag rule**: Transaction entries with a truthy
+       ``meta.system`` flag are system-generated.
 
     Args:
         entry: The directive to check.
@@ -75,8 +180,11 @@ def is_system_entry(entry: Directive) -> bool:
 
     if not isinstance(entry, Transaction):
         return False
-    filename = entry.meta.get("filename", "")
-    return filename.startswith("<")
+    return any(rule(entry) for rule in _system_entry_rules)
+
+
+# Initialize with default rules
+reset_system_entry_rules()
 
 
 def is_system_generated_transaction(entry: Directive) -> bool:
