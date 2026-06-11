@@ -887,3 +887,78 @@ def get_statistics() -> Statistics:
         balances=balances,
         entries_by_type=entries_by_type,
     )
+
+
+########################################################################
+# Filter Presets
+
+
+@json_api.route("/filter_presets", methods=["GET"])
+def get_filter_presets() -> Response:
+    """List all filter presets, optionally filtered by page type."""
+    page = request.args.get("page", None)
+    presets = g.ledger.filter_presets.list_presets(page)
+    return json_success(presets)
+
+
+@json_api.route("/filter_preset", methods=["GET"])
+def get_filter_preset() -> Response:
+    """Get a single filter preset by ID."""
+    preset_id = request.args.get("id", "")
+    if not preset_id:
+        return json_err("Parameter 'id' is missing.", HTTPStatus.BAD_REQUEST)
+    preset = g.ledger.filter_presets.get_preset(preset_id)
+    return json_success(preset)
+
+
+@json_api.route("/filter_preset", methods=["PUT"])
+def put_filter_preset() -> Response:
+    """Create a new filter preset."""
+    request_json = request.get_json(silent=True)
+    if request_json is None:
+        raise InvalidJsonRequestError
+    name = request_json.get("name", "")
+    page = request_json.get("page", "all")
+    filters = request_json.get("filters", {})
+    if not isinstance(filters, dict):
+        return json_err(
+            "Parameter 'filters' must be an object.", HTTPStatus.BAD_REQUEST
+        )
+    filters_dict = {k: str(v) for k, v in filters.items()}
+    preset = g.ledger.filter_presets.create_preset(name, page, filters_dict)
+    return json_success(preset)
+
+
+@json_api.route("/filter_preset", methods=["POST"])
+def post_filter_preset() -> Response:
+    """Update an existing filter preset (rename or update filters)."""
+    request_json = request.get_json(silent=True)
+    if request_json is None:
+        raise InvalidJsonRequestError
+    preset_id = request_json.get("id", "")
+    if not preset_id:
+        return json_err("Parameter 'id' is missing.", HTTPStatus.BAD_REQUEST)
+    name = request_json.get("name")
+    page = request_json.get("page")
+    filters = request_json.get("filters")
+    filters_dict = None
+    if filters is not None:
+        if not isinstance(filters, dict):
+            return json_err(
+                "Parameter 'filters' must be an object.", HTTPStatus.BAD_REQUEST
+            )
+        filters_dict = {k: str(v) for k, v in filters.items()}
+    preset = g.ledger.filter_presets.update_preset(
+        preset_id, name=name, page=page, filters=filters_dict
+    )
+    return json_success(preset)
+
+
+@json_api.route("/filter_preset", methods=["DELETE"])
+def delete_filter_preset() -> Response:
+    """Delete a filter preset by ID."""
+    preset_id = request.args.get("id", "")
+    if not preset_id:
+        return json_err("Parameter 'id' is missing.", HTTPStatus.BAD_REQUEST)
+    g.ledger.filter_presets.delete_preset(preset_id)
+    return json_success(f"Deleted filter preset '{preset_id}'.")

@@ -402,3 +402,160 @@ export async function save_entries(
     throw error;
   }
 }
+
+// -----------------------------------------------------------------------------
+// Filter Presets API
+// -----------------------------------------------------------------------------
+
+/** The filter parameters stored in a preset. */
+export interface FilterPresetFilters {
+  readonly account: string;
+  readonly filter: string;
+  readonly time: string;
+  readonly conversion: string;
+  readonly interval: string;
+}
+
+/** Valid page types for filter presets. */
+export type FilterPresetPageType =
+  | "account"
+  | "balance_sheet"
+  | "income_statement"
+  | "trial_balance"
+  | "all";
+
+/** A named filter preset. */
+export interface FilterPreset {
+  readonly id: string;
+  readonly name: string;
+  readonly page: FilterPresetPageType;
+  readonly filters: FilterPresetFilters;
+  readonly created_at: number;
+  readonly updated_at: number;
+}
+
+/** Validator for FilterPresetFilters. */
+const filter_preset_filters_validator = object<FilterPresetFilters>({
+  account: string,
+  filter: string,
+  time: string,
+  conversion: string,
+  interval: string,
+});
+
+/** Validator for FilterPreset. */
+const filter_preset_validator = object<FilterPreset>({
+  id: string,
+  name: string,
+  page: string as unknown as Validator<FilterPresetPageType>,
+  filters: filter_preset_filters_validator,
+  created_at: number,
+  updated_at: number,
+});
+
+/** Validator for array of FilterPreset. */
+const filter_presets_validator = array(filter_preset_validator);
+
+/**
+ * Fetch all filter presets, optionally filtered by page type.
+ * @param page - Optional page type to filter by.
+ */
+export async function get_filter_presets(
+  page?: FilterPresetPageType,
+): Promise<FilterPreset[]> {
+  const $base_url = store_get(base_url);
+  const url = new URL(`${$base_url}api/filter_presets`, window.location.href);
+  if (page) {
+    url.searchParams.set("page", page);
+  }
+  return fetch_and_handle_api_call(
+    url,
+    { method: "GET" },
+    filter_presets_validator,
+  );
+}
+
+/**
+ * Fetch a single filter preset by ID.
+ * @param id - The preset ID.
+ */
+export async function get_filter_preset(id: string): Promise<FilterPreset> {
+  const $base_url = store_get(base_url);
+  const url = new URL(`${$base_url}api/filter_preset`, window.location.href);
+  url.searchParams.set("id", id);
+  return fetch_and_handle_api_call(
+    url,
+    { method: "GET" },
+    filter_preset_validator,
+  );
+}
+
+/** Parameters for creating a filter preset. */
+export interface CreateFilterPresetParams {
+  name: string;
+  page: FilterPresetPageType;
+  filters: FilterPresetFilters;
+}
+
+/**
+ * Create a new filter preset.
+ * @param params - The preset parameters.
+ */
+export async function create_filter_preset(
+  params: CreateFilterPresetParams,
+): Promise<FilterPreset> {
+  const $base_url = store_get(base_url);
+  const url = new URL(`${$base_url}api/filter_preset`, window.location.href);
+  return fetch_and_handle_api_call(
+    url,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    },
+    filter_preset_validator,
+  );
+}
+
+/** Parameters for updating a filter preset. */
+export interface UpdateFilterPresetParams {
+  id: string;
+  name?: string;
+  page?: FilterPresetPageType;
+  filters?: FilterPresetFilters;
+}
+
+/**
+ * Update an existing filter preset.
+ * @param params - The update parameters.
+ */
+export async function update_filter_preset(
+  params: UpdateFilterPresetParams,
+): Promise<FilterPreset> {
+  const $base_url = store_get(base_url);
+  const url = new URL(`${$base_url}api/filter_preset`, window.location.href);
+  return fetch_and_handle_api_call(
+    url,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    },
+    filter_preset_validator,
+  );
+}
+
+/**
+ * Delete a filter preset by ID.
+ * @param id - The preset ID to delete.
+ */
+export async function delete_filter_preset(id: string): Promise<string> {
+  const $base_url = store_get(base_url);
+  const url = new URL(`${$base_url}api/filter_preset`, window.location.href);
+  url.searchParams.set("id", id);
+  return fetch_and_handle_api_call(
+    url,
+    { method: "DELETE" },
+    string,
+  );
+}

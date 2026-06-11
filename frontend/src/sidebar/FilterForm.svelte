@@ -8,7 +8,10 @@
     fql_filter,
     time_filter,
   } from "../stores/filters.ts";
+  import type { FilterPresetPageType } from "../api/index.ts";
   import { accounts, links, payees, tags, years } from "../stores/index.ts";
+  import { pathname } from "../stores/url.ts";
+  import FilterPresets from "./FilterPresets.svelte";
 
   let fql_filter_suggestions = $derived([
     ...$tags.map((tag) => `#${tag}`),
@@ -46,6 +49,19 @@
   time_filter.subscribe((v) => {
     time_filter_value = v;
   });
+
+  /**
+   * Determine the current page type from the URL pathname.
+   */
+  function current_page_type(path: string): FilterPresetPageType {
+    if (path.startsWith("/account/")) return "account";
+    if (path.startsWith("/balance_sheet")) return "balance_sheet";
+    if (path.startsWith("/income_statement")) return "income_statement";
+    if (path.startsWith("/trial_balance")) return "trial_balance";
+    return "all";
+  }
+
+  let page_type = $derived(current_page_type($pathname));
 
   /** Set the target we want to navigate to to avoid duplicate navigation. */
   let target: URL | null = null;
@@ -119,6 +135,7 @@
   />
   <!-- svelte-ignore a11y_consider_explicit_label -->
   <button type="submit"></button>
+  <FilterPresets page={page_type} />
 </form>
 
 <style>

@@ -36,6 +36,7 @@ from fava.core.extensions import ExtensionModule
 from fava.core.fava_options import parse_options
 from fava.core.file import _incomplete_sortkey
 from fava.core.file import FileModule
+from fava.core.filter_presets import FilterPresetsModule
 from fava.core.filters import AccountFilter
 from fava.core.filters import AdvancedFilter
 from fava.core.filters import TimeFilter
@@ -309,6 +310,7 @@ class FavaLedger:
         "fava_options",
         "fava_options_errors",
         "file",
+        "filter_presets",
         "format_decimal",
         "get_entry",
         "get_filtered",
@@ -363,6 +365,9 @@ class FavaLedger:
     #: A :class:`.FileModule` instance.
     file: FileModule
 
+    #: A :class:`.FilterPresetsModule` instance.
+    filter_presets: FilterPresetsModule
+
     #: A :class:`.DecimalFormatModule` instance.
     format_decimal: DecimalFormatModule
 
@@ -395,6 +400,7 @@ class FavaLedger:
         self.commodities = CommoditiesModule(self)
         self.extensions = ExtensionModule(self)
         self.file = FileModule(self)
+        self.filter_presets = FilterPresetsModule(path)
         self.format_decimal = DecimalFormatModule(self)
         self.ingest = IngestModule(self)
         self.misc = FavaMisc(self)
