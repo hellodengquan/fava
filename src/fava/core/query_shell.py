@@ -57,14 +57,41 @@ class QueryCompilationError(FavaShellError):
     """Query compilation error."""
 
     def __init__(self, err: CompilationError) -> None:
-        super().__init__(f"Query compilation error: {err!s}.")
+        message = f"Query compilation error: {err!s}."
+        if err.parseinfo is not None:
+            pos = err.parseinfo.pos
+            endpos = err.parseinfo.endpos
+            query_text = err.parseinfo.tokenizer.text
+            context = _error_context(query_text, pos, endpos)
+            message = (
+                f"Query compilation error: {err!s}"
+                f" at position {pos}.{context}"
+            )
+        super().__init__(message)
 
 
 class QueryParseError(FavaShellError):
     """Query parse error."""
 
     def __init__(self, err: ParseError) -> None:
-        super().__init__(f"Query parse error: {err!s}.")
+        message = f"Query parse error: {err!s}."
+        if err.parseinfo is not None:
+            pos = err.parseinfo.pos
+            endpos = err.parseinfo.endpos
+            query_text = err.parseinfo.tokenizer.text
+            context = _error_context(query_text, pos, endpos)
+            message = (
+                f"Query parse error: {err!s}"
+                f" at position {pos}.{context}"
+            )
+        super().__init__(message)
+
+
+def _error_context(query_text: str, pos: int, endpos: int) -> str:
+    start = max(0, pos - 10)
+    end = min(len(query_text), endpos + 10)
+    snippet = query_text[start:end]
+    return f' Near "...{snippet}..."'
 
 
 class NonExportableQueryError(FavaShellError):

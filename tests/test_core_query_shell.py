@@ -95,6 +95,90 @@ def test_query_errors(run_query: Callable[[str], QueryResult]) -> None:
         run_query("select asdf")
 
 
+def test_query_empty_input(run_query: Callable[[str], QueryResult]) -> None:
+    result = run_query("")
+    assert isinstance(result, QueryResultText)
+
+    result = run_query("   ")
+    assert isinstance(result, QueryResultText)
+
+
+def test_query_invalid_field(run_query: Callable[[str], QueryResult]) -> None:
+    with pytest.raises(QueryCompilationError) as exc_info:
+        run_query("SELECT nonexistent_col")
+    msg = str(exc_info.value)
+    assert "nonexistent_col" in msg
+    assert "at position" in msg
+    assert "Near" in msg
+
+    with pytest.raises(QueryCompilationError) as exc_info:
+        run_query("SELECT date WHERE xyz = 1")
+    msg = str(exc_info.value)
+    assert "xyz" in msg
+    assert "at position" in msg
+
+
+def test_query_duplicate_sort(run_query: Callable[[str], QueryResult]) -> None:
+    result = run_query("SELECT date ORDER BY date, date")
+    assert isinstance(result, QueryResultTable)
+
+    result = run_query("SELECT account ORDER BY account ASC, account DESC")
+    assert isinstance(result, QueryResultTable)
+
+
+def test_query_overlong_literal(
+    run_query: Callable[[str], QueryResult],
+) -> None:
+    long_value = "x" * 10000
+    result = run_query(f'SELECT * WHERE account = "{long_value}"')
+    assert isinstance(result, QueryResultTable)
+    assert len(result.rows) == 0
+
+
+def test_query_unclosed_string(
+    run_query: Callable[[str], QueryResult],
+) -> None:
+    with pytest.raises(QueryParseError) as exc_info:
+        run_query("SELECT * WHERE account = 'Assets")
+    msg = str(exc_info.value)
+    assert "syntax error" in msg
+    assert "at position" in msg
+    assert "Near" in msg
+
+    with pytest.raises(QueryParseError) as exc_info:
+        run_query('SELECT * WHERE account = "Assets')
+    msg = str(exc_info.value)
+    assert "syntax error" in msg
+    assert "at position" in msg
+    assert "Near" in msg
+
+
+def test_query_parse_error_position(
+    run_query: Callable[[str], QueryResult],
+) -> None:
+    with pytest.raises(QueryParseError) as exc_info:
+        run_query("asdf")
+    msg = str(exc_info.value)
+    assert "at position 0" in msg
+
+    with pytest.raises(QueryParseError) as exc_info:
+        run_query("SELECT date @@@")
+    msg = str(exc_info.value)
+    assert "at position" in msg
+    assert "@@@" in msg
+
+    with pytest.raises(QueryParseError) as exc_info:
+        run_query("SELECT date FROM")
+    msg = str(exc_info.value)
+    assert "at position" in msg
+    assert "FROM" in msg
+
+    with pytest.raises(QueryParseError) as exc_info:
+        run_query("SELECT date WHERE date !! 2020-01-01")
+    msg = str(exc_info.value)
+    assert "at position" in msg
+
+
 def test_query_to_file(
     snapshot: SnapshotFunc,
     get_ledger: GetFavaLedger,
