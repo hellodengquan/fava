@@ -27,8 +27,6 @@
 
   let { page }: Props = $props();
 
-  /** The currently selected preset ID in the dropdown (empty = no selection). */
-  let selected_preset_id = $state("");
   /** Whether the save dialog is open. */
   let show_save_dialog = $state(false);
   /** Whether the manage menu is open. */
@@ -46,6 +44,7 @@
 
   let presets_list = $state<FilterPreset[]>([]);
   let loading = $state(false);
+  let selected_preset_id = $state("");
 
   function unsubscribe_presets() {
     return filter_presets.subscribe((v) => {
@@ -57,19 +56,41 @@
       loading = v;
     });
   }
+  function unsubscribe_selected() {
+    return filter_presets.selected_id.subscribe((v) => {
+      selected_preset_id = v;
+    });
+  }
 
   let unsub_presets: ReturnType<typeof unsubscribe_presets>;
   let unsub_loading: ReturnType<typeof unsubscribe_loading>;
+  let unsub_selected: ReturnType<typeof unsubscribe_selected>;
 
   onMount(() => {
     unsub_presets = unsubscribe_presets();
     unsub_loading = unsubscribe_loading();
+    unsub_selected = unsubscribe_selected();
     refresh_presets();
 
     return () => {
       unsub_presets();
       unsub_loading();
+      unsub_selected();
     };
+  });
+
+  /**
+   * When the list of presets changes, ensure the selected ID still refers
+   * to a visible entry; otherwise clear the dropdown selection.
+   */
+  $effect(() => {
+    if (
+      selected_preset_id &&
+      !presets_list.some((p) => p.id === selected_preset_id)
+    ) {
+      selected_preset_id = "";
+      filter_presets.set_selected_id("");
+    }
   });
 
   /**
@@ -95,7 +116,8 @@
     const id = target.value;
     if (id) {
       filter_presets.apply(id);
-      selected_preset_id = id;
+    } else {
+      filter_presets.set_selected_id("");
     }
   }
 
@@ -125,7 +147,6 @@
     const filters = filters_from_url();
     const created = await filter_presets.create(name, page, filters);
     if (created) {
-      selected_preset_id = created.id;
       close_save_dialog();
     }
   }
@@ -185,9 +206,6 @@
   async function delete_preset(id: string): Promise<void> {
     const success = await filter_presets.delete(id);
     if (success) {
-      if (selected_preset_id === id) {
-        selected_preset_id = "";
-      }
       show_manage_menu = false;
     }
   }
@@ -353,7 +371,6 @@
                 title={_("Apply this preset")}
                 onclick={() => {
                   filter_presets.apply(preset.id);
-                  selected_preset_id = preset.id;
                   show_manage_menu = false;
                 }}
               >

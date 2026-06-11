@@ -35,6 +35,12 @@ from fava.core.documents import filepath_in_document_folder
 from fava.core.documents import is_document_or_import_file
 from fava.core.file import GeneratedEntryError
 from fava.core.file import get_entry_slice
+from fava.core.filter_presets import FilterPresetError
+from fava.core.filter_presets import (
+    FilterPresetConcurrentModificationError,
+)
+from fava.core.filter_presets import FilterPresetNameConflictError
+from fava.core.filter_presets import FilterPresetNotFoundError
 from fava.core.filters import FilterError
 from fava.core.group_entries import group_entries_by_type
 from fava.core.ingest import filepath_in_primary_imports_folder
@@ -96,9 +102,20 @@ class InvalidJsonRequestError(ValidationError):
         super().__init__("Invalid JSON body.")
 
 
-def json_err(msg: str, status: HTTPStatus) -> Response:
-    """Jsonify the error message."""
-    res = jsonify({"error": msg})
+def json_err(
+    msg: str,
+    status: HTTPStatus,
+    *,
+    code: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> Response:
+    """Jsonify the error message, optionally including a code and details."""
+    payload: dict[str, Any] = {"error": msg}
+    if code is not None:
+        payload["code"] = code
+    if details is not None:
+        payload["details"] = details
+    res = jsonify(payload)
     res.status = status
     return res
 
@@ -180,6 +197,46 @@ class NotAFileError(FavaJSONAPIError):
 
     def __init__(self, filename: str) -> None:
         super().__init__(f"Not a file: '{filename}'")
+
+
+@json_api.errorhandler(FilterPresetNameConflictError)
+def _(error: FilterPresetNameConflictError) -> Response:
+    return json_err(
+        error.message,
+        HTTPStatus.CONFLICT,
+        code=error.code,
+        details=error.details,
+    )
+
+
+@json_api.errorhandler(FilterPresetNotFoundError)
+def _(error: FilterPresetNotFoundError) -> Response:
+    return json_err(
+        error.message,
+        HTTPStatus.NOT_FOUND,
+        code=error.code,
+        details=error.details,
+    )
+
+
+@json_api.errorhandler(FilterPresetConcurrentModificationError)
+def _(error: FilterPresetConcurrentModificationError) -> Response:
+    return json_err(
+        error.message,
+        HTTPStatus.CONFLICT,
+        code=error.code,
+        details=error.details,
+    )
+
+
+@json_api.errorhandler(FilterPresetError)
+def _(error: FilterPresetError) -> Response:
+    return json_err(
+        error.message,
+        HTTPStatus.UNPROCESSABLE_ENTITY,
+        code=error.code,
+        details=error.details,
+    )
 
 
 @json_api.errorhandler(FavaAPIError)

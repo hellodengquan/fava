@@ -9,6 +9,7 @@ import {
   type FilterPresetPageType,
   update_filter_preset,
 } from "../api/index.ts";
+import type { FetchHTTPError } from "../lib/fetch.ts";
 import { notify, notify_err } from "../notifications.ts";
 import { router, set_query_param } from "../router.ts";
 import { getURLFilters } from "./filters.ts";
@@ -47,16 +48,86 @@ export function apply_filters_to_url(filters: FilterPresetFilters): void {
   }
 }
 
+/** Known filter-preset error codes returned from the backend. */
+type FilterPresetErrorCode =
+  | "name_conflict"
+  | "not_found"
+  | "concurrent_modification"
+  | "empty_name"
+  | "name_too_long"
+  | "invalid_page_type"
+  | "filter_preset_error";
+
+/**
+ * Extract a structured filter-preset error from a thrown value if possible.
+ */
+function parse_preset_error(error: unknown): {
+  code: FilterPresetErrorCode;
+  message: string;
+  details: Record<string, unknown>;
+} | null {
+  if (error instanceof Error && (error as FetchHTTPError).code) {
+    const http_err = error as FetchHTTPError;
+    const code = (http_err.code as FilterPresetErrorCode) ?? "filter_preset_error";
+    return {
+      code,
+      message: http_err.message,
+      details: (http_err.details as Record<string, unknown>) ?? {},
+    };
+  }
+  return null;
+}
+
+/**
+ * Format a user-facing error message, enriching it with the conflicting
+ * preset name or other helpful context when available.
+ */
+function format_preset_error_message(error: unknown, fallback: string): string {
+  const parsed = parse_preset_error(error);
+  if (!parsed) return fallback;
+
+  switch (parsed.code) {
+    case "name_conflict": {
+      const conflicting_name = parsed.details.conflicting_name;
+      const existing_id = parsed.details.existing_preset_id;
+      if (typeof conflicting_name === "string") {
+        return existing_id
+          ? `A filter preset named "${conflicting_name}" already exists (id: ${String(existing_id)}).`
+          : `A filter preset named "${conflicting_name}" already exists.`;
+      }
+      return "A filter preset with this name already exists.";
+    }
+    case "concurrent_modification":
+      return (
+        "The filter presets were modified in another browser tab or session. " +
+        "Please reload the preset list and try again."
+      );
+    case "not_found":
+      return "The filter preset no longer exists. It may have been deleted elsewhere.";
+    case "empty_name":
+      return "Preset name cannot be empty.";
+    case "name_too_long":
+      return "Preset name is too long (max 100 characters).";
+    default:
+      return fallback;
+  }
+}
+
 class FilterPresetsStore {
   #presets = writable<FilterPreset[]>([]);
   #loading = writable(false);
   #current_page_type = writable<FilterPresetPageType>("all");
+  /** The currently selected preset ID in the UI dropdown. */
+  #selected_id = writable<string>("");
 
   /** Subscribe to the list of presets. */
   subscribe = this.#presets.subscribe;
 
   /** Subscribe to the loading state. */
   loading = { subscribe: this.#loading.subscribe };
+
+  /** Subscribe to the currently selected preset ID. */
+  selected_id = { subscribe: this.#selected_id.subscribe };
 
   /** Subscribe to the current page type filter. */
   current_page_type = { subscribe: this.#current_page_type.subscribe };
@@ -66,14 +137,38 @@ class FilterPresetsStore {
     this.#current_page_type.set(page);
   }
 
+  /** Set the currently selected preset ID (called from the UI). */
+  set_selected_id(id: string): void {
+    this.#selected_id.set(id);
+  }
+
+  /**
+   * If the selected preset has been removed or is no longer visible for the
+   * current page, reset the selection to the empty default.
+   */
+  #maybe_clear_selection(): void {
+    const current = get(this.#selected_id);
+    if (!current) return;
+    const visible = get(this.#presets);
+    if (!visible.some((p) => p.id === current)) {
+      this.#selected_id.set("");
+    }
+  }
+
   /** Load presets from the backend. */
   async load(page?: FilterPresetPageType): Promise<void> {
     this.#loading.set(true);
     try {
       const presets = await get_filter_presets(page);
       this.#presets.set(presets);
+      this.#maybe_clear_selection();
     } catch (error) {
-      notify_err(error, (e) => `Failed to load filter presets: ${e.message}`);
+      notify_err(error, (e) =>
+        format_preset_error_message(
+          e,
+          `Failed to load filter presets: ${e.message}`,
+        ),
+      );
     } finally {
       this.#loading.set(false);
     }
@@ -115,14 +210,16 @@ class FilterPresetsStore {
   ): Promise<FilterPreset | null> {
     const trimmed_name = name.trim();
     if (!trimmed_name) {
-      notify_err(new Error("Preset name cannot be empty."));
+      notify("Preset name cannot be empty.", "error");
       return null;
     }
 
-    // Check for name conflict locally first
-    if (this.name_exists(trimmed_name)) {
-      notify_err(
-        new Error(`A filter preset named "${trimmed_name}" already exists.`),
+    // Fast local check; the authoritative check is still on the backend.
+    const local_conflict = this.find_by_name(trimmed_name);
+    if (local_conflict) {
+      notify(
+        `A filter preset named "${trimmed_name}" already exists.`,
+        "error",
       );
       return null;
     }
@@ -133,11 +230,24 @@ class FilterPresetsStore {
         page,
         filters,
       });
-      this.#presets.update((presets) => [...presets, preset]);
+      this.#presets.update((presets) => {
+        const updated = [...presets, preset];
+        return updated;
+      });
+      this.#selected_id.set(preset.id);
       notify(`Created filter preset "${trimmed_name}".`);
       return preset;
     } catch (error) {
-      notify_err(error, (e) => `Failed to create preset: ${e.message}`);
+      const message = format_preset_error_message(
+        error,
+        `Failed to create preset: ${(error as Error).message}`,
+      );
+      notify(message, "error");
+      // If a conflict was detected server-side, refresh the list.
+      const parsed = parse_preset_error(error);
+      if (parsed?.code === "name_conflict" || parsed?.code === "concurrent_modification") {
+        await this.load(page);
+      }
       return null;
     }
   }
@@ -151,26 +261,33 @@ class FilterPresetsStore {
   async rename(id: string, new_name: string): Promise<FilterPreset | null> {
     const trimmed_name = new_name.trim();
     if (!trimmed_name) {
-      notify_err(new Error("Preset name cannot be empty."));
+      notify("Preset name cannot be empty.", "error");
       return null;
     }
 
-    // Check for name conflict locally first
-    if (this.name_exists(trimmed_name, id)) {
-      notify_err(
-        new Error(`A filter preset named "${trimmed_name}" already exists.`),
-      );
-      return null;
-    }
-
-    // Confirm if name already exists
     const existing = this.find_by_id(id);
-    if (existing && existing.name !== trimmed_name) {
-      const confirmed = window.confirm(
-        `Rename filter preset "${existing.name}" to "${trimmed_name}"?`,
-      );
-      if (!confirmed) return null;
+    if (!existing) {
+      notify("That filter preset no longer exists.", "error");
+      return null;
     }
+
+    if (existing.name === trimmed_name) return existing;
+
+    // Fast local name-conflict check.
+    const name_conflict = this.find_by_name(trimmed_name);
+    if (name_conflict) {
+      notify(
+        `Cannot rename: a filter preset named "${trimmed_name}" already exists.`,
+        "error",
+      );
+      return null;
+    }
+
+    // User confirmation.
+    const confirmed = window.confirm(
+      `Rename filter preset "${existing.name}" to "${trimmed_name}"?`,
+    );
+    if (!confirmed) return null;
 
     try {
       const preset = await update_filter_preset({ id, name: trimmed_name });
@@ -180,7 +297,19 @@ class FilterPresetsStore {
       notify(`Renamed filter preset to "${trimmed_name}".`);
       return preset;
     } catch (error) {
-      notify_err(error, (e) => `Failed to rename preset: ${e.message}`);
+      const message = format_preset_error_message(
+        error,
+        `Failed to rename preset: ${(error as Error).message}`,
+      );
+      notify(message, "error");
+      const parsed = parse_preset_error(error);
+      if (
+        parsed?.code === "name_conflict" ||
+        parsed?.code === "concurrent_modification" ||
+        parsed?.code === "not_found"
+      ) {
+        await this.load();
+      }
       return null;
     }
   }
@@ -196,7 +325,10 @@ class FilterPresetsStore {
     filters: FilterPresetFilters,
   ): Promise<FilterPreset | null> {
     const existing = this.find_by_id(id);
-    if (!existing) return null;
+    if (!existing) {
+      notify("That filter preset no longer exists.", "error");
+      return null;
+    }
 
     try {
       const preset = await update_filter_preset({ id, filters });
@@ -206,7 +338,15 @@ class FilterPresetsStore {
       notify(`Updated filter preset "${preset.name}".`);
       return preset;
     } catch (error) {
-      notify_err(error, (e) => `Failed to update preset: ${e.message}`);
+      const message = format_preset_error_message(
+        error,
+        `Failed to update preset: ${(error as Error).message}`,
+      );
+      notify(message, "error");
+      const parsed = parse_preset_error(error);
+      if (parsed?.code === "concurrent_modification" || parsed?.code === "not_found") {
+        await this.load();
+      }
       return null;
     }
   }
@@ -218,7 +358,10 @@ class FilterPresetsStore {
    */
   async delete(id: string): Promise<boolean> {
     const existing = this.find_by_id(id);
-    if (!existing) return false;
+    if (!existing) {
+      notify("That filter preset no longer exists.", "error");
+      return false;
+    }
 
     const confirmed = window.confirm(
       `Delete filter preset "${existing.name}"? This action cannot be undone.`,
@@ -228,10 +371,23 @@ class FilterPresetsStore {
     try {
       await delete_filter_preset(id);
       this.#presets.update((presets) => presets.filter((p) => p.id !== id));
+      // Clear selection if we just deleted the selected preset.
+      if (get(this.#selected_id) === id) {
+        this.#selected_id.set("");
+      }
+      this.#maybe_clear_selection();
       notify(`Deleted filter preset "${existing.name}".`);
       return true;
     } catch (error) {
-      notify_err(error, (e) => `Failed to delete preset: ${e.message}`);
+      const message = format_preset_error_message(
+        error,
+        `Failed to delete preset: ${(error as Error).message}`,
+      );
+      notify(message, "error");
+      const parsed = parse_preset_error(error);
+      if (parsed?.code === "concurrent_modification" || parsed?.code === "not_found") {
+        await this.load();
+      }
       return false;
     }
   }
@@ -243,9 +399,11 @@ class FilterPresetsStore {
   apply(id: string): void {
     const preset = this.find_by_id(id);
     if (!preset) {
-      notify_err(new Error(`Filter preset "${id}" not found.`));
+      notify("That filter preset no longer exists.", "error");
+      this.#maybe_clear_selection();
       return;
     }
+    this.#selected_id.set(id);
     apply_filters_to_url(preset.filters);
   }
 }
