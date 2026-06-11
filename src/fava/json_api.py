@@ -832,6 +832,7 @@ def get_account_report() -> AccountReportJournal | AccountReportTree:
                     g.ledger.prices,
                     date_range.end_inclusive,
                     with_cost=False,
+                    canonicalizer=g.ledger.commodities.canonical,
                 )
                 for tree, date_range in zip(
                     interval_balances, dates, strict=True

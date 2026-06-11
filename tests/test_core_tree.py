@@ -112,3 +112,55 @@ def test_tree_serialise_with_canonicalizer_aggregates_case_variants(
 
     assert result.balance == {"USD": Decimal("300")}
     assert "usd" not in result.balance
+
+
+def test_interval_balances_serialise_consistent_with_root_tree(
+    example_ledger: FavaLedger,
+) -> None:
+    """区间报表的 serialise 与资产负债表 root_tree 应使用相同的 canonicalizer。
+
+    验证：
+    1. interval_balances 生成的 Tree 在 serialise 时传入 canonicalizer，
+       结果中不出现同一商品的大小写变体。
+    2. root_tree_closed 经过 canonicalizer 处理后，结果口径一致。
+    """
+    from fava.core.conversion import UNITS
+
+    filtered = example_ledger.get_filtered()
+    canonicalizer = example_ledger.commodities.canonical
+
+    root_closed = filtered.root_tree_closed
+    root_result = root_closed.get("Assets").serialise(
+        UNITS,
+        example_ledger.prices,
+        filtered.end_date,
+        canonicalizer=canonicalizer,
+    )
+    root_currencies = set(root_result.balance.keys()) | set(
+        root_result.balance_children.keys()
+    )
+    root_lower = {c.lower() for c in root_currencies}
+    assert len(root_lower) == len(
+        root_currencies
+    ), f"root_tree 存在大小写重复键: {root_currencies}"
+
+    from fava.util.date import Month
+
+    interval_trees, _ = example_ledger.interval_balances(
+        filtered, Month, "Assets", accumulate=True
+    )
+    if interval_trees:
+        for tree in interval_trees:
+            interval_result = tree.get("Assets").serialise(
+                UNITS,
+                example_ledger.prices,
+                filtered.end_date,
+                canonicalizer=canonicalizer,
+            )
+            interval_currencies = set(
+                interval_result.balance.keys()
+            ) | set(interval_result.balance_children.keys())
+            interval_lower = {c.lower() for c in interval_currencies}
+            assert len(interval_lower) == len(
+                interval_currencies
+            ), f"interval_tree 存在大小写重复键: {interval_currencies}"
