@@ -835,7 +835,241 @@ def _serialise(cursor: Cursor) -> QueryResultTable:
 
 ---
 
-### 4.7 失效边界总表（已补充两个薄弱边界）
+### 4.7 薄弱边界 3：多进程部署下的缓存割据
+
+#### 4.7.1 每个工作进程各攥一份彼此看不见的缓存
+
+Fava 没有任何共享内存或跨进程缓存机制，全部状态都是进程级的 Python 对象。
+
+**进程启动路径**：`application.py:475-508`
+
+```python
+def create_app(files, *, load=False, poll_watcher=False, ...):
+    fava_app = Flask("fava")
+    # ...
+    fava_app.config["LEDGERS"] = _LedgerSlugLoader(
+        fava_app, load=load, poll_watcher=poll_watcher
+    )
+    return fava_app
+```
+
+`create_app()` 在 gunicorn/uwsgi **每个 worker 进程**内各执行一次 → 每个进程各有：
+
+- 独立的 `_LedgerSlugLoader` 实例（存在 Flask app.config 里）
+- 独立的 `FavaLedger` 实例列表（由 `_LedgerSlugLoader._load()` 创建）
+- 独立的 `lru_cache(maxsize=16)` 装饰在 `self.get_filtered` 上（`core/__init__.py:388`）
+- 独立的 `lru_cache(maxsize=16)` 装饰在 `self.get_entry` 上（`core/__init__.py:389`）
+- 独立的 `FilteredLedger.cached_property` 属性缓存（随 FilteredLedger 实例生命周期）
+- 独立的 `Watcher` / `WatchfilesWatcher` 实例，各开各的后台监听线程
+- 独立的 `watcher.last_checked` 和 `watcher.last_notified` 时间戳
+
+```
+              gunicorn master
+                   │
+          ┌────────┼────────┐
+          │        │        │
+    worker P1   worker P2   worker P3
+          │        │        │
+   FavaLedger₁ FavaLedger₂ FavaLedger₃
+   lru_cache₁  lru_cache₂  lru_cache₃   ← 彼此完全隔离
+   Watcher₁    Watcher₂    Watcher₃
+   (线程T₁)    (线程T₂)    (线程T₃)
+```
+
+进程之间没有任何 IPC（信号量、共享内存、消息队列、Redis 等）通知失效。任何一个进程的 `load_file()` 和 `cache_clear()` 只在自己的地址空间内生效。
+
+#### 4.7.2 哈希随机化种子不同会不会让缓存键对不上
+
+首先要分层看"哈希"用在什么地方。
+
+**层级 A：`lru_cache` 的缓存键**
+
+`get_filtered` 的装饰器：`core/__init__.py:388`
+
+```python
+self.get_filtered = lru_cache(maxsize=16)(self._get_filtered)
+```
+
+`lru_cache` 的键是函数位置参数和关键字参数的元组：`(account, filter, time)`，三个都是 `str` 或 `None`。
+
+`functools.lru_cache` 对键的比较走的是 Python 常规的 `==`（值相等），不是靠 `hash()` 做快速匹配——它内部是一个有序字典，需要时遍历所有条目做相等比较。**字符串的 `==` 是按内容逐字符比较**，与 `PYTHONHASHSEED` 无关。
+
+→ **lru_cache 键不受哈希随机化影响**，两个进程只要三个过滤参数字符串相同，就会分别在自己的缓存里认为是"同一个键"。
+
+**层级 B：`cached_property` 的属性键**
+
+`FilteredLedger.entries_with_all_prices` 等属性：`core/__init__.py:181-186`
+
+```python
+@cached_property
+def entries_with_all_prices(self):
+    ...
+```
+
+`functools.cached_property` 把结果存在实例的 `__dict__` 里，键就是属性名字符串（如 `"entries_with_all_prices"`）。属性名是源码里写死的字符串字面量，不涉及运行时哈希。
+
+→ **不受哈希随机化影响**。
+
+**层级 C：`hash_entry` 作为键的场景**
+
+`beans/funcs.py:13-17`
+
+```python
+def hash_entry(entry: Directive) -> str:
+    if hasattr(entry, "_fields"):
+        return compare.hash_entry(entry)   # beancount 原生条目
+    return str(hash(entry))               # 非 namedtuple 条目走这里
+```
+
+对有 `_fields` 的 beancount namedtuple 条目（绝大多数正规条目），走的是 beancount 自带的 `compare.hash_entry`——这个函数是按内容做 SHA-1 之类的稳定哈希，输出十六进制字符串，**与 PYTHONHASHSEED 无关**。
+
+只有 fallback 分支 `str(hash(entry))` 会受影响——但那是针对非标准条目的兜底路径，实际查询中 `get_filtered` 的 lru_cache 不用 entry_hash 当键。
+
+→ **查询缓存主路径不受哈希随机化影响**。各进程缓存键能对上，只是各自存一份。
+
+**结论**：哈希种子不会破坏缓存键的一致性。真正的问题是**各进程缓存彼此独立，同一个键在不同进程里可能缓存了不同代的数据**。
+
+#### 4.7.3 跨进程失效通知到底有没有
+
+有两种失效检测手段，它们在多进程下的表现不同：
+
+**手段 1：WatchfilesWatcher 后台线程 via inotify/fsevents**
+
+`watcher.py:27-78`
+
+```python
+class _WatchfilesThread(threading.Thread):
+    def run(self):
+        for changes in watch(*self.paths, ...):   # 每个进程一条线程
+            for change_type, path_str in changes:
+                change_mtime = path.stat().st_mtime_ns
+                self.mtime = max(change_mtime, self.mtime)
+```
+
+- 每个 worker 进程各启动一条 `_FilesWatchfilesThread` + 一条 `_WatchfilesThread`
+- 内核文件系统事件会**向所有注册监听的进程广播**（inotify/fsevents 的标准行为）
+- 所以每个进程的线程都能收到同一个文件变化事件
+- 但每个线程只是把自己进程里的 `self.mtime` 更新，不会通知其他进程
+
+→ **事件层面是广播的，但内存状态还是各算各的**。
+
+**手段 2：`check()` 比对 stat().st_mtime_ns**
+
+`watcher.py:111-122`
+
+```python
+def check(self) -> bool:
+    latest_mtime = max(self._get_latest_mtime(), self.last_notified)
+    has_higher_mtime = latest_mtime > self.last_checked
+    if has_higher_mtime:
+        self.last_checked = latest_mtime
+    return has_higher_mtime
+```
+
+`_get_latest_mtime()` 最终会走到 `stat().st_mtime_ns`。**文件系统的 mtime_ns 是全局共享的**（存在内核 inode 里，所有进程 stat 同一个文件得到同一个值）。
+
+→ 这是唯一的"跨进程通信通道"——**通过文件系统本身间接传递**。
+
+#### 4.7.4 进程 P1 重载后，进程 P2 十秒内会不会继续吐旧结果
+
+关键在于 P2 **什么时候**会调用 `changed()` → `check()`。
+
+首先看谁会触发 `changed()`。`json_api.py` 里 17 个端点调用了 `changed()`（journal、events、imports、documents、options、commodities、income_statement、balance_sheet、trial_balance、account_report、statistics 等）。
+
+**但 `get_query` 不调用 `changed()`**：`json_api.py:316-320`
+
+```python
+@api_endpoint
+def get_query(query_string):
+    # 没有 g.ledger.changed()
+    return g.ledger.query_shell.execute_query_serialised(
+        g.filtered.entries_with_all_prices, query_string
+    )
+```
+
+另外 `application.py:261-271` 的 before_request 过滤器：
+
+```python
+if request.blueprint != "json_api":
+    ledger.changed()
+```
+
+只对非 json_api 的请求触发。json_api 请求只在端点内部显式调用。
+
+所以：
+
+> **如果一个进程只被用来服务 `/api/query` 请求，它永远不会自己检测文件变化并 reload。**
+>
+> 它只能依赖以下两种情况被"捎带"触发：
+> 1. 同一个进程碰巧还处理了其他带 `changed()` 的端点（如用户点进统计报表）
+> 2. WatchfilesWatcher 后台线程已经把 `self.mtime` 推进，但仍需要某个请求调 `changed()` → `check()` 才会真正 `load_file()`
+
+**窗口大小的决定因素**：不是固定的 10 秒，而是 **P2 下一次处理带 `changed()` 的请求与 P1 触发 reload 之间的时间差**。在极端情况下：
+
+- P2 一直只被路由到 `/api/query` 请求 → 永远不 reload，永远吐旧数据（直到 Watchfiles 线程更新了 `self.mtime` 但没人读它也没用）
+- P2 恰好紧接着处理了一个 `get_statistics` → 立刻 reload
+
+#### 4.7.5 同一用户跨进程请求的不一致路径
+
+**复现场景**：gunicorn 4 workers，轮询或最少连接负载均衡，账本文件在中间被修改。
+
+```
+时刻 t0：
+  P1、P2、P3、P4 都完成了初始 load_file()
+  4 个进程的数据一致，mtime_ns = T0
+
+时刻 t1（文件被改动）：
+  外部编辑器写入文件 → mtime_ns = T1（> T0）
+  inotify 广播事件 → 4 个进程的 WatchfilesThread 各自的 self.mtime = T1
+  但此时没有任何请求在 4 个进程里运行 → last_checked 都还停在 T0
+
+时刻 t2：
+  用户请求 req_A 命中 P1（假设是 /api/statistics，带 changed()）
+    → P1.changed() → check(): T1 > T0 → True
+    → P1.load_file() → 数据变成 v2，last_checked = T1
+    → 返回 v2 的统计数据，响应里 mtime = "T1"
+  用户请求 req_B（几乎同时发出）命中 P2（假设是 /api/query，不带 changed()）
+    → P2.ledger.get_filtered() → 命中 P2 自己 lru_cache 的旧 FilteredLedger
+    → entries_with_all_prices 是旧 v1 版本
+    → beanquery 在 v1 数据上执行
+    → 返回 v1 的查询结果，响应里 mtime = "T0"（因为 P2 还没 reload，
+       g.ledger.mtime 返回 watcher.last_checked = T0）
+
+时刻 t3：
+  用户浏览器收到两个响应：
+    一个统计报表显示 mtime=T1（已刷新）
+    一个查询结果显示 mtime=T0（旧数据）
+  前端 ledger_mtime store 取 max(T0, T1) = T1，自己无法判断查询结果其实是旧的
+
+时刻 t4：
+  用户再发一次同一个查询 req_C
+  负载均衡这次命中 P1
+    → P1 数据已是 v2
+    → 返回 v2 的查询结果
+  用户看到同一个查询在 t3 和 t4 给出不同答案，中间没有做任何改动
+```
+
+**不一致的来源总结**：
+
+1. **缓存内容跨进程不同步**：P1 已 load_file → v2，P2 还没 → v1
+2. **mtime 字段跨进程不同步**：响应中的 `mtime` 来自 `g.ledger.mtime` = `watcher.last_checked`，各进程独立推进
+3. **前端无法区分**：前端只维护一个全局最大值 `ledger_mtime`，取两个响应的 max，但无法知道哪个响应对应哪个版本的实际数据
+4. **查询端点不自检**：`get_query` 不带 `changed()`，如果 P2 永远只处理查询请求，它会卡在 v1 直到处理其他类型的请求
+
+#### 4.7.6 多进程下的结论
+
+> **多进程部署 = N 份彼此独立的 FavaLedger + N 套独立缓存 + N 个独立 watcher 线程**
+>
+> - ✅ 缓存键不会因哈希随机化而错位（参数都是字符串值比较，不走 Python 内置 hash）
+> - ✅ 文件 mtime_ns 通过文件系统全局共享，是唯一跨进程的"失效信号"
+> - ⚠️ 但每个进程要自己主动 `check()` 才会读取这个信号，查询端点恰好不做这件事
+> - ⚠️ 进程间没有 IPC 通知，P1 reload 了不会告诉 P2、P3、P4
+> - ❌ 同一用户短时间内连续两个查询被路由到不同进程 → 可能拿到旧新两个版本的不一致结果
+> - ❌ 查询端点自身不带 `changed()` → 专跑查询的进程可能长期不 reload
+
+---
+
+### 4.8 失效边界总表（已补充全部薄弱边界）
 
 | 操作/场景 | 后端缓存失效 | 前端触发机制 | 备注 |
 |----------|-------------|-------------|------|
@@ -846,6 +1080,8 @@ def _serialise(cursor: Cursor) -> QueryResultTable:
 | 切换账本文件 | ✅ 不同的 `FavaLedger` 实例 | 页面导航 | 完全不同的 Python 对象 |
 | 同一纳秒窗口内连改两次 | ❌ `>` 比较 + 时间戳未前进 → 漏检 | 无自动触发 | 仅老旧文件系统可能复现（见 4.5） |
 | 查询中途其他线程触发 load_file | ⚠️ 本次查询不失效，下次才会 | 本次返回值已在路上 | 可能出现跨版本混合（见 4.6） |
+| 多进程：用户跨进程路由 | ⚠️ 命中已 reload 的进程才失效 | 前端无法区分 | 查询端点无自检，可能长期停在旧版本（见 4.7） |
+| 多进程：哈希随机化 | ✅ 不影响缓存键匹配 | - | lru_cache 键是字符串值比较 |
 
 ---
 
@@ -931,3 +1167,8 @@ def _serialise(cursor: Cursor) -> QueryResultTable:
 | 请求前检测 | `src/fava/application.py` | 261-271 |
 | 请求上下文 g.filtered | `src/fava/_ctx_globals_class.py` | 47-54 |
 | 文件写入 notify | `src/fava/core/file.py` | 141-261 |
+| create_app 进程启动 | `src/fava/application.py` | 475-508 |
+| _LedgerSlugLoader | `src/fava/application.py` | 108-175 |
+| hash_entry 函数 | `src/fava/beans/funcs.py` | 13-17 |
+| g.ledger.mtime 属性 | `src/fava/core/__init__.py` | 461-463 |
+| 前端 ledger_mtime store | `frontend/src/stores/mtime.ts` | 1-32 |
