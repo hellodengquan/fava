@@ -9,6 +9,8 @@ import { is_descendant, parent } from "../src/lib/account.ts";
 import { get_internal_accounts } from "../src/lib/account.ts";
 import { expand_all, is_closed_account, toggle_account, toggled_accounts } from "../src/stores/accounts.ts";
 import { account_details, accounts, accounts_internal } from "../src/stores/index.ts";
+import { current_url } from "../src/stores/url.ts";
+import { time_filter } from "../src/stores/filters.ts";
 
 test.before(initialiseLedgerData);
 test.beforeEach(setup_jsdom);
@@ -230,3 +232,106 @@ test("accounts-store: expand_all on specific subtree", () => {
     ok(!$toggled.has(acc));
   }
 });
+
+function snapshotToggleState(): Set<string> {
+  return new Set(store_get(toggled_accounts));
+}
+
+test("accounts-store: time_filter change does not reset toggled state", () => {
+  const $accounts_internal = store_get(accounts_internal);
+  if ($accounts_internal.length < 3) {
+    return;
+  }
+
+  expand_all("");
+  let $toggledBefore = snapshotToggleState();
+  equal($toggledBefore.size, 0);
+
+  const testAccounts = $accounts_internal.slice(0, 3);
+  testAccounts.forEach((a) => toggle_account(a, makeMouseEvent()));
+  $toggledBefore = snapshotToggleState();
+  testAccounts.forEach((a) => ok($toggledBefore.has(a)));
+
+  const beforeTime = store_get(time_filter);
+
+  current_url.set(new URL(`http://localhost/example?time=2017`));
+
+  const afterTime = store_get(time_filter);
+  equal(afterTime, "2017");
+  ok(beforeTime !== afterTime);
+
+  const $toggledAfter = snapshotToggleState();
+  deepEqual([...$toggledAfter].sort(), [...$toggledBefore].sort());
+  testAccounts.forEach((a) => ok($toggledAfter.has(a)));
+});
+
+test("accounts-store: switching between multiple time filters preserves toggled state", () => {
+  const $accounts_internal = store_get(accounts_internal);
+  if ($accounts_internal.length < 5) {
+    return;
+  }
+
+  expand_all("");
+
+  const toggledAccounts = $accounts_internal.slice(0, 5);
+  toggledAccounts.forEach((a) => toggle_account(a, makeMouseEvent()));
+  const state0 = snapshotToggleState();
+  toggledAccounts.forEach((a) => ok(state0.has(a)));
+
+  current_url.set(new URL("http://localhost/example?time=2016"));
+  const state1 = snapshotToggleState();
+  deepEqual([...state1].sort(), [...state0].sort());
+
+  toggle_account(toggledAccounts[0], makeMouseEvent());
+  const state2 = snapshotToggleState();
+  ok(!state2.has(toggledAccounts[0]));
+
+  current_url.set(new URL("http://localhost/example?time=2017-Q1"));
+  const state3 = snapshotToggleState();
+  deepEqual([...state3].sort(), [...state2].sort());
+  ok(!state3.has(toggledAccounts[0]));
+  toggledAccounts.slice(1).forEach((a) => ok(state3.has(a)));
+});
+
+test("accounts-store: clearing time filter preserves toggled state", () => {
+  const $accounts_internal = store_get(accounts_internal);
+  if ($accounts_internal.length < 3) {
+    return;
+  }
+
+  current_url.set(new URL("http://localhost/example?time=2016"));
+  equal(store_get(time_filter), "2016");
+
+  expand_all("");
+  const targets = $accounts_internal.slice(0, 3);
+  targets.forEach((a) => toggle_account(a, makeMouseEvent()));
+  const before = snapshotToggleState();
+  targets.forEach((a) => ok(before.has(a)));
+
+  current_url.set(new URL("http://localhost/example"));
+  equal(store_get(time_filter), "");
+
+  const after = snapshotToggleState();
+  deepEqual([...after].sort(), [...before].sort());
+  targets.forEach((a) => ok(after.has(a)));
+});
+
+test("accounts-store: time filter change does not affect expand_all reset", () => {
+  const $accounts_internal = store_get(accounts_internal);
+  if ($accounts_internal.length < 3) {
+    return;
+  }
+
+  current_url.set(new URL("http://localhost/example?time=2017"));
+
+  expand_all("");
+  equal(snapshotToggleState().size, 0);
+
+  const toToggle = $accounts_internal.slice(0, 5);
+  toToggle.forEach((a) => toggle_account(a, makeMouseEvent()));
+  ok(snapshotToggleState().size >= toToggle.length);
+
+  expand_all("");
+  equal(snapshotToggleState().size, 0);
+});
+

@@ -400,3 +400,297 @@ def test_tree_sibling_ordering() -> None:
     child_names = [c.name for c in tree["Expenses"].children]
     assert sorted(child_names) == sorted(accounts)
     assert tree.accounts == sorted(tree.accounts)
+
+
+def _make_entries_for_time_filter_test():
+    from fava.beans import create
+
+    open_entries = [
+        create.open(
+            {}, datetime.date(2023, 1, 1), "Assets:Cash", ["EUR", "USD"], None
+        ),
+        create.open(
+            {}, datetime.date(2023, 1, 1), "Assets:Bank:Checking", ["EUR"], None
+        ),
+        create.open(
+            {}, datetime.date(2023, 1, 1), "Income:Salary", ["EUR"], None
+        ),
+        create.open(
+            {}, datetime.date(2023, 1, 1), "Expenses:Food:Groceries", ["EUR", "USD"], None
+        ),
+        create.open(
+            {}, datetime.date(2023, 1, 1), "Expenses:Food:Restaurant", ["EUR"], None
+        ),
+    ]
+
+    jan_salary = create.transaction(
+        {},
+        datetime.date(2024, 1, 10),
+        "*",
+        "Employer",
+        "January salary",
+        frozenset(),
+        frozenset(),
+        [
+            create.posting("Assets:Cash", "2000 EUR"),
+            create.posting("Income:Salary", "-2000 EUR"),
+        ],
+    )
+
+    jan_groceries_eur = create.transaction(
+        {},
+        datetime.date(2024, 1, 15),
+        "*",
+        "Shop",
+        "Groceries EUR",
+        frozenset(),
+        frozenset(),
+        [
+            create.posting("Expenses:Food:Groceries", "100 EUR"),
+            create.posting("Assets:Cash", "-100 EUR"),
+        ],
+    )
+
+    jan_groceries_usd = create.transaction(
+        {},
+        datetime.date(2024, 1, 20),
+        "*",
+        "Shop",
+        "Groceries USD",
+        frozenset(),
+        frozenset(),
+        [
+            create.posting("Expenses:Food:Groceries", "50 USD"),
+            create.posting("Assets:Cash", "-50 USD"),
+        ],
+    )
+
+    feb_salary = create.transaction(
+        {},
+        datetime.date(2024, 2, 10),
+        "*",
+        "Employer",
+        "February salary",
+        frozenset(),
+        frozenset(),
+        [
+            create.posting("Assets:Bank:Checking", "2200 EUR"),
+            create.posting("Income:Salary", "-2200 EUR"),
+        ],
+    )
+
+    feb_restaurant = create.transaction(
+        {},
+        datetime.date(2024, 2, 14),
+        "*",
+        "Restaurant",
+        "Dinner",
+        frozenset(),
+        frozenset(),
+        [
+            create.posting("Expenses:Food:Restaurant", "80 EUR"),
+            create.posting("Assets:Cash", "-80 EUR"),
+        ],
+    )
+
+    mar_salary = create.transaction(
+        {},
+        datetime.date(2024, 3, 10),
+        "*",
+        "Employer",
+        "March salary",
+        frozenset(),
+        frozenset(),
+        [
+            create.posting("Assets:Cash", "2100 EUR"),
+            create.posting("Income:Salary", "-2100 EUR"),
+        ],
+    )
+
+    mar_groceries = create.transaction(
+        {},
+        datetime.date(2024, 3, 20),
+        "*",
+        "Shop",
+        "March groceries",
+        frozenset(),
+        frozenset(),
+        [
+            create.posting("Expenses:Food:Groceries", "120 EUR"),
+            create.posting("Assets:Cash", "-120 EUR"),
+        ],
+    )
+
+    return [
+        *open_entries,
+        jan_salary,
+        jan_groceries_eur,
+        jan_groceries_usd,
+        feb_salary,
+        feb_restaurant,
+        mar_salary,
+        mar_groceries,
+    ]
+
+
+def test_tree_time_filter_hierarchy_and_balances_january() -> None:
+    from fava.beans.helpers import slice_entry_dates
+
+    all_entries = _make_entries_for_time_filter_test()
+
+    jan_entries = slice_entry_dates(
+        all_entries, datetime.date(2024, 1, 1), datetime.date(2024, 2, 1)
+    )
+    tree_jan = Tree(jan_entries)
+    tree_all = Tree(all_entries)
+
+    assert "Assets" in tree_jan
+    assert "Assets:Cash" in tree_jan
+    assert "Income:Salary" in tree_jan
+    assert "Expenses:Food:Groceries" in tree_jan
+
+    assert tree_jan["Assets:Cash"].balance.get(("EUR", None)) == Decimal("1900")
+    assert tree_jan["Assets:Cash"].balance.get(("USD", None)) == Decimal("-50")
+
+    assert tree_jan["Income:Salary"].balance.get(("EUR", None)) == Decimal("-2000")
+
+    assert tree_jan["Expenses:Food:Groceries"].balance.get(("EUR", None)) == Decimal(
+        "100"
+    )
+    assert tree_jan["Expenses:Food:Groceries"].balance.get(("USD", None)) == Decimal(
+        "50"
+    )
+
+    assert "Expenses:Food:Restaurant" not in tree_jan
+    assert "Assets:Bank:Checking" not in tree_jan
+
+    assert tree_all["Assets:Cash"].balance.get(("EUR", None)) == Decimal("3800")
+
+
+def test_tree_time_filter_hierarchy_and_balances_february() -> None:
+    from fava.beans.helpers import slice_entry_dates
+
+    all_entries = _make_entries_for_time_filter_test()
+
+    feb_entries = slice_entry_dates(
+        all_entries, datetime.date(2024, 2, 1), datetime.date(2024, 3, 1)
+    )
+    tree_feb = Tree(feb_entries)
+
+    assert tree_feb["Assets:Bank:Checking"].balance.get(("EUR", None)) == Decimal(
+        "2200"
+    )
+    assert tree_feb["Expenses:Food:Restaurant"].balance.get(("EUR", None)) == Decimal(
+        "80"
+    )
+    assert tree_feb["Income:Salary"].balance.get(("EUR", None)) == Decimal("-2200")
+
+    assert "Expenses:Food:Groceries" not in tree_feb
+
+    expenses_children = tree_feb["Expenses:Food"]
+    assert expenses_children.balance_children.get(("EUR", None)) == Decimal("80")
+
+
+def test_tree_time_filter_empty_interval() -> None:
+    from fava.beans.helpers import slice_entry_dates
+
+    all_entries = _make_entries_for_time_filter_test()
+
+    empty_entries = slice_entry_dates(
+        all_entries, datetime.date(2025, 1, 1), datetime.date(2025, 2, 1)
+    )
+    assert len([e for e in empty_entries if hasattr(e, "postings")]) == 0
+
+    tree_empty = Tree(empty_entries)
+
+    assert "" in tree_empty
+    assert len(tree_empty) == 1
+
+    tree_empty_with_create = Tree(
+        empty_entries,
+        create_accounts=[
+            "Assets:Cash",
+            "Expenses:Food:Groceries",
+            "Income:Salary",
+        ],
+    )
+    assert "Assets" in tree_empty_with_create
+    assert "Assets:Cash" in tree_empty_with_create
+    assert "Expenses:Food:Groceries" in tree_empty_with_create
+    assert "Income:Salary" in tree_empty_with_create
+    for name in ["Assets:Cash", "Expenses:Food:Groceries", "Income:Salary"]:
+        assert tree_empty_with_create[name].balance.is_empty()
+        assert tree_empty_with_create[name].has_txns is False
+
+
+def test_tree_time_filter_multi_currency_interval() -> None:
+    from fava.beans.helpers import slice_entry_dates
+
+    all_entries = _make_entries_for_time_filter_test()
+
+    jan_mar_entries = slice_entry_dates(
+        all_entries, datetime.date(2024, 1, 1), datetime.date(2024, 4, 1)
+    )
+    tree_jan_mar = Tree(jan_mar_entries)
+
+    cash_balance = tree_jan_mar["Assets:Cash"].balance
+    assert cash_balance.get(("EUR", None)) == Decimal("3800")
+    assert cash_balance.get(("USD", None)) == Decimal("-50")
+
+    groceries_balance = tree_jan_mar["Expenses:Food:Groceries"].balance
+    assert groceries_balance.get(("EUR", None)) == Decimal("220")
+    assert groceries_balance.get(("USD", None)) == Decimal("50")
+
+    income_balance = tree_jan_mar["Income:Salary"].balance
+    assert income_balance.get(("EUR", None)) == Decimal("-6300")
+
+    expenses_balance = tree_jan_mar["Expenses:Food"].balance_children
+    assert expenses_balance.get(("EUR", None)) == Decimal("300")
+    assert expenses_balance.get(("USD", None)) == Decimal("50")
+
+
+def test_tree_time_filter_interval_excludes_outside_range() -> None:
+    from fava.beans.helpers import slice_entry_dates
+
+    all_entries = _make_entries_for_time_filter_test()
+
+    march_entries = slice_entry_dates(
+        all_entries, datetime.date(2024, 3, 1), datetime.date(2024, 4, 1)
+    )
+    tree_march = Tree(march_entries)
+
+    assert tree_march["Assets:Cash"].balance.get(("EUR", None)) == Decimal("1980")
+
+    assert tree_march["Income:Salary"].balance.get(("EUR", None)) == Decimal("-2100")
+
+    assert "USD" not in {
+        c for (c, _), _ in tree_march["Expenses:Food:Groceries"].balance.items()
+    }
+
+    assert "Assets:Bank:Checking" not in tree_march
+
+
+def test_tree_time_filter_hierarchy_structure_preserved() -> None:
+    from fava.beans.helpers import slice_entry_dates
+
+    all_entries = _make_entries_for_time_filter_test()
+
+    march_entries = slice_entry_dates(
+        all_entries, datetime.date(2024, 3, 1), datetime.date(2024, 4, 1)
+    )
+    tree_march = Tree(march_entries)
+    tree_full = Tree(all_entries)
+
+    march_accounts = set(tree_march.accounts)
+    full_accounts = set(tree_full.accounts)
+
+    assert march_accounts.issubset(full_accounts)
+
+    for name in march_accounts:
+        if name == "":
+            continue
+        from fava.beans.account import parent as bean_parent
+
+        p = bean_parent(name)
+        if p:
+            assert p in march_accounts

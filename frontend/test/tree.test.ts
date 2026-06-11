@@ -415,3 +415,195 @@ test("tree: stratify single-level tree", () => {
   equal(tree.children.length, 3);
   deepEqual(tree.children.map((c) => c.id).sort(), ["A", "B", "C"]);
 });
+
+type TimeFilteredNode = TreeNode<{
+  name: string;
+  balance: Record<string, number>;
+  period: string;
+}>;
+
+function buildTreeForPeriod(period: string): TimeFilteredNode {
+  const datasets: Record<string, { account: string; balance: Record<string, number> }[]> = {
+    "2024-01": [
+      { account: "Assets:Cash", balance: { EUR: 1900, USD: -50 } },
+      { account: "Income:Salary", balance: { EUR: -2000 } },
+      { account: "Expenses:Food:Groceries", balance: { EUR: 100, USD: 50 } },
+    ],
+    "2024-02": [
+      { account: "Assets:Bank:Checking", balance: { EUR: 2200 } },
+      { account: "Income:Salary", balance: { EUR: -2200 } },
+      { account: "Expenses:Food:Restaurant", balance: { EUR: 80 } },
+    ],
+    "2024-03": [
+      { account: "Assets:Cash", balance: { EUR: 1980 } },
+      { account: "Income:Salary", balance: { EUR: -2100 } },
+      { account: "Expenses:Food:Groceries", balance: { EUR: 120 } },
+    ],
+    "2024-Q1": [
+      { account: "Assets:Cash", balance: { EUR: 3800, USD: -50 } },
+      { account: "Assets:Bank:Checking", balance: { EUR: 2200 } },
+      { account: "Income:Salary", balance: { EUR: -6300 } },
+      { account: "Expenses:Food:Groceries", balance: { EUR: 220, USD: 50 } },
+      { account: "Expenses:Food:Restaurant", balance: { EUR: 80 } },
+    ],
+    empty: [],
+  };
+  const data = datasets[period] ?? [];
+  return stratifyAccounts(
+    data,
+    (d) => d.account,
+    (name, datum) => ({
+      name,
+      balance: datum?.balance ?? {},
+      period,
+    }),
+  );
+}
+
+test("tree: time-filtered january balances and hierarchy", () => {
+  const tree = buildTreeForPeriod("2024-01");
+
+  const assets = tree.children.find((c) => c.name === "Assets");
+  ok(assets);
+  equal(assets.children.length, 1);
+  equal(assets.children[0].name, "Assets:Cash");
+  deepEqual(assets.children[0].balance, { EUR: 1900, USD: -50 });
+
+  const income = tree.children.find((c) => c.name === "Income");
+  ok(income);
+  deepEqual(income.children[0].balance, { EUR: -2000 });
+
+  const expenses = tree.children.find((c) => c.name === "Expenses");
+  ok(expenses);
+  equal(expenses.children.length, 1);
+  equal(expenses.children[0].name, "Expenses:Food");
+
+  const groceries = expenses.children[0].children.find(
+    (c) => c.name === "Expenses:Food:Groceries",
+  );
+  ok(groceries);
+  deepEqual(groceries.balance, { EUR: 100, USD: 50 });
+
+  const restaurant = expenses.children[0].children.find(
+    (c) => c.name === "Expenses:Food:Restaurant",
+  );
+  ok(!restaurant, "restaurant should not appear in January");
+});
+
+test("tree: time-filtered february excludes january-only accounts", () => {
+  const tree = buildTreeForPeriod("2024-02");
+
+  const expenses = tree.children.find((c) => c.name === "Expenses");
+  ok(expenses);
+  equal(expenses.children.length, 1);
+
+  const food = expenses.children[0];
+  equal(food.name, "Expenses:Food");
+  equal(food.children.length, 1);
+  equal(food.children[0].name, "Expenses:Food:Restaurant");
+  deepEqual(food.children[0].balance, { EUR: 80 });
+
+  const groceries = food.children.find(
+    (c) => c.name === "Expenses:Food:Groceries",
+  );
+  ok(!groceries, "groceries should not appear in February");
+
+  const assets = tree.children.find((c) => c.name === "Assets");
+  ok(assets);
+  equal(assets.children.length, 1);
+  equal(assets.children[0].name, "Assets:Bank");
+  equal(assets.children[0].children.length, 1);
+  equal(assets.children[0].children[0].name, "Assets:Bank:Checking");
+  deepEqual(assets.children[0].children[0].balance, { EUR: 2200 });
+});
+
+test("tree: time-filtered empty interval has no accounts", () => {
+  const tree = buildTreeForPeriod("empty");
+  equal(tree.children.length, 0);
+  deepEqual(tree.balance, {});
+});
+
+test("tree: time-filtered multi-currency Q1 aggregated correctly", () => {
+  const tree = buildTreeForPeriod("2024-Q1");
+
+  const assets = tree.children.find((c) => c.name === "Assets");
+  ok(assets);
+  const assetNames = assets.children.map((c) => c.name).sort();
+  deepEqual(assetNames, ["Assets:Bank", "Assets:Cash"]);
+
+  const cash = assets.children.find((c) => c.name === "Assets:Cash");
+  ok(cash);
+  deepEqual(cash.balance, { EUR: 3800, USD: -50 });
+
+  const bank = assets.children.find((c) => c.name === "Assets:Bank");
+  ok(bank);
+  equal(bank.children.length, 1);
+  equal(bank.children[0].name, "Assets:Bank:Checking");
+  deepEqual(bank.children[0].balance, { EUR: 2200 });
+
+  const expenses = tree.children.find((c) => c.name === "Expenses");
+  ok(expenses);
+  const food = expenses.children[0];
+  equal(food.children.length, 2);
+
+  const groceries = food.children.find((c) => c.name === "Expenses:Food:Groceries");
+  ok(groceries);
+  deepEqual(groceries.balance, { EUR: 220, USD: 50 });
+
+  const restaurant = food.children.find(
+    (c) => c.name === "Expenses:Food:Restaurant",
+  );
+  ok(restaurant);
+  deepEqual(restaurant.balance, { EUR: 80 });
+});
+
+test("tree: time-filtered march excludes USD transactions from january", () => {
+  const tree = buildTreeForPeriod("2024-03");
+
+  const expenses = tree.children.find((c) => c.name === "Expenses");
+  ok(expenses);
+  const food = expenses.children[0];
+
+  const groceries = food.children.find(
+    (c) => c.name === "Expenses:Food:Groceries",
+  );
+  ok(groceries);
+  deepEqual(groceries.balance, { EUR: 120 });
+  ok(!("USD" in groceries.balance));
+});
+
+test("tree: time-filtered hierarchy structure preserved across periods", () => {
+  const janTree = buildTreeForPeriod("2024-01");
+  const q1Tree = buildTreeForPeriod("2024-Q1");
+
+  function collectAccounts(node: TimeFilteredNode): Set<string> {
+    const set = new Set<string>();
+    function walk(n: TimeFilteredNode) {
+      set.add(n.name);
+      n.children.forEach(walk);
+    }
+    walk(node);
+    return set;
+  }
+
+  const janAccounts = collectAccounts(janTree);
+  const q1Accounts = collectAccounts(q1Tree);
+
+  for (const acc of janAccounts) {
+    ok(q1Accounts.has(acc), `Q1 should contain all January accounts: ${acc}`);
+  }
+});
+
+test("tree: all_matching within a time-filtered view", () => {
+  const tree = buildTreeForPeriod("2024-Q1");
+
+  const multiCurrency = [...all_matching(tree, (n) => Object.keys(n.balance).length >= 2)];
+  ok(multiCurrency.length >= 2);
+  const names = multiCurrency.map((n) => n.name).sort();
+  ok(names.includes("Assets:Cash"));
+  ok(names.includes("Expenses:Food:Groceries"));
+
+  const usdAccounts = [...all_matching(tree, (n) => "USD" in n.balance)];
+  ok(usdAccounts.every((n) => "USD" in n.balance));
+});
+
