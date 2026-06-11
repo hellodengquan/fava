@@ -394,6 +394,12 @@ class FilterPresetsStore {
 
   /**
    * Apply a preset's filters to the current URL.
+   *
+   * If the preset was saved for a different page (or for "all" pages and
+   * the caller is currently on a specific page) the user is warned that
+   * the current filter state on other pages would be overwritten by
+   * navigating and has to confirm before the URL is mutated.
+   *
    * @param id The preset ID.
    */
   apply(id: string): void {
@@ -403,6 +409,30 @@ class FilterPresetsStore {
       this.#maybe_clear_selection();
       return;
     }
+
+    const current_page = get(this.#current_page_type);
+    const is_cross_page =
+      preset.page !== "all" &&
+      current_page !== "all" &&
+      preset.page !== current_page;
+    const is_all_pages_preset = preset.page === "all";
+
+    if (is_cross_page || is_all_pages_preset) {
+      const target =
+        preset.page === "all"
+          ? "all pages that share the universal filters"
+          : `the ${preset.page} page`;
+      const confirmed = window.confirm(
+        `Applying the filter preset "${preset.name}" will overwrite the ` +
+          `current filter state for ${target}. Continue?`,
+      );
+      if (!confirmed) {
+        // Roll back the dropdown selection – the user bailed out.
+        this.#maybe_clear_selection();
+        return;
+      }
+    }
+
     this.#selected_id.set(id);
     apply_filters_to_url(preset.filters);
   }

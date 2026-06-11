@@ -5,7 +5,14 @@ for accounts, ledger and charts pages.
 
 It implements:
 - File-based locking using fcntl (Unix) / msvcrt (Windows) for cross-process safety
-- Optimistic concurrency control via etag (content hash) for multi-tab safety
+- Optimistic concurrency control via two independent mechanisms:
+  * **Per-preset version number** (integer, increments on every update) – the
+    primary contract exposed to API consumers.  Clients can optionally pass
+    the `expected_version` they saw when reading; if the server-side version
+    has drifted the write is rejected with HTTP 409.
+  * **Storage etag** (SHA-256 of the on-disk bytes) – catches races between
+    two writers that are not visible through per-preset versions alone
+    (e.g. concurrent deletes of different presets).
 - Rich error metadata including conflicting preset details for frontend display
 """
 
@@ -24,7 +31,6 @@ from typing import TYPE_CHECKING
 from fava.helpers import FavaAPIError
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
     from typing import Any
 
 
@@ -99,16 +105,35 @@ class FilterPresetNameConflictError(FilterPresetError):
 
 
 class FilterPresetConcurrentModificationError(FilterPresetError):
-    """The presets storage file was modified concurrently (optimistic lock failure)."""
+    """A preset write was rejected because another session modified it first."""
 
     code = "concurrent_modification"
 
-    def __init__(self, expected_etag: str, actual_etag: str) -> None:
+    def __init__(
+        self,
+        *,
+        preset_id: str | None = None,
+        expected_version: int | None = None,
+        actual_version: int | None = None,
+        expected_etag: str | None = None,
+        actual_etag: str | None = None,
+    ) -> None:
+        details: dict[str, Any] = {}
+        if preset_id is not None:
+            details["preset_id"] = preset_id
+        if expected_version is not None:
+            details["expected_version"] = expected_version
+        if actual_version is not None:
+            details["actual_version"] = actual_version
+        if expected_etag is not None:
+            details["expected_etag"] = expected_etag
+        if actual_etag is not None:
+            details["actual_etag"] = actual_etag
+
         super().__init__(
-            "The filter presets were modified by another session. "
-            "Please reload and try again.",
-            expected_etag=expected_etag,
-            actual_etag=actual_etag,
+            "The filter preset was modified by another session. "
+            "Please reload the preset list and try again.",
+            **details,
         )
 
 
@@ -159,7 +184,13 @@ class FilterPresetFilters:
 
 @dataclass
 class FilterPreset:
-    """A named filter preset."""
+    """A named filter preset with an optimistic-lock version counter.
+
+    ``version`` is incremented every time the preset is mutated (rename,
+    filter update, etc.).  Clients can pass the last-seen version when
+    writing back; if the server's version has advanced the write is
+    rejected with :class:`FilterPresetConcurrentModificationError`.
+    """
 
     id: str
     name: str
@@ -167,6 +198,7 @@ class FilterPreset:
     filters: FilterPresetFilters
     created_at: float = field(default_factory=lambda: datetime.now().timestamp())
     updated_at: float = field(default_factory=lambda: datetime.now().timestamp())
+    version: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -177,25 +209,40 @@ class FilterPreset:
             "filters": self.filters.to_dict(),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "version": self.version,
         }
 
     @staticmethod
     def from_dict(data: dict[str, Any]) -> "FilterPreset":
-        """Create a FilterPreset from a dictionary."""
+        """Create a FilterPreset from a dictionary.
+
+        Tolerates missing ``version`` fields (defaults to ``1``) so legacy
+        JSON files written before the version field was introduced are
+        still readable.
+        """
         filters_data = data.get("filters", {})
+        raw_version = data.get("version", 1)
+        try:
+            version = int(raw_version)
+            if version < 1:
+                version = 1
+        except (TypeError, ValueError):
+            version = 1
+
         return FilterPreset(
             id=data["id"],
             name=data["name"],
             page=data.get("page", FilterPresetPageType.ALL),
             filters=FilterPresetFilters(
-                account=filters_data.get("account", ""),
-                filter=filters_data.get("filter", ""),
-                time=filters_data.get("time", ""),
-                conversion=filters_data.get("conversion", ""),
-                interval=filters_data.get("interval", ""),
+                account=str(filters_data.get("account", "")),
+                filter=str(filters_data.get("filter", "")),
+                time=str(filters_data.get("time", "")),
+                conversion=str(filters_data.get("conversion", "")),
+                interval=str(filters_data.get("interval", "")),
             ),
-            created_at=data.get("created_at", datetime.now().timestamp()),
-            updated_at=data.get("updated_at", datetime.now().timestamp()),
+            created_at=float(data.get("created_at", datetime.now().timestamp())),
+            updated_at=float(data.get("updated_at", datetime.now().timestamp())),
+            version=version,
         )
 
 
@@ -248,8 +295,24 @@ def _validate_name(name: str) -> str:
 class FilterPresetsModule:
     """Module for managing filter presets stored in a JSON file.
 
-    Presets are stored in a `.fava-filter-presets.json` file next to the
-    Beancount ledger file.
+    Presets are stored in a ``.fava-filter-presets.json`` file next to the
+    Beancount ledger file.  The on-disk format is::
+
+        {
+          "schema_version": 2,
+          "presets": [
+            {
+              "id": "...",
+              "name": "...",
+              "page": "account" | "balance_sheet" | ... | "all",
+              "version": 3,
+              "filters": { "account": "...", ... },
+              "created_at": 1234.0,
+              "updated_at": 1234.0
+            },
+            ...
+          ]
+        }
 
     Thread/cross-process safety:
         * Every **write** operation acquires an exclusive file lock and
@@ -258,7 +321,15 @@ class FilterPresetsModule:
         * The etag of the last-known file content is tracked; if another
           client modified the file between our read and write, the write
           is rejected with ``FilterPresetConcurrentModificationError``.
+        * Each preset carries a monotonically increasing ``version``
+          counter.  Callers of :meth:`update_preset` and
+          :meth:`delete_preset` may pass the last-seen version; if the
+          server-side version is higher the write is rejected.
     """
+
+    #: Current schema version written to disk.  Bump this whenever the
+    #: JSON shape changes in a non-backwards-compatible way.
+    SCHEMA_VERSION = 2
 
     def __init__(self, beancount_file_path: str | Path) -> None:
         """Initialize the filter presets module.
@@ -288,7 +359,7 @@ class FilterPresetsModule:
         return self._etag
 
     # ------------------------------------------------------------------
-    # Internal I/O with locking + etag tracking
+    # Internal I/O with locking + etag + version tracking
     # ------------------------------------------------------------------
 
     def _read_storage_locked(self) -> tuple[dict[str, Any], str, bytes]:
@@ -309,8 +380,13 @@ class FilterPresetsModule:
             try:
                 raw_bytes = fp.read()
                 if not raw_bytes:
-                    data: dict[str, Any] = {"presets": [], "version": 1}
-                    raw_bytes = (json.dumps(data, indent=2) + "\n").encode("utf-8")
+                    data: dict[str, Any] = {
+                        "schema_version": self.SCHEMA_VERSION,
+                        "presets": [],
+                    }
+                    raw_bytes = (
+                        json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+                    ).encode("utf-8")
                     fp.seek(0)
                     fp.write(raw_bytes)
                     fp.truncate()
@@ -321,7 +397,14 @@ class FilterPresetsModule:
                         data = json.loads(raw_bytes.decode("utf-8"))
                     except json.JSONDecodeError:
                         # Start fresh on corruption.
-                        data = {"presets": [], "version": 1}
+                        data = {
+                            "schema_version": self.SCHEMA_VERSION,
+                            "presets": [],
+                        }
+                    if "schema_version" not in data:
+                        # Legacy file – transparently upgrade the stored
+                        # schema so future writes carry version info.
+                        data["schema_version"] = self.SCHEMA_VERSION
             finally:
                 _release_file_lock(fp)
 
@@ -387,9 +470,19 @@ class FilterPresetsModule:
                     # Another session changed the file between our reads.
                     # Refresh our in-memory state and bail out.
                     try:
-                        data = json.loads(raw_current.decode("utf-8")) if raw_current else {"presets": [], "version": 1}
+                        data = (
+                            json.loads(raw_current.decode("utf-8"))
+                            if raw_current
+                            else {
+                                "schema_version": self.SCHEMA_VERSION,
+                                "presets": [],
+                            }
+                        )
                     except json.JSONDecodeError:
-                        data = {"presets": [], "version": 1}
+                        data = {
+                            "schema_version": self.SCHEMA_VERSION,
+                            "presets": [],
+                        }
                     self._presets = {}
                     for pd in data.get("presets", []):
                         try:
@@ -399,16 +492,17 @@ class FilterPresetsModule:
                             continue
                     self._etag = current_etag
                     raise FilterPresetConcurrentModificationError(
-                        expected_etag, current_etag
+                        expected_etag=expected_etag,
+                        actual_etag=current_etag,
                     )
 
                 data = {
+                    "schema_version": self.SCHEMA_VERSION,
                     "presets": [p.to_dict() for p in presets_dict.values()],
-                    "version": 1,
                 }
-                new_raw = (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode(
-                    "utf-8"
-                )
+                new_raw = (
+                    json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+                ).encode("utf-8")
                 fp.seek(0)
                 fp.write(new_raw)
                 fp.truncate()
@@ -441,6 +535,25 @@ class FilterPresetsModule:
         if existing is not None:
             raise FilterPresetNameConflictError(name, existing.id)
 
+    @staticmethod
+    def _check_version(
+        preset: FilterPreset,
+        expected_version: int | None,
+    ) -> None:
+        """Verify the caller-supplied version matches the current preset.
+
+        ``expected_version=None`` means "don't check", which keeps the API
+        backwards-compatible with callers that do not yet pass versions.
+        """
+        if expected_version is None:
+            return
+        if expected_version != preset.version:
+            raise FilterPresetConcurrentModificationError(
+                preset_id=preset.id,
+                expected_version=expected_version,
+                actual_version=preset.version,
+            )
+
     # ------------------------------------------------------------------
     # Public read API
     # ------------------------------------------------------------------
@@ -453,7 +566,9 @@ class FilterPresetsModule:
                   Presets with page='all' are always included.
 
         Returns:
-            A list of preset dictionaries, sorted by name.
+            A list of preset dictionaries, sorted by name.  Each entry
+            carries its current ``version`` so clients can pass it back
+            when mutating the preset.
         """
         # Re-read from disk under lock so we always see the latest state.
         self._reload_under_lock()
@@ -476,7 +591,7 @@ class FilterPresetsModule:
             preset_id: The preset ID.
 
         Returns:
-            The preset dictionary.
+            The preset dictionary including its current ``version``.
 
         Raises:
             FilterPresetNotFoundError: If the preset does not exist.
@@ -488,7 +603,7 @@ class FilterPresetsModule:
         return preset.to_dict()
 
     # ------------------------------------------------------------------
-    # Public write API (all go through the locking + etag flow)
+    # Public write API – all honour per-preset version + file-level etag
     # ------------------------------------------------------------------
 
     def create_preset(
@@ -498,6 +613,8 @@ class FilterPresetsModule:
         filters: dict[str, str],
     ) -> dict[str, Any]:
         """Create a new filter preset.
+
+        The new preset is created with ``version=1``.
 
         Args:
             name: The preset name.
@@ -539,6 +656,7 @@ class FilterPresetsModule:
             filters=preset_filters,
             created_at=now,
             updated_at=now,
+            version=1,
         )
 
         new_presets = dict(self._presets)
@@ -554,23 +672,31 @@ class FilterPresetsModule:
         name: str | None = None,
         page: str | None = None,
         filters: dict[str, str] | None = None,
+        expected_version: int | None = None,
     ) -> dict[str, Any]:
         """Update an existing filter preset.
+
+        If *expected_version* is provided and does not match the preset's
+        current version on disk, the write is rejected with a 409 so the
+        caller can reload and retry.  The preset's version is incremented
+        on a successful update.
 
         Args:
             preset_id: The preset ID to update.
             name: Optional new name.
             page: Optional new page type.
             filters: Optional new filter parameters.
+            expected_version: If given, the update is only applied when
+                the server-side version exactly matches this value.
 
         Returns:
-            The updated preset dictionary.
+            The updated preset dictionary (with the incremented ``version``).
 
         Raises:
             FilterPresetNotFoundError: If the preset does not exist.
             FilterPresetNameConflictError: If the new name conflicts.
-            FilterPresetConcurrentModificationError: If another session modified
-                the storage file concurrently.
+            FilterPresetConcurrentModificationError: If the expected version
+                does not match or another session modified the storage.
             FilterPresetError: If validation fails.
         """
         # Re-read under lock for the latest state + etag.
@@ -579,6 +705,10 @@ class FilterPresetsModule:
         preset = self._presets.get(preset_id)
         if preset is None:
             raise FilterPresetNotFoundError(preset_id)
+
+        # Per-preset optimistic lock check – checked BEFORE any mutation so
+        # we do not partially apply a rename and then bail out on version.
+        self._check_version(preset, expected_version)
 
         updated_name = preset.name
         updated_page = preset.page
@@ -610,6 +740,7 @@ class FilterPresetsModule:
             filters=updated_filters,
             created_at=preset.created_at,
             updated_at=now,
+            version=preset.version + 1,
         )
 
         new_presets = dict(self._presets)
@@ -618,21 +749,31 @@ class FilterPresetsModule:
         self._presets = new_presets
         return updated_preset.to_dict()
 
-    def delete_preset(self, preset_id: str) -> None:
+    def delete_preset(
+        self,
+        preset_id: str,
+        *,
+        expected_version: int | None = None,
+    ) -> None:
         """Delete a filter preset.
 
         Args:
             preset_id: The preset ID to delete.
+            expected_version: If given, the delete is only performed when
+                the server-side version matches.
 
         Raises:
             FilterPresetNotFoundError: If the preset does not exist.
-            FilterPresetConcurrentModificationError: If another session modified
-                the storage file concurrently.
+            FilterPresetConcurrentModificationError: If the expected version
+                does not match or another session modified the storage.
         """
         current_etag = self._reload_under_lock()
 
-        if preset_id not in self._presets:
+        preset = self._presets.get(preset_id)
+        if preset is None:
             raise FilterPresetNotFoundError(preset_id)
+
+        self._check_version(preset, expected_version)
 
         new_presets = dict(self._presets)
         del new_presets[preset_id]

@@ -388,3 +388,387 @@ def test_json_api_concurrent_conflict_returns_409(
     if update_resp.status_code != HTTPStatus.OK.value:
         assert update_resp.status_code == HTTPStatus.CONFLICT.value
         assert update_resp.json["code"] == "concurrent_modification"  # type: ignore[index]
+
+
+# ---------------------------------------------------------------------------
+# Per-preset version counter (new in schema_version 2)
+# ---------------------------------------------------------------------------
+
+
+def test_preset_version_field_present_and_increments(tmp_ledger_file: Path) -> None:
+    """Every preset must carry a ``version`` counter that bumps on mutation."""
+    module = FilterPresetsModule(tmp_ledger_file)
+
+    preset = module.create_preset("Versioned", FilterPresetPageType.ALL, SAMPLE_FILTERS)
+    assert preset["version"] == 1
+
+    # Update filters bumps version.
+    bump_1 = module.update_preset(
+        preset["id"],
+        filters={"account": "New", "filter": "", "time": "", "conversion": "", "interval": ""},
+    )
+    assert bump_1["version"] == 2
+
+    # Rename bumps version.
+    bump_2 = module.update_preset(bump_1["id"], name="Versioned 2")
+    assert bump_2["version"] == 3
+
+    # The number is persisted on disk and re-loaded correctly.
+    reloaded = FilterPresetsModule(tmp_ledger_file)
+    assert reloaded.get_preset(preset["id"])["version"] == 3
+
+
+def test_preset_version_stale_on_rename_rejected(tmp_ledger_file: Path) -> None:
+    """Renaming while carrying a stale version must raise concurrent_modification."""
+    module = FilterPresetsModule(tmp_ledger_file)
+    preset = module.create_preset("Rename Race", FilterPresetPageType.ALL, SAMPLE_FILTERS)
+    assert preset["version"] == 1
+
+    # Another mutation sneaks in and bumps the version.
+    module.update_preset(
+        preset["id"],
+        filters={"account": "Sneaky", "filter": "", "time": "", "conversion": "", "interval": ""},
+    )
+
+    # Attempting a rename with the stale version (1) must fail with a 409.
+    with pytest.raises(FilterPresetConcurrentModificationError) as exc_info:
+        module.update_preset(
+            preset["id"],
+            name="Should Not Stick",
+            expected_version=1,
+        )
+
+    err = exc_info.value
+    assert err.code == "concurrent_modification"
+    assert err.details["preset_id"] == preset["id"]
+    assert err.details["expected_version"] == 1
+    assert err.details["actual_version"] == 2
+
+    # The rename must NOT have been applied.
+    fresh = FilterPresetsModule(tmp_ledger_file)
+    stored = fresh.get_preset(preset["id"])
+    assert stored["name"] == "Rename Race"
+    assert stored["version"] == 2
+
+
+def test_delete_with_stale_version_rejected(tmp_ledger_file: Path) -> None:
+    """Deleting a preset whose version drifted must be rejected."""
+    module = FilterPresetsModule(tmp_ledger_file)
+    preset = module.create_preset("Doomed", FilterPresetPageType.ALL, SAMPLE_FILTERS)
+
+    # Bump version behind the caller's back.
+    module.update_preset(
+        preset["id"],
+        filters={"account": "X", "filter": "", "time": "", "conversion": "", "interval": ""},
+    )
+
+    with pytest.raises(FilterPresetConcurrentModificationError) as exc_info:
+        module.delete_preset(preset["id"], expected_version=1)
+
+    assert exc_info.value.details["expected_version"] == 1
+    assert exc_info.value.details["actual_version"] == 2
+
+    # Preset must still exist.
+    assert len(module.list_presets()) == 1
+
+    # A delete with the *correct* version must finally remove it.
+    module.delete_preset(preset["id"], expected_version=2)
+    assert module.list_presets() == []
+
+
+def test_json_api_update_accepts_expected_version(app_in_tmp_dir) -> None:  # noqa: ANN001
+    """POST /filter_preset with ``expected_version`` should honour the check."""
+    client = app_in_tmp_dir.test_client()
+
+    create_resp = client.put(
+        "/edit-example/api/filter_preset",
+        json={"name": "API Version", "page": "all", "filters": SAMPLE_FILTERS},
+    )
+    assert create_resp.status_code == HTTPStatus.OK.value
+    preset_id = create_resp.json["data"]["id"]  # type: ignore[index]
+
+    # Stale version must produce a 409.
+    stale = client.post(
+        "/edit-example/api/filter_preset",
+        json={
+            "id": preset_id,
+            "name": "Renamed via stale",
+            "expected_version": 999,
+        },
+    )
+    assert stale.status_code == HTTPStatus.CONFLICT.value, stale.data
+    assert stale.json["code"] == "concurrent_modification"  # type: ignore[index]
+    assert stale.json["details"]["expected_version"] == 999  # type: ignore[index]
+    assert stale.json["details"]["actual_version"] == 1  # type: ignore[index]
+
+    # Correct version (1) must succeed and bump to 2.
+    success = client.post(
+        "/edit-example/api/filter_preset",
+        json={
+            "id": preset_id,
+            "name": "Properly Renamed",
+            "expected_version": 1,
+        },
+    )
+    assert success.status_code == HTTPStatus.OK.value, success.data
+    assert success.json["data"]["version"] == 2  # type: ignore[index]
+    assert success.json["data"]["name"] == "Properly Renamed"  # type: ignore[index]
+
+
+def test_json_api_delete_accepts_expected_version(app_in_tmp_dir) -> None:  # noqa: ANN001
+    """DELETE /filter_preset?expected_version=N should also honour the check."""
+    client = app_in_tmp_dir.test_client()
+
+    create_resp = client.put(
+        "/edit-example/api/filter_preset",
+        json={"name": "Delete Me", "page": "all", "filters": SAMPLE_FILTERS},
+    )
+    assert create_resp.status_code == HTTPStatus.OK.value
+    preset_id = create_resp.json["data"]["id"]  # type: ignore[index]
+
+    stale = client.delete(
+        f"/edit-example/api/filter_preset?id={preset_id}&expected_version=5"
+    )
+    assert stale.status_code == HTTPStatus.CONFLICT.value
+    assert stale.json["details"]["actual_version"] == 1  # type: ignore[index]
+
+    # Preset must still be around.
+    list_resp = client.get("/edit-example/api/filter_presets")
+    assert any(p["id"] == preset_id for p in list_resp.json["data"])  # type: ignore[index]
+
+    ok = client.delete(
+        f"/edit-example/api/filter_preset?id={preset_id}&expected_version=1"
+    )
+    assert ok.status_code == HTTPStatus.OK.value
+
+    list_resp2 = client.get("/edit-example/api/filter_presets")
+    assert list_resp2.json["data"] == []  # type: ignore[index]
+
+
+# ---------------------------------------------------------------------------
+# Rename-specific concurrent conflict path (user-requested scenario)
+# ---------------------------------------------------------------------------
+
+
+def test_rename_concurrent_conflict_path(tmp_ledger_file: Path) -> None:
+    """Simulate two tabs racing to rename the same preset.
+
+    Both tabs read ``version=1``.  Tab A wins the rename and bumps the
+    version to ``2``.  Tab B, still holding ``version=1``, must be
+    rejected with a clear concurrent-modification error that the frontend
+    can translate into a "refresh and retry" prompt.
+    """
+    tab_a = FilterPresetsModule(tmp_ledger_file)
+    tab_b = FilterPresetsModule(tmp_ledger_file)
+
+    initial = tab_a.create_preset(
+        "Original", FilterPresetPageType.ALL, SAMPLE_FILTERS
+    )
+    assert initial["version"] == 1
+
+    # tab_a reads at version 1, then commits.
+    renamed_a = tab_a.update_preset(
+        initial["id"], name="From A", expected_version=1
+    )
+    assert renamed_a["name"] == "From A"
+    assert renamed_a["version"] == 2
+
+    # tab_b's in-memory copy is still at version 1; re-reading refreshes
+    # it so we can hand-craft the stale version path.
+    tab_b.list_presets()
+    stale_copy = tab_b._presets[initial["id"]]  # noqa: SLF001
+    assert stale_copy.version == 2
+
+    # Force tab_b's view back to version 1 to simulate reading before A wrote.
+    stale_copy.version = 1
+    tab_b._presets[initial["id"]] = stale_copy  # noqa: SLF001
+
+    # Now tab_b tries to rename against expected_version=1 → must be rejected.
+    with pytest.raises(FilterPresetConcurrentModificationError) as exc_info:
+        tab_b.update_preset(
+            initial["id"], name="From B", expected_version=1
+        )
+
+    assert exc_info.value.details["actual_version"] == 2
+    # The disk-state must show only tab_a's rename.
+    arbiter = FilterPresetsModule(tmp_ledger_file)
+    assert arbiter.get_preset(initial["id"])["name"] == "From A"
+
+
+# ---------------------------------------------------------------------------
+# Cross-page preset application followed by filter-state switching
+# (user-requested scenario)
+# ---------------------------------------------------------------------------
+
+
+def test_cross_page_apply_then_filter_switch(tmp_ledger_file: Path) -> None:
+    """Apply a cross-page preset, mutate the URL filters, then save a new preset.
+
+    This exercises the path the user pointed out: the preset is stored for
+    ``page="all"``, applied from the ``account`` page context, the user
+    then tweaks the filters on that page, and finally saves a new preset
+    scoped to the current page.  Both presets must exist with distinct
+    filters and scopes.
+    """
+    module = FilterPresetsModule(tmp_ledger_file)
+
+    shared = module.create_preset(
+        "Shared 2024",
+        FilterPresetPageType.ALL,
+        {
+            "account": "Assets:Bank",
+            "filter": "",
+            "time": "2024",
+            "conversion": "",
+            "interval": "monthly",
+        },
+    )
+    assert shared["version"] == 1
+    assert shared["page"] == "all"
+
+    # Simulate "apply on the account page": the UI reads the preset from
+    # the account scope, which must still surface the shared preset.
+    visible_on_account = module.list_presets(FilterPresetPageType.ACCOUNT)
+    assert any(p["id"] == shared["id"] for p in visible_on_account)
+
+    # The user then tweaks the filters on the current page and saves a
+    # page-specific preset.
+    page_specific = module.create_preset(
+        "Account Tweaked",
+        FilterPresetPageType.ACCOUNT,
+        {
+            "account": "Assets:Cash",
+            "filter": "#urgent",
+            "time": "2024-Q2",
+            "conversion": "EUR",
+            "interval": "weekly",
+        },
+    )
+
+    # Both presets are stored correctly.
+    all_presets = module.list_presets()
+    assert {p["name"] for p in all_presets} == {"Shared 2024", "Account Tweaked"}
+
+    # The page-specific preset is not visible from, say, the balance sheet.
+    on_balance_sheet = module.list_presets(FilterPresetPageType.BALANCE_SHEET)
+    ids = [p["id"] for p in on_balance_sheet]
+    assert shared["id"] in ids
+    assert page_specific["id"] not in ids
+
+    # The page-specific preset IS visible from the account page.
+    on_account = module.list_presets(FilterPresetPageType.ACCOUNT)
+    ids_account = [p["id"] for p in on_account]
+    assert shared["id"] in ids_account
+    assert page_specific["id"] in ids_account
+
+    # Modifying the page-specific preset must not leak into the shared one.
+    updated_specific = module.update_preset(
+        page_specific["id"],
+        filters={
+            "account": "Assets:Wallet",
+            "filter": "#urgent",
+            "time": "2024-Q3",
+            "conversion": "EUR",
+            "interval": "weekly",
+        },
+    )
+    assert updated_specific["version"] == 2
+    reloaded_shared = module.get_preset(shared["id"])
+    assert reloaded_shared["filters"]["time"] == "2024"
+    assert reloaded_shared["version"] == 1  # untouched
+
+
+def test_cross_page_apply_via_get_and_persist_via_update(
+    tmp_ledger_file: Path,
+) -> None:
+    """Read a shared preset from one page, apply, and write it back scoped.
+
+    A slightly different angle: the UI fetches a preset through
+    ``get_preset`` (as the "apply" button might), the user tweaks the
+    filters, and finally ``update_preset`` saves the tweaks back under
+    the same preset id.  The version must bump and the filters must be
+    updated without creating any duplicate entries.
+    """
+    module = FilterPresetsModule(tmp_ledger_file)
+    preset = module.create_preset(
+        "All Pages",
+        FilterPresetPageType.ALL,
+        {"account": "", "filter": "", "time": "2024", "conversion": "", "interval": "monthly"},
+    )
+
+    fetched = module.get_preset(preset["id"])
+    assert fetched["filters"]["time"] == "2024"
+    assert fetched["version"] == 1
+
+    # "Apply" and tweak, then persist back.
+    tweaked = module.update_preset(
+        preset["id"],
+        filters={
+            "account": "",
+            "filter": "#travel",
+            "time": "2024-Q3",
+            "conversion": "",
+            "interval": "quarterly",
+        },
+        expected_version=1,
+    )
+    assert tweaked["version"] == 2
+    assert tweaked["filters"]["filter"] == "#travel"
+    assert tweaked["filters"]["interval"] == "quarterly"
+
+    # Only one preset remains; the update is in-place.
+    assert len(module.list_presets()) == 1
+
+
+# ---------------------------------------------------------------------------
+# Backwards-compat: legacy JSON files without ``version`` load cleanly
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_storage_without_version_upgrades(
+    tmp_ledger_file: Path, storage_path: Path
+) -> None:
+    """A pre-``schema_version`` JSON file must load and be written back with
+    the new schema, defaulting each preset's ``version`` to ``1``.
+    """
+    storage_path.write_text(
+        json.dumps(
+            {
+                # "schema_version" intentionally missing.
+                "presets": [
+                    {
+                        "id": "abc123",
+                        "name": "Legacy",
+                        "page": "account",
+                        "filters": {
+                            "account": "Assets",
+                            "filter": "",
+                            "time": "",
+                            "conversion": "",
+                            "interval": "",
+                        },
+                        "created_at": 1700000000.0,
+                        "updated_at": 1700000000.0,
+                        # "version" intentionally missing.
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    module = FilterPresetsModule(tmp_ledger_file)
+    loaded = module.list_presets()
+    assert len(loaded) == 1
+    assert loaded[0]["name"] == "Legacy"
+    assert loaded[0]["version"] == 1  # defaults for legacy entries
+
+    # Upgrading triggers a rewrite that carries schema_version=2.
+    module.update_preset(
+        loaded[0]["id"],
+        filters={"account": "Liabilities", "filter": "", "time": "", "conversion": "", "interval": ""},
+    )
+    raw = json.loads(storage_path.read_text(encoding="utf-8"))
+    assert raw["schema_version"] == 2
+    assert raw["presets"][0]["version"] == 2

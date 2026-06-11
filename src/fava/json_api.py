@@ -998,6 +998,15 @@ def post_filter_preset() -> Response:
     name = request_json.get("name")
     page = request_json.get("page")
     filters = request_json.get("filters")
+    raw_expected_version = request_json.get("expected_version")
+    expected_version: int | None = None
+    if raw_expected_version is not None:
+        try:
+            expected_version = int(raw_expected_version)
+            if expected_version < 1:
+                expected_version = None
+        except (TypeError, ValueError):
+            expected_version = None
     filters_dict = None
     if filters is not None:
         if not isinstance(filters, dict):
@@ -1006,16 +1015,36 @@ def post_filter_preset() -> Response:
             )
         filters_dict = {k: str(v) for k, v in filters.items()}
     preset = g.ledger.filter_presets.update_preset(
-        preset_id, name=name, page=page, filters=filters_dict
+        preset_id,
+        name=name,
+        page=page,
+        filters=filters_dict,
+        expected_version=expected_version,
     )
     return json_success(preset)
 
 
 @json_api.route("/filter_preset", methods=["DELETE"])
 def delete_filter_preset() -> Response:
-    """Delete a filter preset by ID."""
+    """Delete a filter preset by ID.
+
+    Optionally accepts an ``expected_version`` query parameter; if given,
+    the delete will only succeed when the server-side version matches,
+    otherwise a 409 Concurrent Modification response is returned.
+    """
     preset_id = request.args.get("id", "")
     if not preset_id:
         return json_err("Parameter 'id' is missing.", HTTPStatus.BAD_REQUEST)
-    g.ledger.filter_presets.delete_preset(preset_id)
+    raw_expected_version = request.args.get("expected_version")
+    expected_version: int | None = None
+    if raw_expected_version is not None:
+        try:
+            expected_version = int(raw_expected_version)
+            if expected_version < 1:
+                expected_version = None
+        except (TypeError, ValueError):
+            expected_version = None
+    g.ledger.filter_presets.delete_preset(
+        preset_id, expected_version=expected_version
+    )
     return json_success(f"Deleted filter preset '{preset_id}'.")
