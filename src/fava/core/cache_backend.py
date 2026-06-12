@@ -223,6 +223,46 @@ def make_cache_key(
     return hashlib.md5(key_str.encode()).hexdigest()
 
 
+def ledger_namespace_hash(ledger_path: str | None) -> str:
+    """Generate a stable namespace prefix for a ledger.
+
+    Uses the absolute path of the ledger's beancount file to create a
+    short, deterministic hash that serves as a namespace prefix for all
+    cache keys. This ensures that multiple ledgers sharing the same
+    Redis instance will never have key collisions.
+
+    When ledger_path is None (e.g., in standalone testing), returns
+    'default' as a fallback namespace.
+
+    Args:
+        ledger_path: Absolute path to the ledger's beancount file.
+
+    Returns:
+        A short hex string (8 chars) suitable for use as a key prefix.
+    """
+    if ledger_path is None:
+        return "default"
+
+    from pathlib import Path
+
+    absolute_path = str(Path(ledger_path).resolve())
+    full_hash = hashlib.sha256(absolute_path.encode()).hexdigest()
+    return full_hash[:8]
+
+
+def namespaced_ledger_key(namespace: str, base_key: str) -> str:
+    """Combine a ledger namespace prefix with a base cache key.
+
+    Args:
+        namespace: The ledger namespace hash from ledger_namespace_hash().
+        base_key: The base cache key (e.g., from make_cache_key()).
+
+    Returns:
+        A composite key in the format "<namespace>:<base_key>".
+    """
+    return f"{namespace}:{base_key}"
+
+
 class CacheBackend(ABC):
     """Abstract base class for cache backends.
 
@@ -872,6 +912,54 @@ def create_cache_backend(config: CacheConfig | None = None) -> CacheBackend:
         )
 
     return InMemoryCacheBackend(default_ttl=config.default_ttl)
+
+
+class TTLCache(InMemoryCacheBackend):
+    """Backward-compatible TTL cache with the legacy (*parts, **kwargs) key API.
+
+    This class exists to keep existing tests and call sites working after
+    the cache backend refactor. New code should use :class:`InMemoryCacheBackend`
+    (or the higher-level :class:`ChartDataService`) directly, which operates
+    on plain string keys produced by :func:`make_cache_key`.
+
+    Legacy API:
+        ``cache.set(value, *parts, **kwargs)``
+        ``cache.get(*parts, **kwargs)``
+    """
+
+    def __init__(self, ttl: int = 300, default_ttl: int | None = None) -> None:
+        super().__init__(default_ttl=default_ttl if default_ttl is not None else ttl)
+
+    def set(  # type: ignore[override]
+        self,
+        value: Any,
+        *parts: Any,
+        ttl: int | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Set a cache entry using legacy (*parts, **kwargs) key syntax.
+
+        Args:
+            value: The value to store.
+            *parts: Positional parts that are combined into the cache key.
+            ttl: Optional custom TTL for this entry (in seconds).
+            **kwargs: Keyword parts that are combined into the cache key.
+        """
+        key = make_cache_key(*parts, **kwargs)
+        super().set(key, value, ttl=ttl)
+
+    def get(self, *parts: Any, **kwargs: Any) -> Any | None:  # type: ignore[override]
+        """Get a cache entry using legacy (*parts, **kwargs) key syntax.
+
+        Args:
+            *parts: Positional parts that are combined into the cache key.
+            **kwargs: Keyword parts that are combined into the cache key.
+
+        Returns:
+            The cached value, or None if not found / expired.
+        """
+        key = make_cache_key(*parts, **kwargs)
+        return super().get(key)
 
 
 if TYPE_CHECKING:

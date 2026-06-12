@@ -24,7 +24,9 @@ from fava.core.cache_backend import (
     InMemoryCacheBackend,
     RedisCacheBackend,
     create_cache_backend,
+    ledger_namespace_hash,
     make_cache_key,
+    namespaced_ledger_key,
 )
 from fava.core.chart_data_service import ChartDataService
 
@@ -766,3 +768,244 @@ class TestBackendInterfaceCompliance:
         except (CacheBackendError, Exception):
             pass
         assert redis_backend.is_available is False
+
+
+class TestLedgerNamespaceIsolation:
+    """Tests for ledger namespace isolation.
+
+    Two separate ledgers sharing the same cache backend (e.g., Redis)
+    must never read each other's cached data, even when the time window
+    and currency are identical.
+    """
+
+    def test_different_paths_produce_different_namespaces(self) -> None:
+        """Different ledger absolute paths must produce different namespace hashes."""
+        ns_a = ledger_namespace_hash("/data/ledgers/company_a/main.beancount")
+        ns_b = ledger_namespace_hash("/data/ledgers/company_b/main.beancount")
+
+        assert isinstance(ns_a, str)
+        assert isinstance(ns_b, str)
+        assert len(ns_a) == 8
+        assert len(ns_b) == 8
+        assert ns_a != ns_b, (
+            "Different ledger paths must produce different namespace hashes"
+        )
+
+    def test_same_path_produces_same_namespace(self) -> None:
+        """The same ledger path must always produce the same namespace."""
+        path = "/srv/fava/my-books/personal.beancount"
+        ns1 = ledger_namespace_hash(path)
+        ns2 = ledger_namespace_hash(path)
+
+        assert ns1 == ns2, "Same ledger path must produce identical namespace"
+
+    def test_namespace_prefix_is_prepended(self) -> None:
+        """namespaced_ledger_key must prepend the namespace with a colon separator."""
+        ns = "abc12345"
+        base = "f0e1d2c3b4a5968778695a4b3c2d1e0f"
+
+        result = namespaced_ledger_key(ns, base)
+
+        assert result == f"{ns}:{base}"
+        assert result.startswith(ns + ":")
+
+    def test_two_services_different_ledgers_shared_backend_isolated(
+        self,
+    ) -> None:
+        """Two ChartDataService instances for different ledgers sharing one
+        backend must not interfere with each other's cache reads/writes."""
+        shared_backend = InMemoryCacheBackend(default_ttl=300)
+
+        service_a = ChartDataService(
+            prices=None,
+            options={},
+            cache_backend=shared_backend,
+            ledger_path="/ledgers/company_a/main.beancount",
+        )
+        service_b = ChartDataService(
+            prices=None,
+            options={},
+            cache_backend=shared_backend,
+            ledger_path="/ledgers/company_b/main.beancount",
+        )
+
+        assert service_a.ledger_namespace != service_b.ledger_namespace
+
+        same_base_key = make_cache_key(
+            "aggregation",
+            time_window_start="2024-01-01",
+            time_window_end="2024-02-01",
+            currency="USD",
+            account="Expenses:Food",
+            conversion="at_cost",
+        )
+
+        namespaced_a = service_a.namespaced_key(same_base_key)
+        namespaced_b = service_b.namespaced_key(same_base_key)
+
+        assert namespaced_a != namespaced_b
+
+        shared_backend.set(namespaced_a, "company_a_balance")
+        shared_backend.set(namespaced_b, "company_b_balance")
+
+        assert shared_backend.get(namespaced_a) == "company_a_balance"
+        assert shared_backend.get(namespaced_b) == "company_b_balance"
+
+    def test_two_ledgers_same_params_no_cross_read(self) -> None:
+        """Ledger A writes data; Ledger B reading under identical time window
+        and currency must NOT see Ledger A's cached value."""
+        shared_backend = InMemoryCacheBackend(default_ttl=300)
+
+        service_a = ChartDataService(
+            prices=None,
+            options={},
+            cache_backend=shared_backend,
+            ledger_path="/tmp/ledger_A.beancount",
+        )
+        service_b = ChartDataService(
+            prices=None,
+            options={},
+            cache_backend=shared_backend,
+            ledger_path="/tmp/ledger_B.beancount",
+        )
+
+        test_params = dict(
+            time_window_start="2024-06-01",
+            time_window_end="2024-07-01",
+            currency="EUR",
+            account="Assets:Cash",
+            conversion="at_cost",
+        )
+        base_key = make_cache_key("aggregation", **test_params)
+
+        key_a = service_a.namespaced_key(base_key)
+        key_b = service_b.namespaced_key(base_key)
+
+        shared_backend.set(key_a, "LEDGER_A_DATA_ONLY")
+
+        assert shared_backend.get(key_a) == "LEDGER_A_DATA_ONLY"
+        assert shared_backend.get(key_b) is None, (
+            "Ledger B must NOT be able to read Ledger A's cached data "
+            "even with identical time window and currency"
+        )
+
+        shared_backend.set(key_b, "LEDGER_B_DATA_ONLY")
+        assert shared_backend.get(key_a) == "LEDGER_A_DATA_ONLY", (
+            "Writing Ledger B's value must not overwrite Ledger A's value"
+        )
+        assert shared_backend.get(key_b) == "LEDGER_B_DATA_ONLY"
+
+    def test_multiple_ledgers_unique_namespaces(self) -> None:
+        """Five distinct ledger paths must produce five distinct namespaces."""
+        paths = [
+            "/home/alice/books/personal.beancount",
+            "/home/bob/books/business.beancount",
+            "/home/charlie/beancount/family.beancount",
+            "/srv/company/books/2024/main.beancount",
+            "/srv/company/books/2024/subsidiary.beancount",
+        ]
+
+        namespaces = {ledger_namespace_hash(p) for p in paths}
+
+        assert len(namespaces) == len(paths), (
+            "Every distinct ledger path must produce a distinct namespace hash"
+        )
+
+
+class TestLedgerPathChange:
+    """Tests that changing the ledger path invalidates old cache keys.
+
+    When ChartDataService is switched to a different ledger, any cached
+    data under the old namespace must become inaccessible through the
+    service instance.
+    """
+
+    def test_set_ledger_namespace_changes_prefix(self) -> None:
+        """Calling set_ledger_namespace() must update the namespace prefix."""
+        service = ChartDataService(
+            prices=None,
+            options={},
+            cache_backend=InMemoryCacheBackend(default_ttl=300),
+            ledger_path="/ledgers/old.beancount",
+        )
+
+        old_ns = service.ledger_namespace
+        old_path = service.ledger_path
+
+        service.set_ledger_namespace("/ledgers/new.beancount")
+
+        assert service.ledger_path == "/ledgers/new.beancount"
+        assert service.ledger_namespace != old_ns
+        assert service.ledger_path != old_path
+
+    def test_path_change_old_cache_no_longer_hit(self) -> None:
+        """After changing the ledger path, reads using the same parameters
+        must NOT return values cached under the old namespace."""
+        backend = InMemoryCacheBackend(default_ttl=300)
+
+        service = ChartDataService(
+            prices=None,
+            options={},
+            cache_backend=backend,
+            ledger_path="/ledgers/ledger_v1.beancount",
+        )
+
+        base_key = make_cache_key(
+            "aggregation",
+            time_window_start="2024-01-01",
+            time_window_end="2024-03-01",
+            currency="USD",
+            account="Income:Salary",
+            conversion="at_cost",
+        )
+
+        old_ns_key = service.namespaced_key(base_key)
+        backend.set(old_ns_key, "cached_under_old_namespace")
+
+        assert backend.get(old_ns_key) == "cached_under_old_namespace"
+
+        service.set_ledger_namespace("/ledgers/ledger_v2.beancount")
+
+        new_ns_key = service.namespaced_key(base_key)
+
+        assert new_ns_key != old_ns_key
+        assert backend.get(new_ns_key) is None, (
+            "After changing ledger path, the same base parameters must "
+            "produce a different namespaced key and old cache must not hit"
+        )
+
+        backend.set(new_ns_key, "cached_under_new_namespace")
+
+        assert backend.get(old_ns_key) == "cached_under_old_namespace", (
+            "Old namespace data must still exist in the backend "
+            "(but is inaccessible via the service instance)"
+        )
+        assert backend.get(new_ns_key) == "cached_under_new_namespace"
+
+    def test_path_change_to_none_uses_default_namespace(self) -> None:
+        """Setting ledger_path to None must use the 'default' namespace."""
+        service = ChartDataService(
+            prices=None,
+            options={},
+            cache_backend=InMemoryCacheBackend(default_ttl=300),
+            ledger_path="/some/path.beancount",
+        )
+
+        real_ns = service.ledger_namespace
+        assert real_ns != "default"
+
+        service.set_ledger_namespace(None)
+
+        assert service.ledger_namespace == "default"
+        assert service.ledger_path is None
+
+    def test_no_ledger_path_uses_default_namespace(self) -> None:
+        """Creating a service without any ledger path must use 'default'."""
+        service = ChartDataService(
+            prices=None,
+            options={},
+            cache_backend=InMemoryCacheBackend(default_ttl=300),
+        )
+
+        assert service.ledger_namespace == "default"
+        assert service.ledger_path is None

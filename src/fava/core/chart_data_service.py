@@ -34,7 +34,9 @@ from fava.core.cache_backend import CacheBackend
 from fava.core.cache_backend import CacheConfig
 from fava.core.cache_backend import InMemoryCacheBackend
 from fava.core.cache_backend import create_cache_backend
+from fava.core.cache_backend import ledger_namespace_hash
 from fava.core.cache_backend import make_cache_key
+from fava.core.cache_backend import namespaced_ledger_key
 from fava.core.conversion import conversion_from_str
 from fava.core.inventory import CounterInventory
 from fava.core.inventory import SimpleCounterInventory
@@ -240,6 +242,7 @@ class ChartDataService:
         options: Mapping[str, Any] | None = None,
         cache_backend: CacheBackend | None = None,
         cache_config: CacheConfig | None = None,
+        ledger_path: str | None = None,
     ) -> None:
         """Initialize the chart data service.
 
@@ -252,10 +255,25 @@ class ChartDataService:
                 loaded from environment / options.
             cache_config: Optional cache configuration. Ignored if
                 cache_backend is provided.
+            ledger_path: Optional explicit ledger file path. If not provided,
+                the path will be inferred from the ledger module.
         """
         self._ledger = ledger
         self._prices = prices
         self._options = options
+
+        self._ledger_path = (
+            ledger_path
+            if ledger_path is not None
+            else (
+                ledger.ledger.beancount_file_path
+                if ledger is not None
+                and hasattr(ledger, "ledger")
+                and hasattr(ledger.ledger, "beancount_file_path")
+                else None
+            )
+        )
+        self._ledger_namespace = ledger_namespace_hash(self._ledger_path)
 
         if cache_backend is not None:
             self._cache = cache_backend
@@ -263,6 +281,46 @@ class ChartDataService:
             if cache_config is None:
                 cache_config = CacheConfig.from_options(options)
             self._cache = create_cache_backend(cache_config)
+
+    @property
+    def ledger_path(self) -> str | None:
+        """Get the ledger file path used for namespace generation."""
+        return self._ledger_path
+
+    @property
+    def ledger_namespace(self) -> str:
+        """Get the ledger namespace prefix used for cache keys."""
+        return self._ledger_namespace
+
+    def namespaced_key(self, base_key: str) -> str:
+        """Wrap a base cache key with the ledger namespace prefix.
+
+        All cache operations should go through this method to ensure
+        proper isolation between different ledgers.
+
+        Args:
+            base_key: The base cache key (e.g., from make_cache_key()).
+
+        Returns:
+            A namespace-prefixed cache key.
+        """
+        return namespaced_ledger_key(self._ledger_namespace, base_key)
+
+    def set_ledger_namespace(
+        self, ledger_path: str | None
+    ) -> None:
+        """Change the ledger namespace prefix.
+
+        Call this when switching to a different ledger. The old cache
+        keys will naturally become inaccessible since they are under
+        a different namespace.
+
+        Args:
+            ledger_path: The new ledger file absolute path. Pass None
+                to reset to the 'default' namespace.
+        """
+        self._ledger_path = ledger_path
+        self._ledger_namespace = ledger_namespace_hash(ledger_path)
 
     @property
     def prices(self) -> FavaPriceMap:
@@ -519,7 +577,8 @@ class ChartDataService:
     ) -> tuple[CounterInventory, CounterInventory] | None:
         """Try to get cached aggregation results for an account.
 
-        Cache key includes:
+        Cache key includes (via make_cache_key + namespaced_key):
+        - Ledger namespace prefix (from ledger absolute path hash)
         - Operation type prefix
         - Account name
         - Time window (start and end dates)
@@ -535,7 +594,7 @@ class ChartDataService:
         Returns:
             Cached (total_inventory, account_inventory) if available, None otherwise.
         """
-        key = make_cache_key(
+        base_key = make_cache_key(
             "aggregation",
             time_window_start=date_range.begin.isoformat(),
             time_window_end=date_range.end.isoformat(),
@@ -543,7 +602,8 @@ class ChartDataService:
             account=account_name,
             conversion=conversion_str,
         )
-        return self._cache.get(key)
+        namespaced = self.namespaced_key(base_key)
+        return self._cache.get(namespaced)
 
     def _set_cached_aggregation(
         self,
@@ -557,7 +617,8 @@ class ChartDataService:
     ) -> None:
         """Cache aggregation results for an account.
 
-        Cache key includes:
+        Cache key includes (via make_cache_key + namespaced_key):
+        - Ledger namespace prefix (from ledger absolute path hash)
         - Operation type prefix
         - Account name
         - Time window (start and end dates)
@@ -572,7 +633,7 @@ class ChartDataService:
             ttl: Cache TTL in seconds.
             currency: Optional currency identifier.
         """
-        key = make_cache_key(
+        base_key = make_cache_key(
             "aggregation",
             time_window_start=date_range.begin.isoformat(),
             time_window_end=date_range.end.isoformat(),
@@ -580,7 +641,8 @@ class ChartDataService:
             account=account_name,
             conversion=conversion_str,
         )
-        self._cache.set(key, value, ttl)
+        namespaced = self.namespaced_key(base_key)
+        self._cache.set(namespaced, value, ttl)
 
     @listify
     def aggregate_by_time(

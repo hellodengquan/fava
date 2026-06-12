@@ -18,12 +18,14 @@ import pytest
 
 from fava.beans.abc import Transaction
 from fava.beans.load import load_string
+from fava.core.cache_backend import (
+    CacheStats,
+    TTLCache,
+)
 from fava.core.chart_data_service import (
     AccountProcessingTask,
     AggregationParameters,
-    CacheStats,
     ChartDataService,
-    TTLCache,
     _convert_account_inventory,
     _process_account_task,
 )
@@ -720,22 +722,25 @@ class TestCacheHitRate:
 
         from datetime import date
         from fava.util.date import DateRange
+        from fava.core.cache_backend import make_cache_key
 
         test_date_range = DateRange(date(2024, 1, 1), date(2024, 2, 1))
 
         cache = chart_service.cache
 
-        cache_key_args = {
-            "account": "Expenses:Category001",
-            "begin": test_date_range.begin.isoformat(),
-            "end": test_date_range.end.isoformat(),
-            "conversion": "at_cost",
-        }
+        base_key = make_cache_key(
+            "aggregation",
+            account="Expenses:Category001",
+            time_window_start=test_date_range.begin.isoformat(),
+            time_window_end=test_date_range.end.isoformat(),
+            conversion="at_cost",
+        )
+        key = chart_service.namespaced_key(base_key)
 
         test_value = (CounterInventory(), CounterInventory())
-        cache.set(test_value, "aggregation", **cache_key_args)
+        cache.set(key, test_value)
 
-        result = cache.get("aggregation", **cache_key_args)
+        result = cache.get(key)
         assert result is not None
         assert cache.stats.hits == 1
 
@@ -849,10 +854,15 @@ class TestCacheHitRate:
         """Test that the service's reset_cache method works correctly."""
         cache = chart_service.cache
 
-        cache.set("test_value", "test_key")
-        cache.get("test_key")
-        cache.get("test_key")
-        cache.get("nonexistent")
+        from fava.core.cache_backend import make_cache_key
+
+        k1 = make_cache_key("svc_reset", key="test_key")
+        k_miss = make_cache_key("svc_reset", key="nonexistent")
+
+        cache.set(k1, "test_value")
+        cache.get(k1)
+        cache.get(k1)
+        cache.get(k_miss)
 
         assert cache.stats.hits == 2
         assert cache.stats.misses == 1
