@@ -9,6 +9,7 @@ from beancount.core.account import has_component
 
 from fava.beans import create
 from fava.beans.account import get_entry_accounts
+from fava.core import FilteredLedger
 from fava.core.filters import AccountFilter
 from fava.core.filters import AdvancedFilter
 from fava.core.filters import FilterError
@@ -235,3 +236,187 @@ def test_time_filter(example_ledger: FavaLedger) -> None:
             example_ledger.fava_options,
             "no_date",
         )
+
+
+def test_filtered_ledger_no_filters(example_ledger: FavaLedger) -> None:
+    filtered = FilteredLedger(example_ledger)
+    assert len(filtered.entries) == len(example_ledger.all_entries)
+
+
+def test_filtered_ledger_empty_string_filters(example_ledger: FavaLedger) -> None:
+    filtered = FilteredLedger(
+        example_ledger, account="", filter="", time=""
+    )
+    assert len(filtered.entries) == len(example_ledger.all_entries)
+
+
+@pytest.mark.parametrize(
+    ("account", "expected_count"),
+    [
+        ("Assets", 541),
+        ("Assets:US:BofA", 280),
+        (".*US:State", 67),
+        ("Expenses", 723),
+        ("Income", 125),
+        ("NonExistentAccount", 0),
+    ],
+)
+def test_filtered_ledger_account(
+    example_ledger: FavaLedger,
+    account: str,
+    expected_count: int,
+) -> None:
+    filtered = FilteredLedger(example_ledger, account=account)
+    assert len(filtered.entries) == expected_count
+
+
+@pytest.mark.parametrize(
+    ("filter_str", "expected_count"),
+    [
+        ("#test", 2),
+        ("^test-link", 3),
+        ("BayBook", 62),
+        ("payee:BayBook", 62),
+        ("#test,#nomatch", 2),
+        ("^test-link,#test", 4),
+        ("-#test", 1824),
+    ],
+)
+def test_filtered_ledger_advanced(
+    example_ledger: FavaLedger,
+    filter_str: str,
+    expected_count: int,
+) -> None:
+    filtered = FilteredLedger(example_ledger, filter=filter_str)
+    assert len(filtered.entries) == expected_count
+
+
+@pytest.mark.parametrize(
+    ("time", "expected_count"),
+    [
+        ("2017", 83),
+        ("2014", 752),
+    ],
+)
+def test_filtered_ledger_time(
+    example_ledger: FavaLedger,
+    time: str,
+    expected_count: int,
+) -> None:
+    filtered = FilteredLedger(example_ledger, time=time)
+    assert len(filtered.entries) == expected_count
+
+
+@pytest.mark.parametrize(
+    ("account", "filter_str", "expected_count"),
+    [
+        ("Assets", "#test", 2),
+        ("Assets", "^test-link", 3),
+        ("Assets:US:BofA", "BayBook", 62),
+        ("Expenses", "BayBook", 62),
+        ("Assets", "#nomatch", 0),
+        ("NonExistentAccount", "#test", 0),
+    ],
+)
+def test_filtered_ledger_account_and_tag(
+    example_ledger: FavaLedger,
+    account: str,
+    filter_str: str,
+    expected_count: int,
+) -> None:
+    filtered = FilteredLedger(
+        example_ledger, account=account, filter=filter_str
+    )
+    assert len(filtered.entries) == expected_count
+
+
+@pytest.mark.parametrize(
+    ("account", "time", "expected_count"),
+    [
+        ("Assets", "2017", 30),
+        ("Assets", "2014", 223),
+        ("Assets:US:BofA", "2014", 119),
+        ("NonExistentAccount", "2014", 0),
+    ],
+)
+def test_filtered_ledger_account_and_time(
+    example_ledger: FavaLedger,
+    account: str,
+    time: str,
+    expected_count: int,
+) -> None:
+    filtered = FilteredLedger(example_ledger, account=account, time=time)
+    assert len(filtered.entries) == expected_count
+
+
+@pytest.mark.parametrize(
+    ("account", "filter_str", "time", "expected_count"),
+    [
+        ("Assets", "#test", "2014", 2),
+        ("Assets", "^test-link", "2014", 3),
+        ("Assets", "^test-link", "2017", 4),
+        ("Assets:US:BofA", "BayBook", "2014", 26),
+        ("Expenses", "BayBook", "2014", 26),
+        ("Assets", "#test BayBook", "2014", 0),
+        ("Assets", "#nomatch", "2014", 0),
+        ("NonExistentAccount", "#test", "2014", 0),
+    ],
+)
+def test_filtered_ledger_account_tag_and_time(
+    example_ledger: FavaLedger,
+    account: str,
+    filter_str: str,
+    time: str,
+    expected_count: int,
+) -> None:
+    filtered = FilteredLedger(
+        example_ledger, account=account, filter=filter_str, time=time
+    )
+    assert len(filtered.entries) == expected_count
+
+
+@pytest.mark.parametrize(
+    ("filter_str", "time", "expected_count"),
+    [
+        ("#test", "2014", 2),
+        ("^test-link", "2014", 3),
+        ("BayBook", "2014", 26),
+        ("payee:BayBook", "2014", 26),
+        ("#test,payee:BayBook", "2014", 28),
+        ("#test payee:BayBook", "2014", 0),
+        ("-#test", "2014", 750),
+    ],
+)
+def test_filtered_ledger_tag_text_and_time(
+    example_ledger: FavaLedger,
+    filter_str: str,
+    time: str,
+    expected_count: int,
+) -> None:
+    filtered = FilteredLedger(
+        example_ledger, filter=filter_str, time=time
+    )
+    assert len(filtered.entries) == expected_count
+
+
+def test_filtered_ledger_date_range(example_ledger: FavaLedger) -> None:
+    filtered = FilteredLedger(example_ledger, time="2017")
+    assert filtered.date_range is not None
+    assert filtered.date_range.begin == datetime.date(2017, 1, 1)
+    assert filtered.date_range.end == datetime.date(2018, 1, 1)
+
+    filtered_no_time = FilteredLedger(example_ledger)
+    assert filtered_no_time.date_range is None
+
+
+def test_filtered_ledger_filter_order(example_ledger: FavaLedger) -> None:
+    filtered_account_first = FilteredLedger(
+        example_ledger, account="Assets", time="2014"
+    )
+    all_after_account = AccountFilter("Assets").apply(
+        example_ledger.all_entries
+    )
+    all_after_both = TimeFilter(
+        example_ledger.options, example_ledger.fava_options, "2014"
+    ).apply(all_after_account)
+    assert len(filtered_account_first.entries) == len(all_after_both)
