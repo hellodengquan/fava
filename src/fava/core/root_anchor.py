@@ -4,16 +4,23 @@ Detects when the ledger's root directory is moved, renamed, deleted,
 or replaced (inode change) so that cached path resolutions are
 invalidated and cannot be used for path-traversal attacks against a
 replaced directory.
+
+The lazy-check interval is configurable via the environment variable
+:envvar:`FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL` (in seconds,
+default ``5``).
 """
 
 from __future__ import annotations
 
 import atexit
 import logging
+import os
 import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from fava.helpers import FavaAPIError
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Callable
@@ -28,6 +35,49 @@ try:  # pragma: no cover - import-time feature detection
     _WATCHFILES_AVAILABLE = True
 except ImportError:  # pragma: no cover
     _WATCHFILES_AVAILABLE = False
+
+
+FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL = "FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL"
+DEFAULT_LAZY_POLL_INTERVAL: float = 5.0
+
+
+class InvalidRootAnchorConfigError(FavaAPIError):
+    """Raised when the root anchor environment configuration is invalid."""
+
+    def __init__(self, value: str, *, reason: str) -> None:
+        super().__init__(
+            f"Invalid value for {FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL}="
+            f"{value!r}: {reason}."
+        )
+
+
+def get_root_anchor_check_interval() -> float:
+    """Read the lazy-poll interval from the environment.
+
+    Returns:
+        The parsed interval in seconds.
+
+    Raises:
+        InvalidRootAnchorConfigError: If the env var is set but has an
+            invalid value (non-numeric, zero, or negative).
+    """
+    raw = os.environ.get(FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL)
+    if raw is None:
+        return DEFAULT_LAZY_POLL_INTERVAL
+
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise InvalidRootAnchorConfigError(
+            raw, reason="not a valid number"
+        ) from None
+
+    if value <= 0:
+        raise InvalidRootAnchorConfigError(
+            raw, reason="must be greater than 0 seconds"
+        )
+
+    return value
 
 
 class RootAnchorChangedError(RuntimeError):
@@ -124,16 +174,19 @@ class RootAnchor:
         self,
         root_path: Path,
         *,
-        check_interval: float = 2.0,
+        check_interval: float | None = None,
         use_watcher: bool = True,
     ) -> None:
+        self._watcher: _RootWatchThread | None = None
+        self._watcher_lock = threading.Lock()
+        self._invalid: bool = False
+
+        if check_interval is None:
+            check_interval = get_root_anchor_check_interval()
         self._check_interval = check_interval
         self._root_path = Path(root_path).resolve()
         self._inode: int = self._stat_inode()
         self._last_check: float = time.monotonic()
-        self._invalid: bool = False
-        self._watcher: _RootWatchThread | None = None
-        self._watcher_lock = threading.Lock()
 
         if use_watcher and _WATCHFILES_AVAILABLE:
             self._start_watcher()
@@ -189,8 +242,16 @@ class RootAnchor:
                 self._watcher = None
 
     def close(self) -> None:
-        """Stop the watcher thread and release resources."""
-        self._stop_watcher()
+        """Stop the watcher thread and release resources.
+
+        Safe to call multiple times and also safe even when
+        ``__init__`` failed partway through (before all attributes
+        were set).
+        """
+        try:
+            self._stop_watcher()
+        except AttributeError:
+            pass
 
     def __del__(self) -> None:
         self.close()

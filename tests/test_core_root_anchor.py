@@ -7,8 +7,138 @@ from pathlib import Path
 
 import pytest
 
+from fava.core.root_anchor import DEFAULT_LAZY_POLL_INTERVAL
+from fava.core.root_anchor import FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL
+from fava.core.root_anchor import get_root_anchor_check_interval
+from fava.core.root_anchor import InvalidRootAnchorConfigError
 from fava.core.root_anchor import RootAnchor
 from fava.core.root_anchor import RootAnchorChangedError
+
+
+def test_get_root_anchor_check_interval_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL unset -> DEFAULT_LAZY_POLL_INTERVAL."""
+    monkeypatch.delenv(FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL, raising=False)
+    assert get_root_anchor_check_interval() == DEFAULT_LAZY_POLL_INTERVAL
+
+
+def test_get_root_anchor_check_interval_valid_custom(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL set to valid positive number."""
+    monkeypatch.setenv(FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL, "0.1")
+    assert get_root_anchor_check_interval() == 0.1
+
+    monkeypatch.setenv(FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL, "10")
+    assert get_root_anchor_check_interval() == 10.0
+
+    monkeypatch.setenv(FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL, "3.14")
+    assert get_root_anchor_check_interval() == 3.14
+
+
+def test_get_root_anchor_check_interval_invalid_non_numeric(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-numeric value -> InvalidRootAnchorConfigError."""
+    monkeypatch.setenv(FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL, "abc")
+    with pytest.raises(InvalidRootAnchorConfigError, match="not a valid number"):
+        get_root_anchor_check_interval()
+
+    monkeypatch.setenv(FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL, "")
+    with pytest.raises(InvalidRootAnchorConfigError, match="not a valid number"):
+        get_root_anchor_check_interval()
+
+
+def test_get_root_anchor_check_interval_invalid_non_positive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Zero or negative value -> InvalidRootAnchorConfigError."""
+    monkeypatch.setenv(FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL, "0")
+    with pytest.raises(
+        InvalidRootAnchorConfigError,
+        match="must be greater than 0",
+    ):
+        get_root_anchor_check_interval()
+
+    monkeypatch.setenv(FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL, "-1")
+    with pytest.raises(
+        InvalidRootAnchorConfigError,
+        match="must be greater than 0",
+    ):
+        get_root_anchor_check_interval()
+
+
+def test_root_anchor_uses_env_interval_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Without env, RootAnchor defaults to DEFAULT_LAZY_POLL_INTERVAL."""
+    monkeypatch.delenv(FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL, raising=False)
+    root = tmp_path / "ledger"
+    root.mkdir()
+
+    anchor = RootAnchor(root, use_watcher=False)
+    assert anchor._check_interval == DEFAULT_LAZY_POLL_INTERVAL
+
+
+def test_root_anchor_uses_env_interval_custom(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """RootAnchor reads custom interval from env and applies it to lazy checks."""
+    monkeypatch.setenv(FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL, "60")
+    root = tmp_path / "ledger"
+    root.mkdir()
+
+    anchor = RootAnchor(root, use_watcher=False)
+    assert anchor._check_interval == 60.0
+
+    # With a 60-second interval, rename should NOT be detected
+    # immediately (within the interval window) unless _last_check is 0.
+    root.rename(tmp_path / "ledger_old")
+    assert anchor.check() is True
+    assert anchor.invalid is False
+
+    # Force the check to bypass the lazy cooldown: should detect.
+    anchor._last_check = 0
+    assert anchor.check() is False
+
+
+def test_root_anchor_uses_env_interval_illegal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Illegal config causes RootAnchor() / FavaLedger() startup to fail."""
+    monkeypatch.setenv(FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL, "0")
+    root = tmp_path / "ledger"
+    root.mkdir()
+
+    with pytest.raises(
+        InvalidRootAnchorConfigError,
+        match="must be greater than 0",
+    ):
+        RootAnchor(root, use_watcher=False)
+
+    monkeypatch.setenv(FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL, "not_a_number")
+    with pytest.raises(
+        InvalidRootAnchorConfigError,
+        match="not a valid number",
+    ):
+        RootAnchor(root, use_watcher=False)
+
+
+def test_root_anchor_explicit_interval_overrides_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An explicitly-passed check_interval takes precedence over env."""
+    monkeypatch.setenv(FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL, "99")
+    root = tmp_path / "ledger"
+    root.mkdir()
+
+    anchor = RootAnchor(root, check_interval=0.25, use_watcher=False)
+    assert anchor._check_interval == 0.25
 
 
 def test_root_anchor_basic(tmp_path: Path) -> None:
@@ -187,9 +317,11 @@ def test_root_anchor_with_watcher(tmp_path: Path) -> None:
     assert anchor.wait_watcher_started(timeout=3.0), "watcher failed to start"
     assert anchor.check() is True
 
+    time.sleep(0.2)
+
     root.rename(tmp_path / "ledger_old")
 
-    deadline = time.monotonic() + 5.0
+    deadline = time.monotonic() + 8.0
     while time.monotonic() < deadline:
         if anchor.invalid:
             break

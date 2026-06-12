@@ -319,6 +319,7 @@ class FavaLedger:
         "options",
         "prices",
         "query_shell",
+        "root_anchor",
         "watcher",
     )
 
@@ -375,6 +376,9 @@ class FavaLedger:
 
     #: A :class:`.QueryShell` instance.
     query_shell: QueryShell
+
+    #: A :class:`.RootAnchor` instance.
+    root_anchor: RootAnchor
 
     def __init__(self, path: str, *, poll_watcher: bool = False) -> None:
         """Create an interface for a Beancount ledger.
