@@ -183,3 +183,34 @@ export const options_validator = object({
   fava_options: record(string),
   beancount_options: record(string),
 });
+
+export const suspicious_transaction_validator = object({
+  entry_hash: string,
+  date: string,
+  payee: string,
+  narration: string,
+  accounts: array(string),
+  suspicious_reason: optional(string),
+});
+
+export const suspicious_by_account_validator = object({
+  account: string,
+  count: number,
+  transactions: array(suspicious_transaction_validator),
+});
+
+export const suspicious_by_time_validator = object({
+  period: string,
+  begin: string,
+  end: string,
+  count: number,
+  by_account: array(suspicious_by_account_validator),
+});
+
+export type SuspiciousTransaction = ValidationT<
+  typeof suspicious_transaction_validator
+>;
+export type SuspiciousByAccount = ValidationT<
+  typeof suspicious_by_account_validator
+>;
+export type SuspiciousByTime = ValidationT<typeof suspicious_by_time_validator>;

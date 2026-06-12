@@ -27,6 +27,8 @@ import {
   source_validator,
   type SourceFile,
   statistics_validator,
+  suspicious_by_account_validator,
+  suspicious_by_time_validator,
   tree_report_validator,
 } from "./validators.ts";
 
@@ -42,7 +44,7 @@ class InvalidResponseDataError extends Error {
 //
 // For each HTTP endpoint, a function with types for the parameters and
 // a validator for the response should be added to this module.
-type DeleteEndpoint = "document" | "source_slice";
+type DeleteEndpoint = "document" | "source_slice" | "suspicious_mark";
 type GetEndpoint =
   | "balance_sheet"
   | "account_report"
@@ -65,7 +67,9 @@ type GetEndpoint =
   | "narrations"
   | "query"
   | "source"
-  | "statistics";
+  | "statistics"
+  | "suspicious_by_account"
+  | "suspicious_by_time";
 type PutEndpoint =
   | "add_document"
   | "add_entries"
@@ -74,6 +78,7 @@ type PutEndpoint =
   | "move"
   | "source"
   | "source_slice"
+  | "suspicious_mark"
   | "upload_import_file";
 
 type ApiEndpoint = DeleteEndpoint | GetEndpoint | PutEndpoint;
@@ -93,6 +98,7 @@ type ApiParams = Partial<{
   payee: string;
   query_string: string;
   r: string;
+  reason: string;
   sha256sum: string;
   time: string;
 }>;
@@ -400,5 +406,71 @@ export async function save_entries(
   } catch (error) {
     notify_err(error, (e) => `Saving failed: ${e.message}`);
     throw error;
+  }
+}
+
+// Suspicious transaction endpoints
+
+export const get_suspicious_by_account = define_endpoint(
+  "suspicious_by_account",
+  array(suspicious_by_account_validator),
+  [...filters],
+);
+
+export const get_suspicious_by_time = define_endpoint(
+  "suspicious_by_time",
+  array(suspicious_by_time_validator),
+  [...filters, "interval"],
+);
+
+const put_suspicious_mark_raw: Put<{
+  entry_hash: string;
+  reason: string;
+}> = define_put_json("suspicious_mark");
+
+const delete_suspicious_mark_raw = define_endpoint(
+  "suspicious_mark",
+  string,
+  ["entry_hash"],
+  "DELETE",
+);
+
+/**
+ * Mark a transaction as suspicious.
+ * @param entry_hash - the hash of the entry to mark.
+ * @param reason - the reason for marking as suspicious.
+ * @returns whether the operation was successful.
+ */
+export async function mark_suspicious(
+  entry_hash: string,
+  reason: string = "suspicious",
+): Promise<boolean> {
+  try {
+    const msg = await put_suspicious_mark_raw({ entry_hash, reason });
+    notify(msg);
+    router.reload();
+    return true;
+  } catch (error) {
+    notify_err(error);
+    return false;
+  }
+}
+
+/**
+ * Remove suspicious mark from a transaction.
+ * @param entry_hash - the hash of the entry to unmark.
+ * @returns whether the operation was successful.
+ */
+export async function unmark_suspicious(
+  entry_hash: string,
+): Promise<boolean> {
+  try {
+    const msg = await delete_suspicious_mark_raw({ entry_hash });
+    notify(msg);
+    router.reload();
+    return true;
+  } catch (error) {
+    notify_err(error);
+    return false;
   }
 }

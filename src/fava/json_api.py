@@ -887,3 +887,126 @@ def get_statistics() -> Statistics:
         balances=balances,
         entries_by_type=entries_by_type,
     )
+
+
+########################################################################
+# Suspicious transactions
+
+
+@api_endpoint
+def put_suspicious_mark(entry_hash: str, reason: str) -> str:
+    """Mark an entry as suspicious."""
+    g.ledger.suspicious.mark_suspicious(entry_hash, reason)
+    return "Marked as suspicious."
+
+
+@api_endpoint
+def delete_suspicious_mark(entry_hash: str) -> str:
+    """Remove suspicious mark from an entry."""
+    result = g.ledger.suspicious.unmark_suspicious(entry_hash)
+    if not result:
+        raise NotFoundError
+    return "Suspicious mark removed."
+
+
+@dataclass(frozen=True)
+class SuspiciousTransactionData:
+    """A suspicious transaction data."""
+
+    entry_hash: str
+    date: str
+    payee: str
+    narration: str
+    accounts: list[str]
+    suspicious_reason: str | None
+
+
+@dataclass(frozen=True)
+class SuspiciousByAccountData:
+    """Suspicious transactions aggregated by account."""
+
+    account: str
+    count: int
+    transactions: list[SuspiciousTransactionData]
+
+
+@api_endpoint
+def get_suspicious_by_account() -> list[SuspiciousByAccountData]:
+    """Get suspicious transactions aggregated by account."""
+    g.ledger.changed()
+    result = []
+    for item in g.ledger.suspicious.by_account(g.filtered.entries):
+        transactions = [
+            SuspiciousTransactionData(
+                entry_hash=t.entry_hash,
+                date=str(t.date),
+                payee=t.payee,
+                narration=t.narration,
+                accounts=t.accounts,
+                suspicious_reason=t.suspicious_reason,
+            )
+            for t in item.transactions
+        ]
+        result.append(
+            SuspiciousByAccountData(
+                account=item.account,
+                count=item.count,
+                transactions=transactions,
+            )
+        )
+    return result
+
+
+@dataclass(frozen=True)
+class SuspiciousByTimeData:
+    """Suspicious transactions aggregated by time period."""
+
+    period: str
+    begin: str
+    end: str
+    count: int
+    by_account: list[SuspiciousByAccountData]
+
+
+@api_endpoint
+def get_suspicious_by_time(interval: str) -> list[SuspiciousByTimeData]:
+    """Get suspicious transactions aggregated by time period.
+
+    Args:
+        interval: Time interval (day, week, month, quarter, year).
+    """
+    from fava.util.date import INTERVALS
+    from fava.util.date import Month
+
+    g.ledger.changed()
+    interval_obj = INTERVALS.get(interval.lower(), Month)
+    result = []
+    for item in g.ledger.suspicious.by_time(interval_obj, g.filtered.entries):
+        by_account = [
+            SuspiciousByAccountData(
+                account=a.account,
+                count=a.count,
+                transactions=[
+                    SuspiciousTransactionData(
+                        entry_hash=t.entry_hash,
+                        date=str(t.date),
+                        payee=t.payee,
+                        narration=t.narration,
+                        accounts=t.accounts,
+                        suspicious_reason=t.suspicious_reason,
+                    )
+                    for t in a.transactions
+                ],
+            )
+            for a in item.by_account
+        ]
+        result.append(
+            SuspiciousByTimeData(
+                period=item.period,
+                begin=str(item.date_range.begin),
+                end=str(item.date_range.end),
+                count=item.count,
+                by_account=by_account,
+            )
+        )
+    return result

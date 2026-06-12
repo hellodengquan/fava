@@ -50,7 +50,8 @@
     {% set type = entry.__class__.__name__.lower() %}
     {% set metadata_items = entry.meta|meta_items %}
     {% set entry_hash = entry|hash_entry -%}
-    <li class='{{ type }} {{ entry.type or '' }} {{ entry.flag|flag_to_type if entry.flag else '' }}{{ ' linked' if entry.tags and 'linked' in entry.tags else '' }}{{ ' discovered' if entry.tags and 'discovered' in entry.tags else '' }}'>
+    {% set is_suspicious = 'suspicious' in entry.meta -%}
+    <li class='{{ type }} {{ entry.type or '' }} {{ entry.flag|flag_to_type if entry.flag else '' }}{{ ' linked' if entry.tags and 'linked' in entry.tags else '' }}{{ ' discovered' if entry.tags and 'discovered' in entry.tags else '' }}{{ ' suspicious' if is_suspicious else '' }}'>
         <p>
         <span class='datecell' data-sort-value='{{ index }}'><a href='#context-{{ entry_hash }}'>{{ entry.date }}</a></span>
         <span class='flag'>{% if type == 'transaction' %}{{ entry.flag }}{% else %}{{ short_type.get(type, type[:3]) }}{% endif %}</span>
@@ -88,6 +89,11 @@
         {% endif %}
         </span>
         <span class='indicators'>
+          <span class='suspicious-toggle {{ "active" if is_suspicious }}'
+                title='{{ _("Mark as suspicious") if not is_suspicious else _("Remove suspicious mark") }}: {{ entry.meta.suspicious if is_suspicious else "" }}'
+                data-entry-hash='{{ entry_hash }}'>
+            {{- "⚠" if is_suspicious else "⚐" -}}
+          </span>
           {{- _render_metadata_indicators(metadata_items) -}}
           {%- for posting in entry.postings -%}
           <span{% if posting.flag %} class='{{ posting.flag|flag_to_type }}'{% endif %}></span>

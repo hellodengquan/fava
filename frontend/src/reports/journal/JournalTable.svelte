@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
 
+  import { mark_suspicious, unmark_suspicious } from "../../api/index.ts";
   import { _ } from "../../i18n.ts";
   import { get_el } from "../../lib/dom.ts";
   import { shallow_equal } from "../../lib/equals.ts";
@@ -71,6 +72,41 @@
       }
     }
   }
+
+  async function handle_suspicious_click(event: Event): Promise<void> {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+
+    const indicator = target.closest(".suspicious-toggle");
+    if (!indicator) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const entry_hash = indicator.getAttribute("data-entry-hash");
+    if (!entry_hash) return;
+
+    const li = indicator.closest("li");
+    const is_suspicious = li?.classList.contains("suspicious");
+
+    if (is_suspicious) {
+      await unmark_suspicious(entry_hash);
+    } else {
+      const reason = prompt(_("Reason for marking as suspicious:"), "suspicious");
+      if (reason !== null) {
+        await mark_suspicious(entry_hash, reason || "suspicious");
+      }
+    }
+  }
+
+  function handle_click(event: Event): void {
+    const target = event.target;
+    if (target instanceof HTMLElement && target.closest(".suspicious-toggle")) {
+      void handle_suspicious_click(event);
+      return;
+    }
+    handle_journal_click(event);
+  }
 </script>
 
 <JournalFilters />
@@ -93,7 +129,7 @@
 <ol
   class={["flex-table", "journal", ...$journal_show.map((s) => `show-${s}`)]}
   bind:this={ol}
-  onclick={handle_journal_click}
+  onclick={handle_click}
   {ondragenter}
   {@attach (node: HTMLOListElement) => {
     void journal;

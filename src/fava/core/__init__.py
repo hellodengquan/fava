@@ -45,6 +45,7 @@ from fava.core.inventory import CounterInventory
 from fava.core.misc import FavaMisc
 from fava.core.number import DecimalFormatModule
 from fava.core.query_shell import QueryShell
+from fava.core.suspicious import SuspiciousModule
 from fava.core.tree import Tree
 from fava.core.watcher import Watcher
 from fava.core.watcher import WatchfilesWatcher
@@ -318,6 +319,7 @@ class FavaLedger:
         "options",
         "prices",
         "query_shell",
+        "suspicious",
         "watcher",
     )
 
@@ -375,6 +377,9 @@ class FavaLedger:
     #: A :class:`.QueryShell` instance.
     query_shell: QueryShell
 
+    #: A :class:`.SuspiciousModule` instance.
+    suspicious: SuspiciousModule
+
     def __init__(self, path: str, *, poll_watcher: bool = False) -> None:
         """Create an interface for a Beancount ledger.
 
@@ -399,6 +404,7 @@ class FavaLedger:
         self.ingest = IngestModule(self)
         self.misc = FavaMisc(self)
         self.query_shell = QueryShell(self)
+        self.suspicious = SuspiciousModule(self)
 
         self.watcher = WatchfilesWatcher() if not poll_watcher else Watcher()
 
@@ -437,6 +443,7 @@ class FavaLedger:
         self.misc.load_file()
         self.query_shell.load_file()
         self.ingest.load_file()
+        self.suspicious.load_file()
 
         self.extensions.after_load_file()
 
