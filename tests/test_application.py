@@ -347,3 +347,90 @@ def test_load_extension_endpoint(test_client: FlaskClient) -> None:
     response = test_client.get(url)
     assert assert_success(response)
     assert response.json == ["some data"]
+
+
+def test_metrics_endpoint_available(test_client: FlaskClient) -> None:
+    """/metrics returns 200, text/plain content type, and includes root_anchor metrics."""
+    pytest.importorskip("prometheus_client")
+    from fava.core import root_anchor as ra_mod
+
+    if not ra_mod._PROMETHEUS_AVAILABLE:
+        pytest.skip("prometheus_client not available")
+
+    # Make sure at least one root_anchor counter is incremented so we
+    # have something meaningful to scrape.
+    ra_mod._metric_counter_inc(ra_mod._ROOT_ANCHOR_LAZY_FALLBACK)
+
+    response = test_client.get("/metrics")
+    assert response.status_code == HTTPStatus.OK.value
+
+    # Prometheus exposition format is text/plain (with version suffix).
+    content_type = response.headers.get("Content-Type", "")
+    assert content_type.startswith("text/plain")
+
+    body = response.get_data(as_text=True)
+    assert "fava_root_anchor_watchdog_start_failures_total" in body
+    assert "fava_root_anchor_lazy_fallback_total" in body
+    assert "fava_root_anchor_lazy_detection_total" in body
+    assert "fava_root_anchor_detection_latency_seconds" in body
+
+
+def test_metrics_endpoint_missing_prometheus_client(
+    test_client: FlaskClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """/metrics returns 404 (no exception) when prometheus_client is missing."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _blocking_import(name, *args, **kwargs):  # noqa: ANN001
+        if name == "prometheus_client" or name.startswith("prometheus_client."):
+            raise ImportError("simulated missing prometheus_client")
+        return real_import(name, *args, **kwargs)
+
+    # Monkeypatch the view function's inline `from prometheus_client ...`
+    # by patching builtins.__import__.  We must also make sure the module
+    # isn't already cached in the view's frame, so we reload the
+    # application module inside a context where the import is blocked.
+    from fava import application as app_mod
+
+    # Save and mask the module-level caches.
+    saved_generate = getattr(app_mod, "__metrics_generate_latest", None)
+    saved_content = getattr(app_mod, "__metrics_content_type", None)
+    saved_available = getattr(app_mod, "__metrics_prom_available", None)
+
+    try:
+        # Remove the `prometheus_client` symbols from the prometheus_client
+        # sub-modules so that the view's local import re-runs.
+        monkeypatch.setattr(builtins, "__import__", _blocking_import)
+        # Clear any previously-imported prometheus_client module.
+        import sys
+
+        saved_modules: dict[str, object] = {}
+        for key in list(sys.modules.keys()):
+            if key == "prometheus_client" or key.startswith("prometheus_client."):
+                saved_modules[key] = sys.modules.pop(key)
+
+        # Make a fresh call that will fail the local import.
+        # Because the view function uses a try/except ImportError block
+        # *inside the handler*, a fresh call should take the except branch.
+        response = test_client.get("/metrics")
+        assert response.status_code == HTTPStatus.NOT_FOUND.value
+
+        # Verify a warning was logged.
+        assert any(
+            "prometheus_client" in rec.message
+            and "/metrics" in rec.message
+            for rec in caplog.records
+        )
+    finally:
+        monkeypatch.undo()
+        sys.modules.update(saved_modules)
+        if saved_generate is not None:
+            app_mod.__metrics_generate_latest = saved_generate  # type: ignore[attr-defined]
+        if saved_content is not None:
+            app_mod.__metrics_content_type = saved_content  # type: ignore[attr-defined]
+        if saved_available is not None:
+            app_mod.__metrics_prom_available = saved_available  # type: ignore[attr-defined]

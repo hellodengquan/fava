@@ -460,6 +460,34 @@ def _setup_routes(fava_app: Flask) -> None:  # noqa: PLR0915
         redirect_url = url._replace(query=urlencode(query_args))
         return redirect(urlunparse(redirect_url))
 
+    @fava_app.route("/metrics")
+    def metrics() -> Response:
+        """Expose Prometheus metrics.
+
+        Returns all metrics registered in the default prometheus_client
+        registry as ``text/plain`` (Prometheus exposition format).
+
+        If the optional ``prometheus_client`` dependency is not installed,
+        returns ``404 Not Found`` and logs a warning.
+        """
+        try:
+            from prometheus_client import CONTENT_TYPE_LATEST
+            from prometheus_client import generate_latest
+
+            output = generate_latest()
+            resp = current_app.response_class(
+                output,
+                mimetype=CONTENT_TYPE_LATEST,
+            )
+            return resp
+        except ImportError:
+            log.warning(
+                "Prometheus metrics requested but prometheus_client is "
+                "not installed. Install prometheus_client to enable the "
+                "/metrics endpoint."
+            )
+            return abort(404)
+
 
 def _setup_babel(fava_app: Flask) -> None:
     """Configure the Babel Flask extension."""
