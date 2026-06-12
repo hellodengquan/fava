@@ -8,12 +8,22 @@ used in Fava's charts:
 
 The service aims to eliminate code duplication across chart methods and
 provide a flexible, composable interface for generating chart data.
+
+Enhancements:
+- Parallel account processing using ThreadPoolExecutor
+- TTL-based memory caching for account aggregation results
+- Performance statistics and cache hit rate tracking
 """
 
 from __future__ import annotations
 
+import hashlib
+import threading
+import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from dataclasses import field
 from datetime import date
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -56,6 +66,10 @@ class AggregationParameters:
         accumulate: Whether to accumulate balances across intervals.
         with_account_balances: Whether to include per-account breakdowns.
         with_children: Whether to include child accounts.
+        parallel: Whether to use parallel processing for account grouping.
+        max_workers: Maximum number of worker threads for parallel processing.
+        use_cache: Whether to use caching for aggregation results.
+        cache_ttl: Cache TTL in seconds (default: 300 seconds).
     """
 
     interval: Interval | None = None
@@ -65,6 +79,10 @@ class AggregationParameters:
     accumulate: bool = False
     with_account_balances: bool = False
     with_children: bool = True
+    parallel: bool = False
+    max_workers: int = 4
+    use_cache: bool = False
+    cache_ttl: int = 300
 
 
 @dataclass(frozen=True)
@@ -103,12 +121,260 @@ class AccountTreeNode:
     has_txns: bool
 
 
+@dataclass(frozen=True)
+class CacheStats:
+    """Cache performance statistics.
+
+    Attributes:
+        hits: Number of cache hits.
+        misses: Number of cache misses.
+        total_requests: Total number of cache requests.
+        hit_rate: Cache hit rate (0.0 to 1.0).
+    """
+
+    hits: int = 0
+    misses: int = 0
+
+    @property
+    def total_requests(self) -> int:
+        """Total number of cache requests."""
+        return self.hits + self.misses
+
+    @property
+    def hit_rate(self) -> float:
+        """Cache hit rate as a float between 0 and 1."""
+        total = self.total_requests
+        return self.hits / total if total > 0 else 0.0
+
+    def record_hit(self) -> None:
+        """Record a cache hit."""
+        object.__setattr__(self, "hits", self.hits + 1)
+
+    def record_miss(self) -> None:
+        """Record a cache miss."""
+        object.__setattr__(self, "misses", self.misses + 1)
+
+    def reset(self) -> None:
+        """Reset all statistics."""
+        object.__setattr__(self, "hits", 0)
+        object.__setattr__(self, "misses", 0)
+
+
+@dataclass
+class _CacheEntry:
+    """Internal cache entry with TTL."""
+
+    value: Any
+    expiry: float
+
+
+@dataclass
+class AccountProcessingTask:
+    """A task for processing a single account's entries.
+
+    Attributes:
+        account_name: Name of the account to process.
+        entries: The entries (postings) for this account.
+        date_range: The date range for aggregation.
+    """
+
+    account_name: str
+    entries: list[Directive]
+    date_range: DateRange
+
+
+def _process_account_task(
+    task: AccountProcessingTask,
+) -> tuple[str, CounterInventory]:
+    """Process a single account's entries to compute its inventory.
+
+    This function is designed to be run in parallel by ThreadPoolExecutor.
+
+    Args:
+        task: The account processing task containing entries and date range.
+
+    Returns:
+        Tuple of (account_name, inventory) for the account.
+    """
+    inventory = CounterInventory()
+    for entry in task.entries:
+        for posting in getattr(entry, "postings", []):
+            if posting.account == task.account_name:
+                inventory.add_position(posting)
+    return task.account_name, inventory
+
+
+def _convert_account_inventory(
+    account_data: tuple[str, CounterInventory],
+    conv: Conversion,
+    prices: FavaPriceMap,
+    conversion_date: date,
+) -> tuple[str, SimpleCounterInventory]:
+    """Apply currency conversion to a single account's inventory.
+
+    This function is designed to be run in parallel by ThreadPoolExecutor.
+
+    Args:
+        account_data: Tuple of (account_name, inventory).
+        conv: The conversion to apply.
+        prices: The price map for conversions.
+        conversion_date: The date for price lookups.
+
+    Returns:
+        Tuple of (account_name, converted_inventory).
+    """
+    account_name, inventory = account_data
+    converted = conv.apply(inventory, prices, conversion_date)
+    return account_name, converted
+
+
+class TTLCache:
+    """A simple thread-safe TTL-based memory cache.
+
+    Args:
+        ttl: Default time-to-live in seconds for cache entries.
+    """
+
+    def __init__(self, ttl: int = 300) -> None:
+        self._ttl = ttl
+        self._cache: dict[str, _CacheEntry] = {}
+        self._lock = threading.Lock()
+        self._stats = CacheStats()
+
+    def _make_key(self, *args: Any, **kwargs: Any) -> str:
+        """Create a cache key from arguments.
+
+        Creates a deterministic hash key from the provided arguments.
+        """
+        key_parts = []
+        for arg in args:
+            key_parts.append(str(arg))
+        for k, v in sorted(kwargs.items()):
+            key_parts.append(f"{k}={v}")
+        key_str = "|".join(key_parts)
+        return hashlib.md5(key_str.encode()).hexdigest()
+
+    def get(self, *args: Any, **kwargs: Any) -> Any | None:
+        """Get a value from the cache.
+
+        Args:
+            *args: Positional arguments for key generation.
+            **kwargs: Keyword arguments for key generation.
+
+        Returns:
+            The cached value if found and not expired, None otherwise.
+        """
+        key = self._make_key(*args, **kwargs)
+        with self._lock:
+            entry = self._cache.get(key)
+            if entry is not None:
+                if time.time() < entry.expiry:
+                    self._stats.record_hit()
+                    return entry.value
+                del self._cache[key]
+            self._stats.record_miss()
+            return None
+
+    def set(
+        self,
+        value: Any,
+        *args: Any,
+        ttl: int | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Set a value in the cache.
+
+        Args:
+            value: The value to cache.
+            *args: Positional arguments for key generation.
+            ttl: Optional TTL for this entry (overrides default).
+            **kwargs: Keyword arguments for key generation.
+        """
+        key = self._make_key(*args, **kwargs)
+        expiry = time.time() + (ttl if ttl is not None else self._ttl)
+        with self._lock:
+            self._cache[key] = _CacheEntry(value=value, expiry=expiry)
+
+    def clear_expired(self) -> int:
+        """Clear all expired entries from the cache.
+
+        Returns:
+            Number of entries removed.
+        """
+        now = time.time()
+        removed = 0
+        with self._lock:
+            expired_keys = [
+                k for k, v in self._cache.items() if now >= v.expiry
+            ]
+            for k in expired_keys:
+                del self._cache[k]
+                removed += 1
+        return removed
+
+    def clear(self) -> None:
+        """Clear all entries from the cache."""
+        with self._lock:
+            self._cache.clear()
+
+    @property
+    def stats(self) -> CacheStats:
+        """Get cache statistics."""
+        return self._stats
+
+    def reset_stats(self) -> None:
+        """Reset cache statistics."""
+        self._stats.reset()
+
+    @property
+    def size(self) -> int:
+        """Current number of entries in the cache."""
+        with self._lock:
+            return len(self._cache)
+
+
+@dataclass
+class ParallelExecutionConfig:
+    """Configuration for parallel execution.
+
+    Attributes:
+        enabled: Whether parallel execution is enabled.
+        max_workers: Maximum number of worker threads.
+        chunk_size: Number of accounts per task chunk.
+    """
+
+    enabled: bool = False
+    max_workers: int = 4
+    chunk_size: int = 10
+
+
+@dataclass
+class PerformanceMetrics:
+    """Performance metrics for chart data operations.
+
+    Attributes:
+        serial_time_ms: Time taken for serial execution (ms).
+        parallel_time_ms: Time taken for parallel execution (ms).
+        speedup: Speedup factor (serial_time / parallel_time).
+        account_count: Number of accounts processed.
+        entry_count: Number of entries processed.
+    """
+
+    serial_time_ms: float = 0.0
+    parallel_time_ms: float = 0.0
+    speedup: float = 1.0
+    account_count: int = 0
+    entry_count: int = 0
+
+
 class ChartDataService:
     """Unified service for generating chart data.
 
     This service combines account grouping, time aggregation, and currency
     conversion into a single, composable interface. It can be used as a
     standalone utility or integrated with Fava's module system.
+
+    Enhanced with parallel processing and caching capabilities.
     """
 
     def __init__(
@@ -128,6 +394,7 @@ class ChartDataService:
         self._ledger = ledger
         self._prices = prices
         self._options = options
+        self._cache = TTLCache()
 
     @property
     def prices(self) -> FavaPriceMap:
@@ -147,11 +414,27 @@ class ChartDataService:
             return self._ledger.ledger.options
         raise ValueError("No options available")
 
+    @property
+    def cache(self) -> TTLCache:
+        """Get the TTL cache instance."""
+        return self._cache
+
+    def reset_cache(self) -> None:
+        """Reset the cache and clear all statistics."""
+        self._cache.clear()
+        self._cache.reset_stats()
+
     def _get_conversion(
         self, conversion: str | Conversion
     ) -> Conversion:
         """Get a Conversion object from string or Conversion."""
         return conversion_from_str(conversion)
+
+    def _get_conversion_str(self, conversion: str | Conversion) -> str:
+        """Get a string representation of the conversion for cache keys."""
+        if isinstance(conversion, str):
+            return conversion
+        return conversion.__class__.__name__
 
     def _apply_inversion(
         self,
@@ -208,14 +491,38 @@ class ChartDataService:
         ]
         return lambda account: any(t(account) for t in testers)
 
-    def _collect_inventory(
+    def _group_entries_by_account(
+        self,
+        entries: Iterable[Directive],
+        account_filter: Callable[[str], bool],
+    ) -> dict[str, list[Directive]]:
+        """Group entries by account name.
+
+        This is a pre-processing step that groups all entries by their
+        account names, enabling parallel processing per account.
+
+        Args:
+            entries: The entries to group.
+            account_filter: Function to filter accounts.
+
+        Returns:
+            Dictionary mapping account names to lists of entries.
+        """
+        grouped: dict[str, list[Directive]] = defaultdict(list)
+        for entry in entries:
+            for posting in getattr(entry, "postings", []):
+                if account_filter(posting.account):
+                    grouped[posting.account].append(entry)
+        return dict(grouped)
+
+    def _collect_inventory_serial(
         self,
         entries: Iterable[Directive],
         account_filter: Callable[[str], bool],
         *,
         with_account_balances: bool = False,
     ) -> tuple[CounterInventory, dict[str, CounterInventory]]:
-        """Collect inventory from entries, optionally per account.
+        """Collect inventory from entries serially, optionally per account.
 
         Args:
             entries: The entries to process.
@@ -241,6 +548,144 @@ class ChartDataService:
 
         return total_inventory, account_inventories
 
+    def _collect_inventory_parallel(
+        self,
+        entries: Iterable[Directive],
+        account_filter: Callable[[str], bool],
+        date_range: DateRange,
+        *,
+        max_workers: int = 4,
+    ) -> tuple[CounterInventory, dict[str, CounterInventory]]:
+        """Collect inventory from entries using parallel processing.
+
+        Groups entries by account first, then processes each account's
+        entries in parallel using ThreadPoolExecutor.
+
+        Args:
+            entries: The entries to process.
+            account_filter: Function to filter accounts.
+            date_range: The date range for these entries.
+            max_workers: Maximum number of worker threads.
+
+        Returns:
+            Tuple of (total_inventory, per_account_inventories).
+        """
+        grouped_entries = self._group_entries_by_account(entries, account_filter)
+
+        if not grouped_entries:
+            return CounterInventory(), {}
+
+        tasks = [
+            AccountProcessingTask(
+                account_name=account_name,
+                entries=entries_list,
+                date_range=date_range,
+            )
+            for account_name, entries_list in grouped_entries.items()
+        ]
+
+        account_inventories: dict[str, CounterInventory] = {}
+        total_inventory = CounterInventory()
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = executor.map(_process_account_task, tasks)
+            for account_name, inventory in results:
+                account_inventories[account_name] = inventory
+                total_inventory.add_inventory(inventory)
+
+        return total_inventory, account_inventories
+
+    def _convert_accounts_parallel(
+        self,
+        account_inventories: dict[str, CounterInventory],
+        conv: Conversion,
+        prices: FavaPriceMap,
+        conversion_date: date,
+        *,
+        max_workers: int = 4,
+    ) -> dict[str, SimpleCounterInventory]:
+        """Apply currency conversion to multiple accounts in parallel.
+
+        Args:
+            account_inventories: Dictionary mapping account names to inventories.
+            conv: The conversion to apply.
+            prices: The price map for conversions.
+            conversion_date: The date for price lookups.
+            max_workers: Maximum number of worker threads.
+
+        Returns:
+            Dictionary mapping account names to converted inventories.
+        """
+        if not account_inventories:
+            return {}
+
+        account_data = list(account_inventories.items())
+        converted: dict[str, SimpleCounterInventory] = {}
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = executor.map(
+                lambda item: _convert_account_inventory(
+                    item, conv, prices, conversion_date
+                ),
+                account_data,
+            )
+            for account_name, balance in results:
+                converted[account_name] = balance
+
+        return converted
+
+    def _get_cached_aggregation(
+        self,
+        account_name: str,
+        date_range: DateRange,
+        conversion_str: str,
+    ) -> tuple[CounterInventory, CounterInventory] | None:
+        """Try to get cached aggregation results for an account.
+
+        Args:
+            account_name: The account name.
+            date_range: The date range.
+            conversion_str: String representation of the conversion.
+
+        Returns:
+            Cached (total_inventory, account_inventory) if available, None otherwise.
+        """
+        return self._cache.get(
+            "aggregation",
+            account=account_name,
+            begin=date_range.begin.isoformat(),
+            end=date_range.end.isoformat(),
+            conversion=conversion_str,
+        )
+
+    def _set_cached_aggregation(
+        self,
+        account_name: str,
+        date_range: DateRange,
+        conversion_str: str,
+        value: tuple[CounterInventory, CounterInventory],
+        *,
+        ttl: int = 300,
+    ) -> None:
+        """Cache aggregation results for an account.
+
+        Args:
+            account_name: The account name.
+            date_range: The date range.
+            conversion_str: String representation of the conversion.
+            value: The (total_inventory, account_inventory) to cache.
+            ttl: Cache TTL in seconds.
+        """
+        self._cache.set(
+            value,
+            "aggregation",
+            account=account_name,
+            begin=date_range.begin.isoformat(),
+            end=date_range.end.isoformat(),
+            conversion=conversion_str,
+            ttl=ttl,
+        )
+
     @listify
     def aggregate_by_time(
         self,
@@ -251,7 +696,8 @@ class ChartDataService:
         """Aggregate entries by time intervals with currency conversion.
 
         This is the core method that combines time aggregation,
-        account filtering, and currency conversion.
+        account filtering, and currency conversion. Supports both
+        serial and parallel execution modes.
 
         Args:
             entries: The entries to aggregate.
@@ -263,6 +709,7 @@ class ChartDataService:
         """
         conv = self._get_conversion(params.conversion)
         prices = self.prices
+        conversion_str = self._get_conversion_str(params.conversion)
         account_filter = self._filter_entries_by_account(
             entries, params.accounts, params.with_children
         )
@@ -288,11 +735,22 @@ class ChartDataService:
                             running_balance.add_position(posting)
                 interval_total = running_balance
                 interval_accounts = running_account_balances
+            elif params.parallel and params.with_account_balances:
+                interval_total, interval_accounts = (
+                    self._collect_inventory_parallel(
+                        sliced_entries,
+                        account_filter,
+                        date_range,
+                        max_workers=params.max_workers,
+                    )
+                )
             else:
-                interval_total, interval_accounts = self._collect_inventory(
-                    sliced_entries,
-                    account_filter,
-                    with_account_balances=params.with_account_balances,
+                interval_total, interval_accounts = (
+                    self._collect_inventory_serial(
+                        sliced_entries,
+                        account_filter,
+                        with_account_balances=params.with_account_balances,
+                    )
                 )
 
             balance = conv.apply(
@@ -301,12 +759,21 @@ class ChartDataService:
 
             account_balances = None
             if params.with_account_balances:
-                account_balances = {
-                    account: conv.apply(
-                        acct_value, prices, date_range.end_inclusive
+                if params.parallel:
+                    account_balances = self._convert_accounts_parallel(
+                        interval_accounts,
+                        conv,
+                        prices,
+                        date_range.end_inclusive,
+                        max_workers=params.max_workers,
                     )
-                    for account, acct_value in interval_accounts.items()
-                }
+                else:
+                    account_balances = {
+                        account: conv.apply(
+                            acct_value, prices, date_range.end_inclusive
+                        )
+                        for account, acct_value in interval_accounts.items()
+                    }
 
             budgets = None
             if (
@@ -420,6 +887,10 @@ class ChartDataService:
                 accumulate=True,
                 with_account_balances=params.with_account_balances,
                 invert=params.invert,
+                parallel=params.parallel,
+                max_workers=params.max_workers,
+                use_cache=params.use_cache,
+                cache_ttl=params.cache_ttl,
             ),
         )
 
@@ -497,3 +968,65 @@ class ChartDataService:
                 account_balances=point.account_balances,
                 budgets=point.budgets,
             )
+
+    def compare_parallel_serial(
+        self,
+        entries: Iterable[Directive],
+        intervals: Iterable[DateRange],
+        params: AggregationParameters,
+    ) -> PerformanceMetrics:
+        """Compare parallel and serial execution performance.
+
+        Runs the same aggregation both serially and in parallel,
+        returning performance metrics.
+
+        Args:
+            entries: The entries to aggregate.
+            intervals: The date ranges to aggregate by.
+            params: Aggregation parameters (parallel flag is ignored here).
+
+        Returns:
+            PerformanceMetrics with timing information.
+        """
+        entries_list = list(entries)
+        intervals_list = list(intervals)
+
+        params_serial = AggregationParameters(
+            **{
+                **params.__dict__,
+                "parallel": False,
+                "use_cache": False,
+            }
+        )
+        params_parallel = AggregationParameters(
+            **{
+                **params.__dict__,
+                "parallel": True,
+                "use_cache": False,
+            }
+        )
+
+        start = time.perf_counter()
+        result_serial = list(
+            self.aggregate_by_time(entries_list, intervals_list, params_serial)
+        )
+        serial_time = (time.perf_counter() - start) * 1000
+
+        start = time.perf_counter()
+        result_parallel = list(
+            self.aggregate_by_time(entries_list, intervals_list, params_parallel)
+        )
+        parallel_time = (time.perf_counter() - start) * 1000
+
+        account_count = 0
+        for point in result_serial:
+            if point.account_balances:
+                account_count = max(account_count, len(point.account_balances))
+
+        return PerformanceMetrics(
+            serial_time_ms=serial_time,
+            parallel_time_ms=parallel_time,
+            speedup=serial_time / parallel_time if parallel_time > 0 else 1.0,
+            account_count=account_count,
+            entry_count=len(entries_list),
+        )
