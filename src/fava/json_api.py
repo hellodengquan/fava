@@ -371,7 +371,7 @@ def put_move(account: str, new_name: str, filename: str) -> str:
         new_name,
         g.ledger,
     )
-    file_path = Path(filename)
+    file_path = g.ledger.resolve_path(filename)
 
     if not file_path.is_file():
         raise NotAFileError(filename)
@@ -379,7 +379,7 @@ def put_move(account: str, new_name: str, filename: str) -> str:
         raise TargetPathAlreadyExistsError(new_path)
 
     new_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(filename, new_path)
+    shutil.move(str(file_path), new_path)
 
     return f"Moved {filename} to {new_path}."
 
@@ -463,7 +463,7 @@ def delete_document(filename: str) -> str:
     if not is_document_or_import_file(filename, g.ledger):
         raise NotAValidDocumentOrImportFileError(filename)
 
-    file_path = Path(filename)
+    file_path = g.ledger.resolve_path(filename)
     if not file_path.exists():
         raise FileDoesNotExistError(filename)
 

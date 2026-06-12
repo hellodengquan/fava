@@ -27,6 +27,30 @@ class NotAValidAccountError(FavaAPIError):
         super().__init__(f"Not a valid account: '{account}'")
 
 
+class PathTraversalError(FavaAPIError):
+    """The resolved path escapes its allowed directory."""
+
+    def __init__(self, path: Path, allowed: Path) -> None:
+        super().__init__(
+            f"Path '{path}' is outside the allowed directory '{allowed}'."
+        )
+
+
+def _is_path_within(path: Path, directory: Path) -> bool:
+    """Check whether *path* is located inside *directory*.
+
+    Both arguments **must** be resolved (absolute) paths.
+    Uses :meth:`Path.relative_to` instead of a plain string prefix
+    check to avoid false positives such as ``/imports_evil`` matching
+    ``/imports``.
+    """
+    try:
+        path.relative_to(directory)
+    except ValueError:
+        return False
+    return True
+
+
 def is_document_or_import_file(filename: str, ledger: FavaLedger) -> bool:
     """Check whether the filename is a document or in an import directory.
 
@@ -37,13 +61,16 @@ def is_document_or_import_file(filename: str, ledger: FavaLedger) -> bool:
     Returns:
         Whether this is one of the documents or a path in an import dir.
     """
+    file_path = ledger.resolve_path(filename)
+
     if any(
-        filename == d.filename for d in ledger.all_entries_by_type.Document
+        file_path == Path(d.filename).resolve()
+        for d in ledger.all_entries_by_type.Document
     ):
         return True
-    file_path = Path(filename).resolve()
+
     return any(
-        str(file_path).startswith(str(ledger.join_path(d)))
+        _is_path_within(file_path, ledger.join_path(d))
         for d in ledger.fava_options.import_dirs
     )
 
@@ -64,6 +91,13 @@ def filepath_in_document_folder(
 
     Returns:
         The path that the document should be saved at.
+
+    Raises:
+        NotADocumentsFolderError: If *documents_folder* is not a declared
+            documents directory.
+        NotAValidAccountError: If *account* is not a known account.
+        PathTraversalError: If the resolved path escapes the documents
+            folder (path-traversal attempt).
     """
     if documents_folder not in ledger.options["documents"]:
         raise NotADocumentsFolderError(documents_folder)
@@ -75,8 +109,14 @@ def filepath_in_document_folder(
     if altsep:  # pragma: no cover
         filename = filename.replace(altsep, " ")
 
-    return ledger.join_path(
+    result = ledger.join_path(
         documents_folder,
         *account.split(":"),
         filename,
     )
+
+    base_dir = ledger.join_path(documents_folder)
+    if not _is_path_within(result, base_dir):
+        raise PathTraversalError(result, base_dir)
+
+    return result

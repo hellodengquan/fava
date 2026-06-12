@@ -320,7 +320,7 @@ def _setup_routes(fava_app: Flask) -> None:  # noqa: PLR0915
         """Download a document."""
         filename = request.args.get("filename", "")
         if is_document_or_import_file(filename, g.ledger):
-            return send_file_inline(filename)
+            return send_file_inline(str(g.ledger.resolve_path(filename)))
         return abort(404)
 
     @fava_app.route("/<bfile>/statement/", methods=["GET"])
@@ -329,7 +329,7 @@ def _setup_routes(fava_app: Flask) -> None:  # noqa: PLR0915
         entry_hash = request.args.get("entry_hash", "")
         key = request.args.get("key", "")
         document_path = g.ledger.statement_path(entry_hash, key)
-        return send_file_inline(document_path)
+        return send_file_inline(str(g.ledger.resolve_path(document_path)))
 
     @fava_app.route(
         "/<bfile>/holdings"

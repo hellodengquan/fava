@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING
 
 from beangulp.importer import Importer
 
+from fava.core.documents import PathTraversalError
+from fava.core.documents import _is_path_within
 from fava.core.module_base import FavaModule
 from fava.helpers import BeancountError
 from fava.helpers import FavaAPIError
@@ -424,6 +426,11 @@ def filepath_in_primary_imports_folder(
 
     Returns:
         The path that the document should be saved at.
+
+    Raises:
+        MissingImporterDirsError: If no import directory is configured.
+        PathTraversalError: If the resolved path escapes the import
+            directory (path-traversal attempt).
     """
     primary_imports_folder = next(iter(ledger.fava_options.import_dirs), None)
     if primary_imports_folder is None:
@@ -433,4 +440,10 @@ def filepath_in_primary_imports_folder(
     if altsep:  # pragma: no cover
         filename = filename.replace(altsep, " ")
 
-    return ledger.join_path(primary_imports_folder, filename)
+    result = ledger.join_path(primary_imports_folder, filename)
+
+    base_dir = ledger.join_path(primary_imports_folder)
+    if not _is_path_within(result, base_dir):
+        raise PathTraversalError(result, base_dir)
+
+    return result

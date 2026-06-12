@@ -490,6 +490,26 @@ class FavaLedger:
         """Path relative to the directory of the ledger."""
         return Path(self.beancount_file_path).parent.joinpath(*args).resolve()
 
+    def resolve_path(self, filename: str) -> Path:
+        """Resolve a filename to an absolute path.
+
+        If the filename is relative, resolve it relative to the
+        directory of the ledger's beancount file instead of the
+        current working directory.  Also normalises the path
+        (removes ``..``, symlinks, etc.) so that path-traversal
+        attempts cannot escape the intended directories.
+
+        Args:
+            filename: A filename that may be absolute or relative.
+
+        Returns:
+            The resolved absolute :class:`Path`.
+        """
+        path = Path(filename)
+        if not path.is_absolute():
+            path = Path(self.beancount_file_path).parent / path
+        return path.resolve()
+
     def paths_to_watch(self) -> tuple[Sequence[Path], Sequence[Path]]:
         """Get paths to included files and document directories.
 
