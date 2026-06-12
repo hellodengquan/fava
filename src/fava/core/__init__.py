@@ -48,6 +48,7 @@ from fava.core.query_shell import QueryShell
 from fava.core.tree import Tree
 from fava.core.watcher import Watcher
 from fava.core.watcher import WatchfilesWatcher
+from fava.core.root_anchor import RootAnchor
 from fava.helpers import FavaAPIError
 from fava.util import listify
 from fava.util.date import dateranges
@@ -402,6 +403,11 @@ class FavaLedger:
 
         self.watcher = WatchfilesWatcher() if not poll_watcher else Watcher()
 
+        self.root_anchor = RootAnchor(
+            Path(path).parent,
+            use_watcher=not poll_watcher,
+        )
+
         self.load_file()
 
     def load_file(self) -> None:
@@ -424,6 +430,11 @@ class FavaLedger:
             pass
         else:
             self.watcher.update(*self.paths_to_watch())
+
+        try:
+            self.root_anchor.refresh()
+        except FileNotFoundError:
+            self.root_anchor.mark_invalid()
 
         # Call load_file of all modules.
         self.accounts.load_file()
@@ -487,8 +498,13 @@ class FavaLedger:
         )
 
     def join_path(self, *args: str) -> Path:
-        """Path relative to the directory of the ledger."""
-        return Path(self.beancount_file_path).parent.joinpath(*args).resolve()
+        """Path relative to the directory of the ledger.
+
+        Uses the :attr:`root_anchor` so that if the ledger directory
+        has been moved or replaced, path resolution is blocked until
+        the ledger is reloaded.
+        """
+        return self.root_anchor.join(*args)
 
     def resolve_path(self, filename: str) -> Path:
         """Resolve a filename to an absolute path.
@@ -499,16 +515,17 @@ class FavaLedger:
         (removes ``..``, symlinks, etc.) so that path-traversal
         attempts cannot escape the intended directories.
 
+        Uses the :attr:`root_anchor` so that if the ledger directory
+        has been moved or replaced, path resolution is blocked until
+        the ledger is reloaded.
+
         Args:
             filename: A filename that may be absolute or relative.
 
         Returns:
             The resolved absolute :class:`Path`.
         """
-        path = Path(filename)
-        if not path.is_absolute():
-            path = Path(self.beancount_file_path).parent / path
-        return path.resolve()
+        return self.root_anchor.resolve(filename)
 
     def paths_to_watch(self) -> tuple[Sequence[Path], Sequence[Path]]:
         """Get paths to included files and document directories.
@@ -534,14 +551,18 @@ class FavaLedger:
         Returns:
             True if a change in one of the included files or a change in a
             document folder was detected and the file has been reloaded.
+            Also returns True if the ledger's root directory has been
+            moved, renamed, or replaced (inode changed).
         """
         # We can't reload an encrypted file, so act like it never changes.
         if self._is_encrypted:  # pragma: no cover
             return False
         changed = self.watcher.check()
-        if changed:
+        root_changed = not self.root_anchor.check()
+        if changed or root_changed:
             self.load_file()
-        return changed
+            return True
+        return False
 
     def interval_balances(
         self,
