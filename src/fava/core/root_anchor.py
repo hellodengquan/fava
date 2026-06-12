@@ -25,6 +25,10 @@ from fava.helpers import FavaAPIError
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Callable
 
+    if _PROMETHEUS_IMPORT_AVAILABLE := False:  # noqa: F841 - placeholder for type-hints only
+        from prometheus_client import Counter as Counter_t
+        from prometheus_client import Histogram as Histogram_t
+
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +39,54 @@ try:  # pragma: no cover - import-time feature detection
     _WATCHFILES_AVAILABLE = True
 except ImportError:  # pragma: no cover
     _WATCHFILES_AVAILABLE = False
+
+try:  # pragma: no cover - optional observability dependency
+    from prometheus_client import Counter
+    from prometheus_client import Histogram
+
+    _PROMETHEUS_AVAILABLE = True
+
+    _ROOT_ANCHOR_WATCHDOG_START_FAILURES = Counter(
+        "fava_root_anchor_watchdog_start_failures_total",
+        "Number of times the root-anchor watchfiles watchdog thread failed to start.",
+    )
+    _ROOT_ANCHOR_LAZY_FALLBACK = Counter(
+        "fava_root_anchor_lazy_fallback_total",
+        "Number of times a RootAnchor fell back to pure lazy-poll mode "
+        "(watchfiles unavailable, disabled, or watchdog start failed).",
+    )
+    _ROOT_ANCHOR_LAZY_DETECTION = Counter(
+        "fava_root_anchor_lazy_detection_total",
+        "Number of inode changes detected via the lazy-poll path "
+        "(not via the watchdog callback).",
+    )
+    _ROOT_ANCHOR_DETECTION_LATENCY = Histogram(
+        "fava_root_anchor_detection_latency_seconds",
+        "Histogram of elapsed time (seconds) between the last successful "
+        "validation and the detection of an inode change or missing "
+        "directory.  Samples are recorded regardless of detection path "
+        "(watchdog callback or lazy poll).",
+        buckets=(0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 300.0),
+    )
+
+except ImportError:  # pragma: no cover - optional dependency absent
+    _PROMETHEUS_AVAILABLE = False
+    _ROOT_ANCHOR_WATCHDOG_START_FAILURES = None
+    _ROOT_ANCHOR_LAZY_FALLBACK = None
+    _ROOT_ANCHOR_LAZY_DETECTION = None
+    _ROOT_ANCHOR_DETECTION_LATENCY = None
+
+
+def _metric_counter_inc(counter: object | None) -> None:
+    """Safely increment a Counter if prometheus_client is available."""
+    if counter is not None:
+        counter.inc()  # type: ignore[attr-defined]
+
+
+def _metric_histogram_observe(histogram: object | None, value: float) -> None:
+    """Safely observe a Histogram value if prometheus_client is available."""
+    if histogram is not None:
+        histogram.observe(value)  # type: ignore[attr-defined]
 
 
 FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL = "FAVA_ROOT_ANCHOR_LAZY_POLL_INTERVAL"
@@ -189,7 +241,19 @@ class RootAnchor:
         self._last_check: float = time.monotonic()
 
         if use_watcher and _WATCHFILES_AVAILABLE:
-            self._start_watcher()
+            try:
+                self._start_watcher()
+            except Exception:
+                log.exception("Root anchor watcher failed to start, falling back to lazy poll")
+                _metric_counter_inc(_ROOT_ANCHOR_WATCHDOG_START_FAILURES)
+                _metric_counter_inc(_ROOT_ANCHOR_LAZY_FALLBACK)
+                self._watcher = None
+        else:
+            if use_watcher:
+                log.debug(
+                    "watchfiles not available, root anchor falling back to lazy poll"
+                )
+            _metric_counter_inc(_ROOT_ANCHOR_LAZY_FALLBACK)
 
     def _stat_inode(self) -> int:
         return self._root_path.stat().st_ino
@@ -200,19 +264,26 @@ class RootAnchor:
         Thread-safe: acquires no locks because it only reads immutable
         state and ``_invalid`` is a simple bool.
         """
+        now = time.monotonic()
         try:
             current_inode = self._stat_inode()
         except (FileNotFoundError, NotADirectoryError, OSError):
+            _metric_histogram_observe(
+                _ROOT_ANCHOR_DETECTION_LATENCY, now - self._last_check
+            )
             self._invalid = True
             self._last_check = 0
             return False
 
         if current_inode != self._inode:
+            _metric_histogram_observe(
+                _ROOT_ANCHOR_DETECTION_LATENCY, now - self._last_check
+            )
             self._invalid = True
             self._last_check = 0
             return False
 
-        self._last_check = time.monotonic()
+        self._last_check = now
         return True
 
     def _start_watcher(self) -> None:  # pragma: no cover - trivial threading
@@ -318,14 +389,23 @@ class RootAnchor:
         if now - self._last_check < self._check_interval:
             return True
 
+        prev_check = self._last_check
         self._last_check = now
         try:
             current_inode = self._stat_inode()
         except (FileNotFoundError, NotADirectoryError, OSError):
+            _metric_counter_inc(_ROOT_ANCHOR_LAZY_DETECTION)
+            _metric_histogram_observe(
+                _ROOT_ANCHOR_DETECTION_LATENCY, now - prev_check
+            )
             self._invalid = True
             return False
 
         if current_inode != self._inode:
+            _metric_counter_inc(_ROOT_ANCHOR_LAZY_DETECTION)
+            _metric_histogram_observe(
+                _ROOT_ANCHOR_DETECTION_LATENCY, now - prev_check
+            )
             self._invalid = True
             return False
 
