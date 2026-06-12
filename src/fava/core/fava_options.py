@@ -91,6 +91,10 @@ class FavaOptions:
 
     account_journal_include_children: bool = True
     auto_reload: bool = False
+    cache_backend: str = "inmemory"
+    cache_default_ttl: int = 300
+    cache_redis_url: str | None = None
+    cache_redis_key_prefix: str | None = None
     collapse_pattern: Sequence[re.Pattern[str]] = field(default_factory=list)
     conversion_currencies: tuple[str, ...] = ()
     currency_column: int = 61

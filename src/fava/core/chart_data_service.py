@@ -17,13 +17,11 @@ Enhancements:
 
 from __future__ import annotations
 
-import hashlib
 import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from dataclasses import field
 from datetime import date
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -32,6 +30,11 @@ from fava.beans.abc import Transaction
 from fava.beans.account import account_tester
 from fava.beans.flags import FLAG_UNREALIZED
 from fava.beans.helpers import slice_entry_dates
+from fava.core.cache_backend import CacheBackend
+from fava.core.cache_backend import CacheConfig
+from fava.core.cache_backend import InMemoryCacheBackend
+from fava.core.cache_backend import create_cache_backend
+from fava.core.cache_backend import make_cache_key
 from fava.core.conversion import conversion_from_str
 from fava.core.inventory import CounterInventory
 from fava.core.inventory import SimpleCounterInventory
@@ -45,6 +48,7 @@ if TYPE_CHECKING:
 
     from fava.beans.abc import Directive
     from fava.beans.prices import FavaPriceMap
+    from fava.core.cache_backend import CacheStats
     from fava.core.conversion import Conversion
     from fava.core.module_base import FavaModule
     from fava.util.date import DateRange
@@ -121,53 +125,6 @@ class AccountTreeNode:
     has_txns: bool
 
 
-@dataclass(frozen=True)
-class CacheStats:
-    """Cache performance statistics.
-
-    Attributes:
-        hits: Number of cache hits.
-        misses: Number of cache misses.
-        total_requests: Total number of cache requests.
-        hit_rate: Cache hit rate (0.0 to 1.0).
-    """
-
-    hits: int = 0
-    misses: int = 0
-
-    @property
-    def total_requests(self) -> int:
-        """Total number of cache requests."""
-        return self.hits + self.misses
-
-    @property
-    def hit_rate(self) -> float:
-        """Cache hit rate as a float between 0 and 1."""
-        total = self.total_requests
-        return self.hits / total if total > 0 else 0.0
-
-    def record_hit(self) -> None:
-        """Record a cache hit."""
-        object.__setattr__(self, "hits", self.hits + 1)
-
-    def record_miss(self) -> None:
-        """Record a cache miss."""
-        object.__setattr__(self, "misses", self.misses + 1)
-
-    def reset(self) -> None:
-        """Reset all statistics."""
-        object.__setattr__(self, "hits", 0)
-        object.__setattr__(self, "misses", 0)
-
-
-@dataclass
-class _CacheEntry:
-    """Internal cache entry with TTL."""
-
-    value: Any
-    expiry: float
-
-
 @dataclass
 class AccountProcessingTask:
     """A task for processing a single account's entries.
@@ -228,111 +185,6 @@ def _convert_account_inventory(
     return account_name, converted
 
 
-class TTLCache:
-    """A simple thread-safe TTL-based memory cache.
-
-    Args:
-        ttl: Default time-to-live in seconds for cache entries.
-    """
-
-    def __init__(self, ttl: int = 300) -> None:
-        self._ttl = ttl
-        self._cache: dict[str, _CacheEntry] = {}
-        self._lock = threading.Lock()
-        self._stats = CacheStats()
-
-    def _make_key(self, *args: Any, **kwargs: Any) -> str:
-        """Create a cache key from arguments.
-
-        Creates a deterministic hash key from the provided arguments.
-        """
-        key_parts = []
-        for arg in args:
-            key_parts.append(str(arg))
-        for k, v in sorted(kwargs.items()):
-            key_parts.append(f"{k}={v}")
-        key_str = "|".join(key_parts)
-        return hashlib.md5(key_str.encode()).hexdigest()
-
-    def get(self, *args: Any, **kwargs: Any) -> Any | None:
-        """Get a value from the cache.
-
-        Args:
-            *args: Positional arguments for key generation.
-            **kwargs: Keyword arguments for key generation.
-
-        Returns:
-            The cached value if found and not expired, None otherwise.
-        """
-        key = self._make_key(*args, **kwargs)
-        with self._lock:
-            entry = self._cache.get(key)
-            if entry is not None:
-                if time.time() < entry.expiry:
-                    self._stats.record_hit()
-                    return entry.value
-                del self._cache[key]
-            self._stats.record_miss()
-            return None
-
-    def set(
-        self,
-        value: Any,
-        *args: Any,
-        ttl: int | None = None,
-        **kwargs: Any,
-    ) -> None:
-        """Set a value in the cache.
-
-        Args:
-            value: The value to cache.
-            *args: Positional arguments for key generation.
-            ttl: Optional TTL for this entry (overrides default).
-            **kwargs: Keyword arguments for key generation.
-        """
-        key = self._make_key(*args, **kwargs)
-        expiry = time.time() + (ttl if ttl is not None else self._ttl)
-        with self._lock:
-            self._cache[key] = _CacheEntry(value=value, expiry=expiry)
-
-    def clear_expired(self) -> int:
-        """Clear all expired entries from the cache.
-
-        Returns:
-            Number of entries removed.
-        """
-        now = time.time()
-        removed = 0
-        with self._lock:
-            expired_keys = [
-                k for k, v in self._cache.items() if now >= v.expiry
-            ]
-            for k in expired_keys:
-                del self._cache[k]
-                removed += 1
-        return removed
-
-    def clear(self) -> None:
-        """Clear all entries from the cache."""
-        with self._lock:
-            self._cache.clear()
-
-    @property
-    def stats(self) -> CacheStats:
-        """Get cache statistics."""
-        return self._stats
-
-    def reset_stats(self) -> None:
-        """Reset cache statistics."""
-        self._stats.reset()
-
-    @property
-    def size(self) -> int:
-        """Current number of entries in the cache."""
-        with self._lock:
-            return len(self._cache)
-
-
 @dataclass
 class ParallelExecutionConfig:
     """Configuration for parallel execution.
@@ -374,7 +226,10 @@ class ChartDataService:
     conversion into a single, composable interface. It can be used as a
     standalone utility or integrated with Fava's module system.
 
-    Enhanced with parallel processing and caching capabilities.
+    Enhanced with:
+    - Parallel account processing using ThreadPoolExecutor
+    - Pluggable cache backend (InMemory / Redis with automatic fallback)
+    - Performance statistics and cache hit rate tracking
     """
 
     def __init__(
@@ -383,6 +238,8 @@ class ChartDataService:
         *,
         prices: FavaPriceMap | None = None,
         options: Mapping[str, Any] | None = None,
+        cache_backend: CacheBackend | None = None,
+        cache_config: CacheConfig | None = None,
     ) -> None:
         """Initialize the chart data service.
 
@@ -390,11 +247,22 @@ class ChartDataService:
             ledger: Optional Fava ledger module for accessing prices and budgets.
             prices: Optional price map (used if ledger is not provided).
             options: Optional Beancount options (used if ledger is not provided).
+            cache_backend: Optional pre-configured cache backend instance.
+                If not provided, one will be created from cache_config or
+                loaded from environment / options.
+            cache_config: Optional cache configuration. Ignored if
+                cache_backend is provided.
         """
         self._ledger = ledger
         self._prices = prices
         self._options = options
-        self._cache = TTLCache()
+
+        if cache_backend is not None:
+            self._cache = cache_backend
+        else:
+            if cache_config is None:
+                cache_config = CacheConfig.from_options(options)
+            self._cache = create_cache_backend(cache_config)
 
     @property
     def prices(self) -> FavaPriceMap:
@@ -415,14 +283,22 @@ class ChartDataService:
         raise ValueError("No options available")
 
     @property
-    def cache(self) -> TTLCache:
-        """Get the TTL cache instance."""
+    def cache(self) -> CacheBackend:
+        """Get the cache backend instance."""
         return self._cache
 
     def reset_cache(self) -> None:
         """Reset the cache and clear all statistics."""
         self._cache.clear()
         self._cache.reset_stats()
+
+    def set_cache_backend(self, cache_backend: CacheBackend) -> None:
+        """Switch to a different cache backend at runtime.
+
+        Args:
+            cache_backend: The new cache backend to use.
+        """
+        self._cache = cache_backend
 
     def _get_conversion(
         self, conversion: str | Conversion
@@ -639,24 +515,35 @@ class ChartDataService:
         account_name: str,
         date_range: DateRange,
         conversion_str: str,
+        currency: str | None = None,
     ) -> tuple[CounterInventory, CounterInventory] | None:
         """Try to get cached aggregation results for an account.
+
+        Cache key includes:
+        - Operation type prefix
+        - Account name
+        - Time window (start and end dates)
+        - Conversion type
+        - Currency (if specified)
 
         Args:
             account_name: The account name.
             date_range: The date range.
             conversion_str: String representation of the conversion.
+            currency: Optional currency identifier.
 
         Returns:
             Cached (total_inventory, account_inventory) if available, None otherwise.
         """
-        return self._cache.get(
+        key = make_cache_key(
             "aggregation",
+            time_window_start=date_range.begin.isoformat(),
+            time_window_end=date_range.end.isoformat(),
+            currency=currency,
             account=account_name,
-            begin=date_range.begin.isoformat(),
-            end=date_range.end.isoformat(),
             conversion=conversion_str,
         )
+        return self._cache.get(key)
 
     def _set_cached_aggregation(
         self,
@@ -666,8 +553,16 @@ class ChartDataService:
         value: tuple[CounterInventory, CounterInventory],
         *,
         ttl: int = 300,
+        currency: str | None = None,
     ) -> None:
         """Cache aggregation results for an account.
+
+        Cache key includes:
+        - Operation type prefix
+        - Account name
+        - Time window (start and end dates)
+        - Conversion type
+        - Currency (if specified)
 
         Args:
             account_name: The account name.
@@ -675,16 +570,17 @@ class ChartDataService:
             conversion_str: String representation of the conversion.
             value: The (total_inventory, account_inventory) to cache.
             ttl: Cache TTL in seconds.
+            currency: Optional currency identifier.
         """
-        self._cache.set(
-            value,
+        key = make_cache_key(
             "aggregation",
+            time_window_start=date_range.begin.isoformat(),
+            time_window_end=date_range.end.isoformat(),
+            currency=currency,
             account=account_name,
-            begin=date_range.begin.isoformat(),
-            end=date_range.end.isoformat(),
             conversion=conversion_str,
-            ttl=ttl,
         )
+        self._cache.set(key, value, ttl)
 
     @listify
     def aggregate_by_time(
