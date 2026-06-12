@@ -32,7 +32,9 @@ from fava.beans.flags import FLAG_UNREALIZED
 from fava.beans.helpers import slice_entry_dates
 from fava.core.cache_backend import CacheBackend
 from fava.core.cache_backend import CacheConfig
+from fava.core.cache_backend import CACHE_SCHEMA_VERSION
 from fava.core.cache_backend import InMemoryCacheBackend
+from fava.core.cache_backend import build_full_namespace
 from fava.core.cache_backend import create_cache_backend
 from fava.core.cache_backend import ledger_namespace_hash
 from fava.core.cache_backend import make_cache_key
@@ -289,22 +291,42 @@ class ChartDataService:
 
     @property
     def ledger_namespace(self) -> str:
-        """Get the ledger namespace prefix used for cache keys."""
+        """Get the ledger namespace hash (without schema version)."""
         return self._ledger_namespace
 
+    @property
+    def cache_schema_version(self) -> int:
+        """Get the cache schema version used for key namespacing."""
+        return CACHE_SCHEMA_VERSION
+
+    @property
+    def full_namespace(self) -> str:
+        """Get the full namespace prefix including schema version.
+
+        Format: "s{version}:{ledger_namespace}"
+        """
+        return build_full_namespace(
+            self._ledger_namespace, self.cache_schema_version
+        )
+
     def namespaced_key(self, base_key: str) -> str:
-        """Wrap a base cache key with the ledger namespace prefix.
+        """Wrap a base cache key with the full namespace (schema + ledger).
 
         All cache operations should go through this method to ensure
-        proper isolation between different ledgers.
+        proper isolation between different ledgers and schema versions.
 
         Args:
             base_key: The base cache key (e.g., from make_cache_key()).
 
         Returns:
-            A namespace-prefixed cache key.
+            A fully namespace-prefixed cache key.
+            Format: "s{version}:{ledger_namespace}:{base_key}"
         """
-        return namespaced_ledger_key(self._ledger_namespace, base_key)
+        return namespaced_ledger_key(
+            self._ledger_namespace,
+            base_key,
+            schema_version=self.cache_schema_version,
+        )
 
     def set_ledger_namespace(
         self, ledger_path: str | None

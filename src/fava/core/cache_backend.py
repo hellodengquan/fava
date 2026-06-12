@@ -29,6 +29,15 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+CACHE_SCHEMA_VERSION: int = 1
+"""Schema version for cached data structures.
+
+Bump this constant whenever the format of cached values changes in a
+backward-incompatible way. Since the schema version is embedded in the
+cache key namespace, old schema values will naturally become misses
+after an upgrade instead of causing deserialization errors.
+"""
+
 
 @dataclass(frozen=True)
 class CacheConfig:
@@ -250,17 +259,46 @@ def ledger_namespace_hash(ledger_path: str | None) -> str:
     return full_hash[:8]
 
 
-def namespaced_ledger_key(namespace: str, base_key: str) -> str:
-    """Combine a ledger namespace prefix with a base cache key.
+def build_full_namespace(
+    ledger_namespace: str,
+    schema_version: int | None = None,
+) -> str:
+    """Build the full namespace prefix including schema version.
+
+    The full namespace consists of a schema version segment plus the
+    ledger hash segment. When the schema version changes, all cached
+    values under the old schema naturally become misses.
 
     Args:
-        namespace: The ledger namespace hash from ledger_namespace_hash().
-        base_key: The base cache key (e.g., from make_cache_key()).
+        ledger_namespace: The ledger namespace hash from ledger_namespace_hash().
+        schema_version: Schema version to use. Defaults to CACHE_SCHEMA_VERSION.
 
     Returns:
-        A composite key in the format "<namespace>:<base_key>".
+        Full namespace string in the format "s{version}:{ledger_namespace}".
     """
-    return f"{namespace}:{base_key}"
+    version = schema_version if schema_version is not None else CACHE_SCHEMA_VERSION
+    return f"s{version}:{ledger_namespace}"
+
+
+def namespaced_ledger_key(
+    ledger_namespace: str,
+    base_key: str,
+    *,
+    schema_version: int | None = None,
+) -> str:
+    """Combine a ledger namespace (with schema version) with a base cache key.
+
+    Args:
+        ledger_namespace: The ledger namespace hash from ledger_namespace_hash().
+        base_key: The base cache key (e.g., from make_cache_key()).
+        schema_version: Optional schema version override.
+            Defaults to :data:`CACHE_SCHEMA_VERSION`.
+
+    Returns:
+        A composite key in the format "s{version}:<ledger_namespace>:<base_key>".
+    """
+    full_ns = build_full_namespace(ledger_namespace, schema_version)
+    return f"{full_ns}:{base_key}"
 
 
 class CacheBackend(ABC):

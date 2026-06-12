@@ -16,6 +16,7 @@ from unittest import mock
 import pytest
 
 from fava.core.cache_backend import (
+    CACHE_SCHEMA_VERSION,
     CacheBackend,
     CacheBackendError,
     CacheConfig,
@@ -23,6 +24,7 @@ from fava.core.cache_backend import (
     FallbackCacheManager,
     InMemoryCacheBackend,
     RedisCacheBackend,
+    build_full_namespace,
     create_cache_backend,
     ledger_namespace_hash,
     make_cache_key,
@@ -800,14 +802,16 @@ class TestLedgerNamespaceIsolation:
         assert ns1 == ns2, "Same ledger path must produce identical namespace"
 
     def test_namespace_prefix_is_prepended(self) -> None:
-        """namespaced_ledger_key must prepend the namespace with a colon separator."""
+        """namespaced_ledger_key must prepend schema + namespace with colon separators."""
         ns = "abc12345"
         base = "f0e1d2c3b4a5968778695a4b3c2d1e0f"
 
         result = namespaced_ledger_key(ns, base)
 
-        assert result == f"{ns}:{base}"
-        assert result.startswith(ns + ":")
+        assert result.startswith(f"s{CACHE_SCHEMA_VERSION}:")
+        assert f":{ns}:" in result
+        assert result.endswith(base)
+        assert result == f"s{CACHE_SCHEMA_VERSION}:{ns}:{base}"
 
     def test_two_services_different_ledgers_shared_backend_isolated(
         self,
@@ -1009,3 +1013,130 @@ class TestLedgerPathChange:
 
         assert service.ledger_namespace == "default"
         assert service.ledger_path is None
+
+
+class TestCacheSchemaVersion:
+    """Tests for cache schema versioning.
+
+    When the cache value structure changes (schema upgrade), old cached
+    values must not be read by the new code. The schema version is
+    embedded in the key namespace so that bumping CACHE_SCHEMA_VERSION
+    causes all old-schema keys to naturally miss.
+    """
+
+    def test_cache_schema_version_constant_exists(self) -> None:
+        """The CACHE_SCHEMA_VERSION constant must be defined and positive."""
+        assert isinstance(CACHE_SCHEMA_VERSION, int)
+        assert CACHE_SCHEMA_VERSION >= 1
+
+    def test_build_full_namespace_includes_schema(self) -> None:
+        """build_full_namespace must produce 's{version}:{ledger_ns}'."""
+        ns = build_full_namespace("abc12345", schema_version=3)
+
+        assert ns == "s3:abc12345"
+        assert ns.startswith("s3:")
+
+    def test_default_schema_version_used(self) -> None:
+        """When schema_version is omitted, CACHE_SCHEMA_VERSION is used."""
+        ns_default = build_full_namespace("ledger001")
+        ns_explicit = build_full_namespace(
+            "ledger001", schema_version=CACHE_SCHEMA_VERSION
+        )
+
+        assert ns_default == ns_explicit
+        assert ns_default.startswith(f"s{CACHE_SCHEMA_VERSION}:")
+
+    def test_different_schema_versions_produce_different_keys(self) -> None:
+        """Different schema versions must produce completely different keys."""
+        base_key = make_cache_key(
+            "aggregation",
+            time_window_start="2024-01-01",
+            time_window_end="2024-02-01",
+            currency="USD",
+            account="Expenses:Test",
+        )
+        ledger_ns = "ledgerhash"
+
+        key_v1 = namespaced_ledger_key(ledger_ns, base_key, schema_version=1)
+        key_v2 = namespaced_ledger_key(ledger_ns, base_key, schema_version=2)
+
+        assert key_v1 != key_v2
+        assert key_v1.startswith("s1:")
+        assert key_v2.startswith("s2:")
+
+    def test_schema_upgrade_old_cache_misses(self) -> None:
+        """After schema upgrade, values written under old schema must miss."""
+        backend = InMemoryCacheBackend(default_ttl=300)
+        ledger_ns = ledger_namespace_hash("/data/company/main.beancount")
+        base_key = make_cache_key(
+            "aggregation",
+            time_window_start="2024-01-01",
+            currency="EUR",
+        )
+
+        old_key = namespaced_ledger_key(ledger_ns, base_key, schema_version=1)
+        new_key = namespaced_ledger_key(ledger_ns, base_key, schema_version=2)
+
+        backend.set(old_key, "old_schema_value_v1")
+
+        assert backend.get(old_key) == "old_schema_value_v1"
+        assert backend.get(new_key) is None, (
+            "After schema upgrade, old-schema key must not be hit"
+        )
+
+        backend.set(new_key, "new_schema_value_v2")
+
+        assert backend.get(old_key) == "old_schema_value_v1", (
+            "Old schema data must still exist (not deleted, just not hit)"
+        )
+        assert backend.get(new_key) == "new_schema_value_v2"
+
+    def test_chart_service_schema_version_in_namespace(self) -> None:
+        """ChartDataService's full_namespace must include schema version."""
+        service = ChartDataService(
+            prices=None,
+            options={},
+            cache_backend=InMemoryCacheBackend(default_ttl=300),
+            ledger_path="/tmp/test_schema.beancount",
+        )
+
+        full_ns = service.full_namespace
+
+        assert full_ns.startswith(f"s{CACHE_SCHEMA_VERSION}:")
+        assert service.ledger_namespace in full_ns
+
+    def test_chart_service_namespaced_key_format(self) -> None:
+        """ChartDataService.namespaced_key() must include schema version."""
+        service = ChartDataService(
+            prices=None,
+            options={},
+            cache_backend=InMemoryCacheBackend(default_ttl=300),
+            ledger_path="/tmp/schema_key_test.beancount",
+        )
+
+        base = make_cache_key("test", time_window_start="2024-01-01")
+        full_key = service.namespaced_key(base)
+
+        parts = full_key.split(":")
+        assert len(parts) >= 3
+        assert parts[0] == f"s{CACHE_SCHEMA_VERSION}"
+        assert parts[-1] == base
+
+    def test_schema_version_string_format_not_leaked(self) -> None:
+        """Schema version must be a pure numeric segment ('sN') without
+        extra characters that could cause backward compatibility issues."""
+        for version in [1, 2, 10, 99]:
+            ns = build_full_namespace("abc", schema_version=version)
+            prefix = ns.split(":", 1)[0]
+
+            assert prefix.startswith("s")
+            numeric_part = prefix[1:]
+            assert numeric_part.isdigit(), (
+                f"Schema version prefix '{prefix}' must be 's' followed by digits"
+            )
+            assert int(numeric_part) == version
+
+            assert "_" not in prefix
+            assert "-" not in prefix
+            assert "." not in prefix
+            assert prefix.isalnum()
