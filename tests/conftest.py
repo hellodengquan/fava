@@ -93,6 +93,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Update snapshot files",
     )
     parser.addoption(
+        "--snapshot-refresh",
+        action="store_true",
+        dest="SNAPSHOT_REFRESH",
+        help="Auto-approve/refresh failing snapshots (non-interactive approve)",
+    )
+    parser.addoption(
         "--typeguard-fixtures",
         action="store_true",
         dest="TYPEGUARD_FIXTURES",
@@ -110,6 +116,7 @@ def compare_snapshot(
         snap_dir.mkdir()
 
     should_update = request.config.getoption("SNAPSHOT_UPDATE")
+    should_refresh = request.config.getoption("SNAPSHOT_REFRESH")
     seen_snapshots = set()
 
     def check_snapshot(name: str, expected: str, *, json: bool) -> None:
@@ -124,10 +131,14 @@ def compare_snapshot(
         if should_update:
             if expected_to_compare != contents_to_compare:
                 snap_file.write_text(expected, "utf-8")
+        elif should_refresh:
+            if expected_to_compare != contents_to_compare:
+                snap_file.write_text(expected, "utf-8")
         else:
             assert expected_to_compare == contents_to_compare, (
                 "Snaphot test failed. Snapshots can be updated with "
-                "`pytest --snapshot-update`"
+                "`pytest --snapshot-update` or auto-approved with "
+                "`pytest --snapshot-refresh`"
             )
 
     yield check_snapshot

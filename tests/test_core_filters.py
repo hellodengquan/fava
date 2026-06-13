@@ -235,3 +235,307 @@ def test_time_filter(example_ledger: FavaLedger) -> None:
             example_ledger.fava_options,
             "no_date",
         )
+
+
+class TestAccountFilterExclude:
+    """Test account filter with reverse/exclude semantics via AdvancedFilter."""
+
+    def test_all_exclude_account(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """all(-account:...) keeps entries where ALL postings are NOT the account."""
+        total = len(example_ledger.all_entries)
+        f = AdvancedFilter('all(-account:"Assets:US:ETrade")')
+        filtered = f.apply(example_ledger.all_entries)
+        assert len(filtered) == total - 48
+        for entry in filtered:
+            for posting in getattr(entry, "postings", []):
+                assert "Assets:US:ETrade" not in posting.account
+
+    def test_any_exclude_account(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """any(-account:...) keeps entries where any posting is NOT ETrade."""
+        f = AdvancedFilter('any(-account:"Assets:US:ETrade")')
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            postings = getattr(entry, "postings", [])
+            if postings:
+                assert any(
+                    "Assets:US:ETrade" not in p.account for p in postings
+                )
+
+    def test_exclude_multiple_accounts_all(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """Exclude two accounts using all() with OR-negated pattern."""
+        total = len(example_ledger.all_entries)
+        f1 = AdvancedFilter('all(-account:"Assets:US:ETrade")')
+        f2 = AdvancedFilter('all(-account:"Assets:US:BofA")')
+        filtered1 = f1.apply(example_ledger.all_entries)
+        filtered_both = f2.apply(filtered1)
+        assert len(filtered_both) < total
+        for entry in filtered_both:
+            for posting in getattr(entry, "postings", []):
+                assert "Assets:US:ETrade" not in posting.account
+                assert "Assets:US:BofA" not in posting.account
+
+    def test_exclude_vs_include_complement(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """Exclude is the complement of include for posting-level filters."""
+        total = len(example_ledger.all_entries)
+        include_etrade = AdvancedFilter('any(account:"Assets:US:ETrade")')
+        exclude_etrade = AdvancedFilter('all(-account:"Assets:US:ETrade")')
+        included = len(include_etrade.apply(example_ledger.all_entries))
+        excluded = len(exclude_etrade.apply(example_ledger.all_entries))
+        assert included + excluded == total
+
+    def test_exclude_tag(self, example_ledger: FavaLedger) -> None:
+        """Exclude entries with a specific tag."""
+        total = len(example_ledger.all_entries)
+        exclude_test = AdvancedFilter("-#test")
+        filtered = exclude_test.apply(example_ledger.all_entries)
+        assert len(filtered) == total - 2
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            assert "test" not in tags
+
+    def test_exclude_link(self, example_ledger: FavaLedger) -> None:
+        """Exclude entries with a specific link."""
+        exclude_link = AdvancedFilter("-^test-link")
+        filtered = exclude_link.apply(example_ledger.all_entries)
+        for entry in filtered:
+            links = getattr(entry, "links", frozenset())
+            assert "test-link" not in links
+
+    def test_exclude_payee(self, example_ledger: FavaLedger) -> None:
+        """Exclude entries from a specific payee."""
+        exclude_baybook = AdvancedFilter('-payee:BayBook')
+        filtered = exclude_baybook.apply(example_ledger.all_entries)
+        for entry in filtered:
+            payee = getattr(entry, "payee", "") or ""
+            assert "BayBook" not in payee
+
+    def test_double_negation(self, example_ledger: FavaLedger) -> None:
+        """Double negation should include entries with the tag."""
+        include_test = AdvancedFilter("-#nomatch -#nomatch")
+        total = len(example_ledger.all_entries)
+        filtered = include_test.apply(example_ledger.all_entries)
+        assert len(filtered) == total
+
+    def test_exclude_and_include_tag(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """Include one tag while excluding another."""
+        f = AdvancedFilter("#test -#nomatch")
+        filtered = f.apply(example_ledger.all_entries)
+        assert len(filtered) == 2
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            assert "test" in tags
+
+    def test_exclude_string_match(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """Exclude entries matching a string pattern in narration/payee."""
+        total = len(example_ledger.all_entries)
+        f = AdvancedFilter("-BayBook")
+        filtered = f.apply(example_ledger.all_entries)
+        assert len(filtered) == total - 62
+        for entry in filtered:
+            for attr in ("narration", "payee", "comment"):
+                val = getattr(entry, attr, "") or ""
+                assert "BayBook" not in val
+
+
+class TestAccountFilterRegex:
+    """Test AccountFilter and AdvancedFilter with regex patterns."""
+
+    def test_regex_prefix_match(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """^ prefix anchors to start of account name."""
+        af = AccountFilter("^Expenses")
+        filtered = af.apply(example_ledger.all_entries)
+        for entry in filtered:
+            accounts = get_entry_accounts(entry)
+            assert any(a.startswith("Expenses") for a in accounts)
+
+    def test_regex_suffix_match(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """$ suffix anchors to end of account name."""
+        af = AccountFilter("Cash$")
+        filtered = af.apply(example_ledger.all_entries)
+        assert len(filtered) > 0
+        for entry in filtered:
+            accounts = get_entry_accounts(entry)
+            assert any(a.endswith("Cash") for a in accounts)
+
+    def test_regex_wildcard_middle(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """.* wildcard matching in the middle of account name."""
+        af = AccountFilter(".*US:.*:Cash")
+        filtered = af.apply(example_ledger.all_entries)
+        assert len(filtered) > 0
+        for entry in filtered:
+            accounts = get_entry_accounts(entry)
+            assert any(
+                "US:" in a and a.endswith("Cash") for a in accounts
+            )
+
+    def test_regex_character_class(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """Character class [0-9] in regex."""
+        af = AccountFilter(".*[0-9].*")
+        filtered = af.apply(example_ledger.all_entries)
+        import re
+
+        pattern = re.compile("[0-9]")
+        for entry in filtered:
+            accounts = get_entry_accounts(entry)
+            assert any(pattern.search(a) for a in accounts)
+
+    def test_regex_case_insensitive(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """Account filter is case-insensitive for regex."""
+        af_lower = AccountFilter("assets")
+        af_upper = AccountFilter("ASSETS")
+        filtered_lower = af_lower.apply(example_ledger.all_entries)
+        filtered_upper = af_upper.apply(example_ledger.all_entries)
+        assert len(filtered_lower) == len(filtered_upper)
+
+    def test_regex_exact_account(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """^...$ matches exactly one account name."""
+        af = AccountFilter("^Assets:US:BofA:Checking$")
+        filtered = af.apply(example_ledger.all_entries)
+        assert len(filtered) > 0
+        for entry in filtered:
+            accounts = get_entry_accounts(entry)
+            assert "Assets:US:BofA:Checking" in accounts
+
+    def test_regex_invalid_pattern_crashes(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """Invalid regex in AccountFilter raises re.error from has_component."""
+        af = AccountFilter("[invalid")
+        with pytest.raises(Exception):
+            af.apply(example_ledger.all_entries)
+
+    def test_advanced_filter_account_regex_any(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """any(account:regex) filters transactions by posting account."""
+        f = AdvancedFilter('any(account:"Assets:US:.*")')
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            accounts = [p.account for p in getattr(entry, "postings", [])]
+            assert any(a.startswith("Assets:US:") for a in accounts)
+
+    def test_advanced_filter_account_regex_exclude(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """all(-account:regex) excludes transactions by posting account."""
+        total = len(example_ledger.all_entries)
+        f = AdvancedFilter('all(-account:"Assets:US:.*")')
+        filtered = f.apply(example_ledger.all_entries)
+        assert len(filtered) < total
+        for entry in filtered:
+            for posting in getattr(entry, "postings", []):
+                assert not posting.account.startswith("Assets:US:")
+
+    def test_advanced_filter_name_regex(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """Name metadata with regex patterns."""
+        f = AdvancedFilter('name:".*ETF$"')
+        filtered = f.apply(example_ledger.all_entries)
+        assert len(filtered) == 3
+
+    def test_advanced_filter_name_regex_case_insensitive(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """Name metadata regex is case-insensitive."""
+        f_upper = AdvancedFilter('name:".*ETF$"')
+        f_lower = AdvancedFilter('name:".*etf$"')
+        filtered_upper = f_upper.apply(example_ledger.all_entries)
+        filtered_lower = f_lower.apply(example_ledger.all_entries)
+        assert len(filtered_upper) == len(filtered_lower)
+
+    def test_advanced_filter_number_regex(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """Number metadata with regex."""
+        f = AdvancedFilter(r'number:"\d*"')
+        filtered = f.apply(example_ledger.all_entries)
+        assert len(filtered) == 3
+
+    def test_account_filter_vs_component_match(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """AccountFilter matches both has_component and regex."""
+        af_component = AccountFilter("BofA")
+        af_regex = AccountFilter(".*BofA.*")
+        filtered_component = af_component.apply(example_ledger.all_entries)
+        filtered_regex = af_regex.apply(example_ledger.all_entries)
+        assert len(filtered_component) == len(filtered_regex)
+
+    def test_account_filter_empty_returns_all(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """Empty AccountFilter returns all entries unchanged."""
+        af = AccountFilter("")
+        filtered = af.apply(example_ledger.all_entries)
+        assert filtered is example_ledger.all_entries
+
+    def test_advanced_filter_negated_account_regex(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """Negated account regex with all() quantifier."""
+        f = AdvancedFilter('all(-account:"Liabilities:.*")')
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            for posting in getattr(entry, "postings", []):
+                assert not posting.account.startswith("Liabilities:")
+
+    def test_advanced_filter_or_with_regex(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """OR (comma) with account regex patterns."""
+        f = AdvancedFilter(
+            'any(account:"Assets:US:ETrade"),any(account:"Liabilities:.*")'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            accounts = [p.account for p in getattr(entry, "postings", [])]
+            assert any(
+                "Assets:US:ETrade" in a or a.startswith("Liabilities:")
+                for a in accounts
+            )
+
+    def test_advanced_filter_and_with_exclude_regex(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """AND (space) with include + exclude regex at posting level."""
+        f = AdvancedFilter(
+            'any(account:"Assets:US:.*") all(-account:"Assets:US:ETrade")'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            postings = getattr(entry, "postings", [])
+            assert any(p.account.startswith("Assets:US:") for p in postings)
+            assert all(
+                "Assets:US:ETrade" not in p.account for p in postings
+            )
+
+    def test_match_fallback_on_invalid_regex(self) -> None:
+        """Match class falls back to literal string on invalid regex."""
+        m = Match("[invalid")
+        assert not m("anything")
+        assert m("[invalid")
