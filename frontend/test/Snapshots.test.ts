@@ -177,3 +177,142 @@ test("Snapshots: delete a snapshot removes it from the list", async () => {
     snapshot_api.delete_snapshot = original_delete;
   }
 });
+
+test("Snapshots: shows empty state when no snapshots exist", async () => {
+  const { snapshot_api } = await import("../src/api/index.ts");
+
+  const original_get = snapshot_api.get_snapshots;
+
+  snapshot_api.get_snapshots = async () => {
+    return [];
+  };
+
+  try {
+    const { default: SnapshotsComponent } = await import(
+      "../src/reports/snapshots/Snapshots.svelte"
+    );
+
+    const component = mount(SnapshotsComponent, {
+      target: document.body,
+    });
+
+    await tick();
+    flushSync();
+
+    const table = document.querySelector("table.snapshot-table");
+    equal(table, null, "should not render a table when list is empty");
+
+    const empty_msg = document.querySelector(".snapshot-list-section p");
+    ok(empty_msg, "should show an empty-state message");
+    ok(
+      empty_msg!.textContent!.includes("No snapshots"),
+      "empty-state message should mention 'No snapshots'",
+    );
+
+    const compare_btn = document.querySelector("button.compare-btn");
+    equal(compare_btn, null, "compare button should not be shown when empty");
+
+    unmount(component);
+  } finally {
+    snapshot_api.get_snapshots = original_get;
+  }
+});
+
+test("Snapshots: shows loading state before API resolves", async () => {
+  const { snapshot_api } = await import("../src/api/index.ts");
+
+  const original_get = snapshot_api.get_snapshots;
+
+  let resolve_get!: (value: typeof MOCK_SNAPSHOTS) => void;
+  const pending_promise = new Promise<typeof MOCK_SNAPSHOTS>((resolve) => {
+    resolve_get = resolve;
+  });
+
+  snapshot_api.get_snapshots = async () => {
+    return pending_promise;
+  };
+
+  try {
+    const { default: SnapshotsComponent } = await import(
+      "../src/reports/snapshots/Snapshots.svelte"
+    );
+
+    const component = mount(SnapshotsComponent, {
+      target: document.body,
+    });
+
+    flushSync();
+
+    const loading_msg = document.querySelector(".snapshot-list-section p");
+    ok(loading_msg, "should show a loading message");
+    ok(
+      loading_msg!.textContent!.includes("Loading"),
+      "loading message should contain 'Loading'",
+    );
+
+    const table_before = document.querySelector("table.snapshot-table");
+    equal(table_before, null, "table should not render during loading");
+
+    resolve_get(MOCK_SNAPSHOTS);
+    await tick();
+    await tick();
+    flushSync();
+
+    const snapshot_list_section = document.querySelector(".snapshot-list-section");
+    ok(snapshot_list_section, "snapshot list section should exist");
+
+    const table_after = document.querySelector("table.snapshot-table");
+    if (!table_after) {
+      const msg = document.querySelector(".snapshot-list-section p");
+      ok(false, `table should render after loading, but got: ${msg?.textContent}`);
+    }
+    ok(table_after, "table should render after loading completes");
+
+    unmount(component);
+  } finally {
+    snapshot_api.get_snapshots = original_get;
+  }
+});
+
+test("Snapshots: error fallback shows empty state without crashing", async () => {
+  const { snapshot_api } = await import("../src/api/index.ts");
+
+  const original_get = snapshot_api.get_snapshots;
+
+  snapshot_api.get_snapshots = async () => {
+    throw new Error("Network error: Failed to fetch snapshots");
+  };
+
+  try {
+    const { default: SnapshotsComponent } = await import(
+      "../src/reports/snapshots/Snapshots.svelte"
+    );
+
+    const component = mount(SnapshotsComponent, {
+      target: document.body,
+    });
+
+    await tick();
+    flushSync();
+
+    const table = document.querySelector("table.snapshot-table");
+    equal(table, null, "should not render a table after error");
+
+    const empty_msg = document.querySelector(".snapshot-list-section p");
+    ok(empty_msg, "should show empty-state message after error");
+    ok(
+      empty_msg!.textContent!.includes("No snapshots"),
+      "empty-state message should indicate no snapshots",
+    );
+
+    const loading_msg = document.querySelector(".snapshot-list-section p");
+    ok(
+      !loading_msg!.textContent!.includes("Loading"),
+      "should not show loading message after error resolves",
+    );
+
+    unmount(component);
+  } finally {
+    snapshot_api.get_snapshots = original_get;
+  }
+});
