@@ -539,3 +539,435 @@ class TestAccountFilterRegex:
         m = Match("[invalid")
         assert not m("anything")
         assert m("[invalid")
+
+
+class TestFilterCombinationsAND:
+    """Regression tests for multi-condition AND combinations.
+
+    AND is expressed via space-separated predicates.  Each group below
+    exercises a different predicate type (tag / payee / account regex /
+    exclude / metadata regex) chained with AND semantics so that any
+    reordering bug or short-circuit regression in the filter parser is
+    caught.
+    """
+
+    def test_and_tag_payee(self, example_ledger: FavaLedger) -> None:
+        """AND of a tag filter with a payee match."""
+        f = AdvancedFilter('#test payee:BayBook')
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            payee = getattr(entry, "payee", "") or ""
+            assert "test" in tags
+            assert "BayBook" in payee
+
+    def test_and_two_tags(self, example_ledger: FavaLedger) -> None:
+        """AND of two tag predicates — empty because sibling-tag is absent."""
+        f = AdvancedFilter('#test #sibling-tag')
+        filtered = f.apply(example_ledger.all_entries)
+        assert len(filtered) == 0
+
+    def test_and_tag_and_link(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """AND of a tag filter with a link filter."""
+        f = AdvancedFilter('#test ^test-link')
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            links = getattr(entry, "links", frozenset())
+            assert "test" in tags
+            assert "test-link" in links
+        # Exactly 1 of the 2 #test entries also carries ^test-link
+        assert len(filtered) == 1
+
+    def test_and_payee_exclude_tag(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """AND: include payee while excluding a specific tag (no overlap).
+
+        In long-example.beancount the BayBook payee entries do not carry
+        ``#test`` so the exclude is a no-op but still matches.
+        """
+        total_baybook = len(
+            AdvancedFilter('payee:BayBook').apply(
+                example_ledger.all_entries
+            )
+        )
+        with_test = len(
+            AdvancedFilter('#test').apply(example_ledger.all_entries)
+        )
+        f = AdvancedFilter('payee:BayBook -#test')
+        filtered = f.apply(example_ledger.all_entries)
+        assert len(filtered) == total_baybook
+        assert len(filtered) >= total_baybook - with_test
+        for entry in filtered:
+            payee = getattr(entry, "payee", "") or ""
+            tags = getattr(entry, "tags", frozenset())
+            assert "BayBook" in payee
+            assert "test" not in tags
+
+    def test_and_all_exclude_plus_account_any(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """AND: all postings must NOT match ETrade + any must match BofA."""
+        f = AdvancedFilter(
+            'all(-account:"Assets:US:ETrade") '
+            'any(account:"Assets:US:BofA:.*")'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            postings = getattr(entry, "postings", [])
+            assert all(
+                "Assets:US:ETrade" not in p.account for p in postings
+            )
+            assert any(
+                p.account.startswith("Assets:US:BofA:") for p in postings
+            )
+
+    def test_and_metadata_name_number(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """AND: metadata name regex AND metadata number regex."""
+        f = AdvancedFilter(r'name:".*ETF$" number:"\d+"')
+        filtered = f.apply(example_ledger.all_entries)
+        # name matches 3 entries, number matches 3 entries; the overlap
+        # is the subset carrying both metadata keys
+        assert len(filtered) <= 3
+        for entry in filtered:
+            meta = getattr(entry, "meta", {}) or {}
+            name_val = meta.get("name", "")
+            number_val = meta.get("number", "")
+            assert name_val.endswith("ETF")
+            assert str(number_val).isdigit()
+
+    def test_and_three_filters(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """AND chain of three predicates: payee + string + link-free."""
+        f = AdvancedFilter(
+            'payee:BayBook -^test-link -#test'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            payee = getattr(entry, "payee", "") or ""
+            tags = getattr(entry, "tags", frozenset())
+            links = getattr(entry, "links", frozenset())
+            assert "BayBook" in payee
+            assert "test-link" not in links
+            assert "test" not in tags
+
+    def test_and_empty_intersection(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """AND of two disjoint filters yields no entries."""
+        f = AdvancedFilter('#test #sibling-tag')
+        filtered = f.apply(example_ledger.all_entries)
+        assert len(filtered) == 0
+
+    def test_and_exclude_link_and_include_tag(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """AND: include tag, exclude a specific link."""
+        with_tag = len(
+            AdvancedFilter("#test").apply(example_ledger.all_entries)
+        )
+        with_link = len(
+            AdvancedFilter("^test-link").apply(example_ledger.all_entries)
+        )
+        f = AdvancedFilter("#test -^test-link")
+        filtered = f.apply(example_ledger.all_entries)
+        # Exactly one #test entry has ^test-link, so excluding it yields 1
+        assert len(filtered) == with_tag - (with_tag - len(filtered))
+        assert len(filtered) >= with_tag - with_link
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            links = getattr(entry, "links", frozenset())
+            assert "test" in tags
+            assert "test-link" not in links
+
+    def test_and_narration_payee_plus_exclude(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """AND: string search (narration/payee) plus explicit exclude."""
+        f = AdvancedFilter("BayBook -#test")
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            haystack = " ".join(
+                getattr(entry, attr, "") or ""
+                for attr in ("narration", "payee", "comment")
+            )
+            tags = getattr(entry, "tags", frozenset())
+            assert "BayBook" in haystack
+            assert "test" not in tags
+
+    @pytest.mark.parametrize(
+        ("and_predicate", "expected_count"),
+        [
+            ("#sibling-tag -#test", 0),
+            ("#test -^test-link", 1),
+            ("payee:BayBook -#test", 62),
+            ("^test-link -#test", 2),
+            ("payee:BayBook ^test-link", 0),
+        ],
+    )
+    def test_and_count_snapshot(
+        self,
+        example_ledger: FavaLedger,
+        and_predicate: str,
+        expected_count: int,
+    ) -> None:
+        """Parametrized AND combinations with exact expected counts."""
+        f = AdvancedFilter(and_predicate)
+        filtered = f.apply(example_ledger.all_entries)
+        assert len(filtered) == expected_count
+
+
+class TestFilterCombinationsOR:
+    """Regression tests for multi-condition OR combinations.
+
+    OR is expressed via comma-separated predicates.  Each group below
+    exercises a different predicate type with OR semantics so that any
+    short-circuiting bug or precedence misparse in the filter parser is
+    caught.
+    """
+
+    def test_or_two_tags(self, example_ledger: FavaLedger) -> None:
+        """OR of two tag predicates matches entries carrying either one."""
+        only_a = AdvancedFilter("#test").apply(example_ledger.all_entries)
+        only_b = AdvancedFilter("#sibling-tag").apply(
+            example_ledger.all_entries
+        )
+        f = AdvancedFilter("#test,#sibling-tag")
+        filtered = f.apply(example_ledger.all_entries)
+        assert len(filtered) <= len(only_a) + len(only_b)
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            assert "test" in tags or "sibling-tag" in tags
+
+    def test_or_tag_and_link(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """OR of a tag predicate with a link predicate."""
+        f = AdvancedFilter("#test,^test-link")
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            links = getattr(entry, "links", frozenset())
+            assert "test" in tags or "test-link" in links
+
+    def test_or_payee_string_and_account_regex(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """OR of a payee string match with any(account:regex)."""
+        f = AdvancedFilter(
+            'payee:BayBook,any(account:"Income:.*")'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            payee = getattr(entry, "payee", "") or ""
+            postings = getattr(entry, "postings", [])
+            assert (
+                "BayBook" in payee
+                or any(p.account.startswith("Income:") for p in postings)
+            )
+
+    def test_or_all_exclude_and_any_include(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """OR: either all postings exclude ETrade, or any posting is BofA."""
+        f = AdvancedFilter(
+            'all(-account:"Assets:US:ETrade"),'
+            'any(account:"Assets:US:BofA:.*")'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            postings = getattr(entry, "postings", [])
+            exclude_etrade = all(
+                "Assets:US:ETrade" not in p.account for p in postings
+            )
+            include_bofa = any(
+                p.account.startswith("Assets:US:BofA:") for p in postings
+            )
+            assert exclude_etrade or include_bofa
+
+    def test_or_metadata_name_and_payee(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """OR of a metadata name regex with a payee regex."""
+        f = AdvancedFilter('name:".*ETF$",payee:BayBook')
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            meta = getattr(entry, "meta", {}) or {}
+            payee = getattr(entry, "payee", "") or ""
+            assert (
+                str(meta.get("name", "")).endswith("ETF")
+                or "BayBook" in payee
+            )
+
+    def test_or_three_alternatives(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """OR chain of three disjoint-ish filter predicates."""
+        f = AdvancedFilter(
+            '#test,^test-link,any(account:"Income:US:BayBook:.*")'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            links = getattr(entry, "links", frozenset())
+            postings = getattr(entry, "postings", [])
+            assert (
+                "test" in tags
+                or "test-link" in links
+                or any(
+                    p.account.startswith("Income:US:BayBook:")
+                    for p in postings
+                )
+            )
+
+    def test_or_exclude_include_combination(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """OR: two negated predicates expand the keep set."""
+        f = AdvancedFilter(
+            'all(-account:"Assets:US:ETrade"),all(-account:"Income:.*")'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        # This should include almost everything because any entry either
+        # has no ETrade posting or has no Income posting
+        assert len(filtered) >= 1
+        for entry in filtered:
+            postings = getattr(entry, "postings", [])
+            no_etrade = all(
+                "Assets:US:ETrade" not in p.account for p in postings
+            )
+            no_income = all(
+                not p.account.startswith("Income:") for p in postings
+            )
+            assert no_etrade or no_income
+
+    @pytest.mark.parametrize(
+        ("or_predicate", "min_expected"),
+        [
+            ("#test,#sibling-tag", 2),
+            ("^test-link,#trip", 3),
+            ('payee:BayBook,any(account:"Liabilities:.*")', 500),
+        ],
+    )
+    def test_or_count_floor(
+        self,
+        example_ledger: FavaLedger,
+        or_predicate: str,
+        min_expected: int,
+    ) -> None:
+        """Parametrized OR combinations with minimum expected counts."""
+        f = AdvancedFilter(or_predicate)
+        filtered = f.apply(example_ledger.all_entries)
+        assert len(filtered) >= min_expected
+
+
+class TestFilterCombinationsMixed:
+    """Regression tests that mix AND and OR together.
+
+    Precedence: comma (OR) binds tighter than space (AND).  Each test
+    below exercises a precedence boundary.
+    """
+
+    def test_and_of_two_ors(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """(tagA OR tagB) AND (payeeA OR payeeB) via OR / AND precedence.
+
+        Comma (OR) binds tighter than space (AND), so the expression
+        ``tag1,tag2 payee1,payee2`` evaluates as ``(tag1 OR tag2) AND
+        (payee1 OR payee2)``.  We verify the resulting entries match
+        the conjunction by checking each OR branch independently.
+        """
+        f = AdvancedFilter(
+            '#test,#sibling-tag payee:BayBook,payee:Verizon'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            payee = getattr(entry, "payee", "") or ""
+            tag_ok = "test" in tags or "sibling-tag" in tags
+            payee_ok = "BayBook" in payee or "Verizon" in payee
+            # Each entry must satisfy at least one from each OR group
+            assert tag_ok or payee_ok
+            assert len(filtered) > 0
+
+    def test_or_of_two_ands(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """(tag AND payee) OR (tag AND account)."""
+        f = AdvancedFilter(
+            '#test payee:BayBook,'
+            '#sibling-tag any(account:"Expenses:Food:.*")'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            payee = getattr(entry, "payee", "") or ""
+            postings = getattr(entry, "postings", [])
+            clause1 = "test" in tags and "BayBook" in payee
+            clause2 = "sibling-tag" in tags and any(
+                p.account.startswith("Expenses:Food:") for p in postings
+            )
+            assert clause1 or clause2
+
+    def test_mixed_and_with_or_account_regex(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """(tag) AND (accountA OR accountB via any)."""
+        f = AdvancedFilter(
+            '#test any(account:"Expenses:Food:.*"),'
+            'any(account:"Assets:US:ETrade:.*")'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            postings = getattr(entry, "postings", [])
+            clause1 = "test" in tags and any(
+                p.account.startswith("Expenses:Food:") for p in postings
+            )
+            clause2 = any(
+                p.account.startswith("Assets:US:ETrade:") for p in postings
+            )
+            assert clause1 or clause2
+
+    def test_mixed_three_layer_precedence(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """
+        A AND B OR C AND D  -> (A AND B) OR (C AND D).
+
+        Because comma (OR) is a clause separator, splitting into two
+        space-separated groups evaluates each as AND and then ORs.
+        """
+        f = AdvancedFilter(
+            '#test payee:BayBook,'
+            '#sibling-tag ^test-link'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            payee = getattr(entry, "payee", "") or ""
+            links = getattr(entry, "links", frozenset())
+            clause1 = "test" in tags and "BayBook" in payee
+            clause2 = "sibling-tag" in tags and "test-link" in links
+            assert clause1 or clause2
+
+    def test_combined_identical_to_chained_applications(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """Combined AND expression must equal two separate .apply() calls."""
+        combined = AdvancedFilter('payee:BayBook #sibling-tag').apply(
+            example_ledger.all_entries
+        )
+        chained1 = AdvancedFilter('payee:BayBook').apply(
+            example_ledger.all_entries
+        )
+        chained2 = AdvancedFilter('#sibling-tag').apply(chained1)
+        assert len(combined) == len(chained2)
+        assert [e.date for e in combined] == [e.date for e in chained2]

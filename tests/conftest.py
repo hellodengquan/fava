@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import os
 import re
 import shutil
@@ -99,6 +100,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Auto-approve/refresh failing snapshots (non-interactive approve)",
     )
     parser.addoption(
+        "--approve-snapshots",
+        action="store_true",
+        dest="APPROVE_SNAPSHOTS",
+        help="Approve all snapshot changes and write them to disk "
+        "(use when beancount field upgrades cause snapshot diffs)",
+    )
+    parser.addoption(
         "--typeguard-fixtures",
         action="store_true",
         dest="TYPEGUARD_FIXTURES",
@@ -117,7 +125,10 @@ def compare_snapshot(
 
     should_update = request.config.getoption("SNAPSHOT_UPDATE")
     should_refresh = request.config.getoption("SNAPSHOT_REFRESH")
+    should_approve = request.config.getoption("APPROVE_SNAPSHOTS")
+    should_any_write = should_update or should_refresh or should_approve
     seen_snapshots = set()
+    diff_log: list[str] = []
 
     def check_snapshot(name: str, expected: str, *, json: bool) -> None:
         snap_file = snap_dir / name
@@ -128,20 +139,58 @@ def compare_snapshot(
         contents_to_compare = (
             loads(contents) if json and contents else contents
         )
-        if should_update:
-            if expected_to_compare != contents_to_compare:
+
+        if expected_to_compare != contents_to_compare:
+            if should_any_write:
+                diff_lines = list(
+                    difflib.unified_diff(
+                        contents.splitlines(keepends=True),
+                        expected.splitlines(keepends=True),
+                        fromfile=f"a/__snapshots__/{name}",
+                        tofile=f"b/__snapshots__/{name}",
+                    )
+                )
+                if diff_lines:
+                    action = (
+                        "APPROVED" if should_approve else "UPDATED"
+                    )
+                    diff_log.append(f"\n=== {action}: __snapshots__/{name} ===")
+                    diff_log.extend(diff_lines[:200])
+                    if len(diff_lines) > 200:
+                        diff_log.append(
+                            f"... (truncated, {len(diff_lines) - 200} lines omitted)"
+                        )
                 snap_file.write_text(expected, "utf-8")
-        elif should_refresh:
-            if expected_to_compare != contents_to_compare:
-                snap_file.write_text(expected, "utf-8")
-        else:
-            assert expected_to_compare == contents_to_compare, (
-                "Snaphot test failed. Snapshots can be updated with "
-                "`pytest --snapshot-update` or auto-approved with "
-                "`pytest --snapshot-refresh`"
-            )
+            else:
+                msg_lines = [
+                    "Snaphot test failed. Use one of:",
+                    "  `pytest --snapshot-update`      - update snapshots",
+                    "  `pytest --snapshot-refresh`     - non-interactive refresh",
+                    "  `pytest --approve-snapshots`    - approve all changes + show diff log",
+                ]
+                if contents:
+                    msg_lines.append("\n--- Diff ---")
+                    msg_lines.extend(
+                        difflib.unified_diff(
+                            contents.splitlines(keepends=True),
+                            expected.splitlines(keepends=True),
+                            fromfile=f"a/__snapshots__/{name}",
+                            tofile=f"b/__snapshots__/{name}",
+                        )
+                    )
+                assert expected_to_compare == contents_to_compare, "\n".join(msg_lines)
 
     yield check_snapshot
+
+    if diff_log and (should_approve or should_refresh or should_update):
+        action_word = (
+            "APPROVED" if should_approve else "REFRESHED" if should_refresh else "UPDATED"
+        )
+        print(
+            f"\n=== Snapshot {action_word} Summary ({len(diff_log)} lines) ===",
+            file=sys.stderr,
+        )
+        print("".join(diff_log), file=sys.stderr)
 
     # Cleanup unused snapshot files if requested
     if request.config.getoption("SNAPSHOT_CLEAN"):

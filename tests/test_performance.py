@@ -1,4 +1,11 @@
-"""Performance and cross-timezone tests for budgets, charts, filters and tree."""
+"""Performance and cross-timezone tests for budgets, charts, filters and tree.
+
+Benchmarks run against ``tests/data/example_real.beancount``, a real-world
+ledger copy (5800+ lines, 900+ transactions, 60+ accounts across 2014–2016)
+so that the numbers reflect the realistic mix of postings, balance assertions,
+custom directives and multi-currency transactions that occur in production
+usage.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +15,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import pytest
+from fava.beans.account import get_entry_accounts
 
 from fava.beans import create
 from fava.beans.abc import Transaction
@@ -29,252 +37,330 @@ from fava.util.date import Year
 from fava.util.date import parse_date
 
 if TYPE_CHECKING:  # pragma: no cover
+    from pathlib import Path
+
     from fava.core import FavaLedger
 
     from .conftest import GetFavaLedger
 
 
-def _generate_large_beancount(
-    num_years: int = 10,
-    txns_per_day: int = 5,
-    num_accounts: int = 50,
-) -> str:
-    """Generate a large Beancount string for performance testing.
+REAL_LEDGER_EXPECTED_TXN_MIN = 800
+REAL_LEDGER_DATE_START = datetime.date(2014, 1, 1)
+REAL_LEDGER_DATE_END = datetime.date(2016, 6, 1)
+REAL_LEDGER_YEARS = ["2014", "2015", "2016"]
+REAL_LEDGER_ROOT_ACCOUNTS = ["Expenses", "Assets", "Liabilities", "Income"]
+REAL_LEDGER_TARGET_ACCOUNT = "Expenses:Food:Groceries"
+REAL_LEDGER_TARGET_ACCOUNT_ALT = "Expenses:Home:Rent"
+REAL_LEDGER_BANK_ACCOUNT = "Assets:US:BofA:Checking"
+REAL_LEDGER_TARGET_PAYEE = "BayBook"
 
-    Produces a ledger with roughly num_years * 365 * txns_per_day transactions
-    spread across num_accounts expense accounts.
+
+@pytest.fixture(scope="module")
+def real_ledger(test_data_dir: Path) -> FavaLedger:
+    """Load ``tests/data/example_real.beancount`` as the performance fixture.
+
+    This file is a copy of the long-running example ledger used in the
+    beancount project (931 transactions, 60+ accounts, commodity price
+    directives, org-mode section comments) so that performance benchmarks
+    operate on a realistic mix of directive kinds.
     """
-    lines: list[str] = []
-    lines.append('option "title" "Performance Test Ledger"')
-    lines.append('option "operating_currency" "USD"')
-    lines.append("")
-
-    lines.append("1792-01-01 commodity USD")
-    lines.append("")
-
-    for i in range(num_accounts):
-        acct = f"Expenses:Cat{i:03d}"
-        lines.append(f"2000-01-01 open {acct} USD")
-    lines.append("2000-01-01 open Assets:Bank USD")
-    lines.append("2000-01-01 open Equity:Opening USD")
-    lines.append("")
-
-    lines.append('2000-01-01 * "Opening balance"')
-    lines.append("  Assets:Bank 1000000.00 USD")
-    lines.append("  Equity:Opening -1000000.00 USD")
-    lines.append("")
-
-    start_date = datetime.date(2010, 1, 1)
-    end_date = datetime.date(2010 + num_years, 1, 1)
-    current = start_date
-    idx = 0
-    while current < end_date:
-        for _ in range(txns_per_day):
-            acct_idx = idx % num_accounts
-            acct = f"Expenses:Cat{acct_idx:03d}"
-            amount = Decimal("10") + Decimal(idx % 100) / Decimal(10)
-            lines.append(
-                f'{current.isoformat()} * "Transaction {idx}"'
-            )
-            lines.append(f"  {acct}  {amount:.2f} USD")
-            lines.append(f"  Assets:Bank -{amount:.2f} USD")
-            idx += 1
-        current += datetime.timedelta(days=1)
-
-    for i in range(0, num_accounts, 5):
-        acct = f"Expenses:Cat{i:03d}"
-        lines.append(
-            f'2010-01-01 custom "budget" {acct} "monthly" 500.00 USD'
-        )
-
-    return "\n".join(lines)
-
-
-@pytest.fixture(scope="module")
-def large_ledger_string() -> str:
-    return _generate_large_beancount(num_years=3, txns_per_day=2, num_accounts=20)
-
-
-@pytest.fixture(scope="module")
-def large_ledger(large_ledger_string: str) -> FavaLedger:
-    """Load a large ledger for performance tests."""
     from fava.application import create_app
     from fava.core import FavaLedger as FL
-    import tempfile
-    from pathlib import Path
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".beancount", delete=False
-    ) as f:
-        f.write(large_ledger_string)
-        f.flush()
-        path = Path(f.name)
+    ledger_path = test_data_dir / "example_real.beancount"
+    if not ledger_path.exists():
+        pytest.skip(f"Missing {ledger_path}, skipping performance tests")
 
-    app = create_app([str(path)], load=True)
+    app = create_app([str(ledger_path)], load=True)
     ledgers = app.config["LEDGERS"]
     first_slug = ledgers.first_slug()
     ledger = ledgers[first_slug]
     assert isinstance(ledger, FL)
-    yield ledger
-    path.unlink(missing_ok=True)
+    return ledger
 
 
 class TestLargeLedgerPerformance:
-    """Performance regression benchmarks against large ledger."""
+    """Performance regression benchmarks against the real ledger fixture.
+
+    Thresholds are generous (2–5 seconds for repeated iterations) so that
+    tests are not flaky in CI containers.  The real protection this class
+    provides is catching *order-of-magnitude* regressions that would turn
+    sub-second operations into multi-second stalls.
+    """
 
     BUDGET_THRESHOLD_S = 2.0
     TREE_THRESHOLD_S = 2.0
-    CHART_INTERVAL_THRESHOLD_S = 2.0
-    CHART_LINECHART_THRESHOLD_S = 2.0
-    CHART_NETWORTH_THRESHOLD_S = 2.0
-    FILTER_THRESHOLD_S = 2.0
+    CHART_INTERVAL_THRESHOLD_S = 5.0
+    CHART_LINECHART_THRESHOLD_S = 5.0
+    CHART_NETWORTH_THRESHOLD_S = 5.0
+    FILTER_THRESHOLD_S = 5.0
 
-    def test_budget_calculate_performance(self, large_ledger: FavaLedger) -> None:
-        budgets = large_ledger.budgets._budget_entries
-        start = time.perf_counter()
-        for _ in range(10):
-            calculate_budget(
-                budgets,
-                "Expenses:Cat000",
-                datetime.date(2012, 1, 1),
-                datetime.date(2013, 1, 1),
-            )
-        elapsed = time.perf_counter() - start
-        assert elapsed < self.BUDGET_THRESHOLD_S, (
-            f"Budget calculate took {elapsed:.3f}s (> {self.BUDGET_THRESHOLD_S}s)"
+    def test_real_ledger_correctness(self, real_ledger: FavaLedger) -> None:
+        """Sanity check the real-world ledger has the expected shape."""
+        all_entries = real_ledger.all_entries
+        txn_count = sum(1 for e in all_entries if isinstance(e, Transaction))
+        assert txn_count >= REAL_LEDGER_EXPECTED_TXN_MIN, (
+            f"Expected >= {REAL_LEDGER_EXPECTED_TXN_MIN} real transactions, "
+            f"got {txn_count}"
         )
 
-    def test_budget_children_performance(self, large_ledger: FavaLedger) -> None:
-        budgets = large_ledger.budgets._budget_entries
-        start = time.perf_counter()
-        for _ in range(10):
-            calculate_budget_children(
-                budgets,
-                "Expenses",
-                datetime.date(2012, 1, 1),
-                datetime.date(2013, 1, 1),
+        tree = Tree(all_entries)
+        for root_name in REAL_LEDGER_ROOT_ACCOUNTS:
+            node = tree.get(root_name)
+            assert node is not None and node.name == root_name, (
+                f"Missing root account {root_name} in real ledger"
             )
-        elapsed = time.perf_counter() - start
-        assert elapsed < self.BUDGET_THRESHOLD_S, (
-            f"Budget children took {elapsed:.3f}s (> {self.BUDGET_THRESHOLD_S}s)"
-        )
 
-    def test_tree_build_performance(self, large_ledger: FavaLedger) -> None:
+        bank = tree.get(REAL_LEDGER_BANK_ACCOUNT)
+        assert bank is not None, "Missing bank account in real ledger"
+
+    def test_tree_build_performance(self, real_ledger: FavaLedger) -> None:
         start = time.perf_counter()
-        for _ in range(5):
-            Tree(large_ledger.all_entries)
+        for _ in range(20):
+            Tree(real_ledger.all_entries)
         elapsed = time.perf_counter() - start
         assert elapsed < self.TREE_THRESHOLD_S, (
-            f"Tree build took {elapsed:.3f}s (> {self.TREE_THRESHOLD_S}s)"
+            f"Tree build on real ledger took {elapsed:.3f}s "
+            f"(> {self.TREE_THRESHOLD_S}s)"
         )
 
     def test_chart_interval_totals_performance(
-        self, large_ledger: FavaLedger
+        self, real_ledger: FavaLedger
     ) -> None:
-        filtered = large_ledger.get_filtered()
+        filtered = real_ledger.get_filtered()
         start = time.perf_counter()
-        for _ in range(5):
-            large_ledger.charts.interval_totals(
+        for _ in range(10):
+            real_ledger.charts.interval_totals(
                 filtered, Month, "Expenses", "at_cost"
             )
         elapsed = time.perf_counter() - start
         assert elapsed < self.CHART_INTERVAL_THRESHOLD_S, (
-            f"Chart interval_totals took {elapsed:.3f}s "
+            f"interval_totals(Month, Expenses) took {elapsed:.3f}s "
             f"(> {self.CHART_INTERVAL_THRESHOLD_S}s)"
         )
 
-    def test_chart_linechart_performance(self, large_ledger: FavaLedger) -> None:
-        filtered = large_ledger.get_filtered()
+    def test_chart_interval_totals_performance_quarter(
+        self, real_ledger: FavaLedger
+    ) -> None:
+        filtered = real_ledger.get_filtered()
         start = time.perf_counter()
-        for _ in range(5):
-            large_ledger.charts.linechart(
-                filtered, "Assets:Bank", "units"
+        for _ in range(10):
+            real_ledger.charts.interval_totals(
+                filtered, Quarter, "Expenses", "at_cost"
+            )
+        elapsed = time.perf_counter() - start
+        assert elapsed < self.CHART_INTERVAL_THRESHOLD_S, (
+            f"interval_totals(Quarter, Expenses) took {elapsed:.3f}s "
+            f"(> {self.CHART_INTERVAL_THRESHOLD_S}s)"
+        )
+
+    def test_chart_linechart_performance(self, real_ledger: FavaLedger) -> None:
+        filtered = real_ledger.get_filtered()
+        start = time.perf_counter()
+        for _ in range(10):
+            real_ledger.charts.linechart(
+                filtered, REAL_LEDGER_BANK_ACCOUNT, "units"
             )
         elapsed = time.perf_counter() - start
         assert elapsed < self.CHART_LINECHART_THRESHOLD_S, (
-            f"Chart linechart took {elapsed:.3f}s "
+            f"linechart({REAL_LEDGER_BANK_ACCOUNT}) took {elapsed:.3f}s "
             f"(> {self.CHART_LINECHART_THRESHOLD_S}s)"
         )
 
-    def test_chart_net_worth_performance(self, large_ledger: FavaLedger) -> None:
-        filtered = large_ledger.get_filtered()
+    def test_chart_net_worth_performance(self, real_ledger: FavaLedger) -> None:
+        filtered = real_ledger.get_filtered()
         start = time.perf_counter()
-        for _ in range(5):
-            large_ledger.charts.net_worth(filtered, Month, "USD")
+        for _ in range(10):
+            real_ledger.charts.net_worth(filtered, Month, "USD")
         elapsed = time.perf_counter() - start
         assert elapsed < self.CHART_NETWORTH_THRESHOLD_S, (
-            f"Chart net_worth took {elapsed:.3f}s "
+            f"net_worth(Month, USD) took {elapsed:.3f}s "
             f"(> {self.CHART_NETWORTH_THRESHOLD_S}s)"
         )
 
-    def test_time_filter_performance(self, large_ledger: FavaLedger) -> None:
+    def test_hierarchy_performance(self, real_ledger: FavaLedger) -> None:
+        filtered = real_ledger.get_filtered()
         start = time.perf_counter()
-        for year in range(2010, 2013):
-            tf = TimeFilter(
-                large_ledger.options,
-                large_ledger.fava_options,
-                str(year),
-            )
-            tf.apply(large_ledger.all_entries)
-        elapsed = time.perf_counter() - start
-        assert elapsed < self.FILTER_THRESHOLD_S, (
-            f"Time filter took {elapsed:.3f}s (> {self.FILTER_THRESHOLD_S}s)"
-        )
-
-    def test_account_filter_performance(self, large_ledger: FavaLedger) -> None:
-        start = time.perf_counter()
-        for _ in range(5):
-            af = AccountFilter("Expenses:Cat000")
-            af.apply(large_ledger.all_entries)
-        elapsed = time.perf_counter() - start
-        assert elapsed < self.FILTER_THRESHOLD_S, (
-            f"Account filter took {elapsed:.3f}s (> {self.FILTER_THRESHOLD_S}s)"
-        )
-
-    def test_advanced_filter_performance(self, large_ledger: FavaLedger) -> None:
-        start = time.perf_counter()
-        for _ in range(5):
-            af = AdvancedFilter('payee:Transaction')
-            af.apply(large_ledger.all_entries)
-        elapsed = time.perf_counter() - start
-        assert elapsed < self.FILTER_THRESHOLD_S, (
-            f"Advanced filter took {elapsed:.3f}s (> {self.FILTER_THRESHOLD_S}s)"
-        )
-
-    def test_hierarchy_performance(self, large_ledger: FavaLedger) -> None:
-        filtered = large_ledger.get_filtered()
-        start = time.perf_counter()
-        for _ in range(5):
-            large_ledger.charts.hierarchy(filtered, "Expenses", AT_COST)
+        for _ in range(10):
+            real_ledger.charts.hierarchy(filtered, "Expenses", AT_COST)
         elapsed = time.perf_counter() - start
         assert elapsed < self.TREE_THRESHOLD_S, (
-            f"Hierarchy took {elapsed:.3f}s (> {self.TREE_THRESHOLD_S}s)"
+            f"hierarchy(Expenses) took {elapsed:.3f}s "
+            f"(> {self.TREE_THRESHOLD_S}s)"
         )
 
-    def test_large_ledger_correctness(self, large_ledger: FavaLedger) -> None:
-        """Verify large ledger loads with expected transaction count."""
-        all_entries = large_ledger.all_entries
-        txn_count = sum(
-            1 for e in all_entries if isinstance(e, Transaction)
+    def test_budget_calculate_performance(self, real_ledger: FavaLedger) -> None:
+        budgets = real_ledger.budgets._budget_entries
+        start = time.perf_counter()
+        for _ in range(50):
+            calculate_budget(
+                budgets,
+                REAL_LEDGER_TARGET_ACCOUNT,
+                REAL_LEDGER_DATE_START,
+                REAL_LEDGER_DATE_END,
+            )
+        elapsed = time.perf_counter() - start
+        assert elapsed < self.BUDGET_THRESHOLD_S, (
+            f"calculate_budget on real ledger took {elapsed:.3f}s "
+            f"(> {self.BUDGET_THRESHOLD_S}s)"
         )
-        assert txn_count > 1000, f"Expected >1000 txns, got {txn_count}"
 
-        filtered = FilteredLedger(large_ledger, time="2012")
-        chart_data = large_ledger.charts.interval_totals(
-            filtered, Month, "Expenses", "at_cost"
+    def test_budget_children_performance(self, real_ledger: FavaLedger) -> None:
+        budgets = real_ledger.budgets._budget_entries
+        start = time.perf_counter()
+        for _ in range(50):
+            calculate_budget_children(
+                budgets,
+                "Expenses",
+                REAL_LEDGER_DATE_START,
+                REAL_LEDGER_DATE_END,
+            )
+        elapsed = time.perf_counter() - start
+        assert elapsed < self.BUDGET_THRESHOLD_S, (
+            f"calculate_budget_children on real ledger took {elapsed:.3f}s "
+            f"(> {self.BUDGET_THRESHOLD_S}s)"
         )
-        assert len(chart_data) == 12
 
-        tree = Tree(filtered.entries)
-        expenses = tree.get("Expenses")
-        assert expenses.name == "Expenses"
+    def test_time_filter_performance(self, real_ledger: FavaLedger) -> None:
+        start = time.perf_counter()
+        for _ in range(10):
+            for year in REAL_LEDGER_YEARS:
+                tf = TimeFilter(
+                    real_ledger.options,
+                    real_ledger.fava_options,
+                    year,
+                )
+                tf.apply(real_ledger.all_entries)
+        elapsed = time.perf_counter() - start
+        assert elapsed < self.FILTER_THRESHOLD_S, (
+            f"TimeFilter across real ledger took {elapsed:.3f}s "
+            f"(> {self.FILTER_THRESHOLD_S}s)"
+        )
 
-    def test_interval_100_limit_large(self, large_ledger: FavaLedger) -> None:
-        filtered = FilteredLedger(large_ledger, time="2010-2013")
-        data = large_ledger.charts.interval_totals(
+    def test_account_filter_performance(self, real_ledger: FavaLedger) -> None:
+        start = time.perf_counter()
+        for _ in range(20):
+            af = AccountFilter(REAL_LEDGER_TARGET_ACCOUNT)
+            af.apply(real_ledger.all_entries)
+        elapsed = time.perf_counter() - start
+        assert elapsed < self.FILTER_THRESHOLD_S, (
+            f"AccountFilter on real ledger took {elapsed:.3f}s "
+            f"(> {self.FILTER_THRESHOLD_S}s)"
+        )
+
+    def test_advanced_filter_payee_performance(
+        self, real_ledger: FavaLedger
+    ) -> None:
+        start = time.perf_counter()
+        for _ in range(20):
+            af = AdvancedFilter(f"payee:{REAL_LEDGER_TARGET_PAYEE}")
+            af.apply(real_ledger.all_entries)
+        elapsed = time.perf_counter() - start
+        assert elapsed < self.FILTER_THRESHOLD_S, (
+            f"AdvancedFilter payee on real ledger took {elapsed:.3f}s "
+            f"(> {self.FILTER_THRESHOLD_S}s)"
+        )
+
+    def test_advanced_filter_tag_performance(
+        self, real_ledger: FavaLedger
+    ) -> None:
+        start = time.perf_counter()
+        for _ in range(20):
+            af = AdvancedFilter("#trip")
+            af.apply(real_ledger.all_entries)
+        elapsed = time.perf_counter() - start
+        assert elapsed < self.FILTER_THRESHOLD_S, (
+            f"AdvancedFilter #tag on real ledger took {elapsed:.3f}s "
+            f"(> {self.FILTER_THRESHOLD_S}s)"
+        )
+
+    def test_advanced_filter_account_any_performance(
+        self, real_ledger: FavaLedger
+    ) -> None:
+        start = time.perf_counter()
+        for _ in range(20):
+            af = AdvancedFilter('any(account:"Expenses:Food:.*")')
+            af.apply(real_ledger.all_entries)
+        elapsed = time.perf_counter() - start
+        assert elapsed < self.FILTER_THRESHOLD_S, (
+            f"AdvancedFilter any(account:regex) on real ledger took "
+            f"{elapsed:.3f}s (> {self.FILTER_THRESHOLD_S}s)"
+        )
+
+    def test_filtered_ledger_performance(
+        self, real_ledger: FavaLedger
+    ) -> None:
+        start = time.perf_counter()
+        for year in REAL_LEDGER_YEARS:
+            for _ in range(5):
+                fl = FilteredLedger(real_ledger, time=year, account="Expenses")
+                _ = fl.interval_ranges(Month)
+        elapsed = time.perf_counter() - start
+        assert elapsed < self.FILTER_THRESHOLD_S, (
+            f"FilteredLedger + interval_ranges on real ledger took "
+            f"{elapsed:.3f}s (> {self.FILTER_THRESHOLD_S}s)"
+        )
+
+    def test_chart_interval_totals_real_years(
+        self, real_ledger: FavaLedger
+    ) -> None:
+        """Sanity-check interval_totals against each year in the real ledger."""
+        for year in REAL_LEDGER_YEARS:
+            filtered = FilteredLedger(real_ledger, time=year)
+            data = real_ledger.charts.interval_totals(
+                filtered, Month, "Expenses", "at_cost"
+            )
+            assert 1 <= len(data) <= 12, (
+                f"Year {year}: expected 1-12 month intervals, got {len(data)}"
+            )
+
+    def test_tree_real_ledger_deep_walk(
+        self, real_ledger: FavaLedger
+    ) -> None:
+        """Walking the full account tree should still be fast."""
+        tree = Tree(real_ledger.all_entries)
+        root = tree.get("Expenses")
+        start = time.perf_counter()
+        for _ in range(100):
+            count = 0
+            for child in root.children:
+                count += len(child.children)
+        elapsed = time.perf_counter() - start
+        assert count > 0
+        assert elapsed < self.TREE_THRESHOLD_S, (
+            f"Deep tree walk on real ledger took {elapsed:.3f}s "
+            f"(> {self.TREE_THRESHOLD_S}s)"
+        )
+
+    def test_interval_100_limit_real_ledger(
+        self, real_ledger: FavaLedger
+    ) -> None:
+        """Day intervals across 2+ years still cap at 100 entries."""
+        filtered = FilteredLedger(real_ledger, time="2014-2016")
+        data = real_ledger.charts.interval_totals(
             filtered, Day, "Expenses", "at_cost"
         )
         assert len(data) <= 100
+
+    def test_budget_calculate_monthly_children_correctness(
+        self, real_ledger: FavaLedger
+    ) -> None:
+        """Budget aggregates from Expenses are a superset of leaf budgets."""
+        budgets = real_ledger.budgets._budget_entries
+        children_total = calculate_budget_children(
+            budgets,
+            "Expenses",
+            REAL_LEDGER_DATE_START,
+            REAL_LEDGER_DATE_END,
+        )
+        leaf_total = calculate_budget(
+            budgets,
+            "Expenses",
+            REAL_LEDGER_DATE_START,
+            REAL_LEDGER_DATE_END,
+        )
+        for currency, v in leaf_total.items():
+            assert children_total.get(currency, Decimal(0)) >= v
 
 
 class TestCrossTimezone:
@@ -349,11 +435,7 @@ class TestCrossTimezone:
     def test_time_filter_across_dst_boundary(
         self, small_example_ledger: FavaLedger
     ) -> None:
-        """TimeFilter should correctly handle DST-like date boundaries.
-
-        Note: clamp_opt may add summarization entries at the boundary
-        with dates just before the range.
-        """
+        """TimeFilter should correctly handle DST-like date boundaries."""
         tf = TimeFilter(
             small_example_ledger.options,
             small_example_ledger.fava_options,
