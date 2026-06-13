@@ -9,6 +9,7 @@ from dataclasses import asdict
 from dataclasses import dataclass
 from datetime import date
 from datetime import datetime
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,38 @@ if TYPE_CHECKING:  # pragma: no cover
     from fava.core.tree import SerialisedTreeNode
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SnapshotRetention:
+    """Snapshot retention policy configuration.
+
+    Attributes:
+        keep_last_n: Keep the N most recent snapshots per report type.
+                     0 or None means no limit.
+        keep_days: Keep snapshots created within the last N days.
+                   0 or None means no limit.
+        per_report_type: Whether the retention policy applies per report type
+                         or globally across all report types.
+    """
+
+    keep_last_n: int | None = None
+    keep_days: int | None = None
+    per_report_type: bool = True
+
+    def validate(self) -> None:
+        """Validate the retention policy configuration."""
+        if self.keep_last_n is not None and self.keep_last_n < 0:
+            raise ValueError("keep_last_n must be non-negative")
+        if self.keep_days is not None and self.keep_days < 0:
+            raise ValueError("keep_days must be non-negative")
+        if (
+            self.keep_last_n in (None, 0)
+            and self.keep_days in (None, 0)
+        ):
+            raise ValueError(
+                "At least one of keep_last_n or keep_days must be set",
+            )
 
 
 @dataclass(frozen=True)
@@ -94,8 +127,23 @@ class SnapshotStore(FavaModule):
         trees: Sequence[SerialisedTreeNode],
         budgets: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
         holdings: Sequence[Mapping[str, Any]] | None = None,
+        auto_clean: SnapshotRetention | None = None,
     ) -> Snapshot:
-        """Save a new snapshot."""
+        """Save a new snapshot.
+
+        Args:
+            name: Name of the snapshot.
+            report_type: Type of report the snapshot is for.
+            filters: Filters used when creating the snapshot.
+            balances: Account balances map.
+            trees: Serialised tree nodes.
+            budgets: Budget data (optional).
+            holdings: Holdings data (optional).
+            auto_clean: Optional retention policy to apply after saving.
+
+        Returns:
+            The saved snapshot.
+        """
         snapshot_id = uuid.uuid4().hex[:12]
         created_at = datetime.now().isoformat(timespec="seconds")
         data = SnapshotData(
@@ -113,6 +161,10 @@ class SnapshotStore(FavaModule):
             data=data,
         )
         self._write_snapshot(snapshot)
+
+        if auto_clean is not None:
+            self.clean(auto_clean)
+
         return snapshot
 
     def _write_snapshot(self, snapshot: Snapshot) -> None:
@@ -174,6 +226,118 @@ class SnapshotStore(FavaModule):
             path.unlink()
             return True
         return False
+
+    def clean(self, retention: SnapshotRetention) -> dict[str, Any]:
+        """Clean up snapshots according to the retention policy.
+
+        Args:
+            retention: The retention policy to apply.
+
+        Returns:
+            A dict with 'deleted' (list of deleted snapshot IDs)
+            and 'kept' (list of kept snapshot IDs).
+        """
+        retention.validate()
+
+        all_snapshots = self._load_all_snapshots_meta()
+        if not all_snapshots:
+            return {"deleted": [], "kept": []}
+
+        to_delete: set[str] = set()
+        to_keep: set[str] = set()
+
+        if retention.per_report_type:
+            by_type: dict[str, list[Mapping[str, Any]]] = {}
+            for snap in all_snapshots:
+                rtype = snap.get("report_type", "unknown")
+                by_type.setdefault(rtype, []).append(snap)
+            for snaps in by_type.values():
+                d, k = self._apply_retention(snaps, retention)
+                to_delete.update(d)
+                to_keep.update(k)
+        else:
+            d, k = self._apply_retention(all_snapshots, retention)
+            to_delete.update(d)
+            to_keep.update(k)
+
+        deleted = []
+        for sid in to_delete:
+            if self.delete(sid):
+                deleted.append(sid)
+
+        return {
+            "deleted": sorted(deleted),
+            "kept": sorted(to_keep - to_delete),
+        }
+
+    def _load_all_snapshots_meta(
+        self,
+    ) -> list[Mapping[str, Any]]:
+        """Load metadata for all snapshots, sorted by created_at desc."""
+        snapshots = []
+        if not self.snapshots_dir.exists():
+            return snapshots
+        for path in self.snapshots_dir.glob("*.json"):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                snapshots.append(
+                    {
+                        "id": raw["id"],
+                        "name": raw["name"],
+                        "created_at": raw["created_at"],
+                        "report_type": raw["data"]["report_type"],
+                    },
+                )
+            except (json.JSONDecodeError, KeyError):
+                log.warning("Failed to read snapshot file: %s", path)
+        snapshots.sort(key=lambda s: s["created_at"], reverse=True)
+        return snapshots
+
+    @staticmethod
+    def _apply_retention(
+        snapshots: Sequence[Mapping[str, Any]],
+        retention: SnapshotRetention,
+    ) -> tuple[set[str], set[str]]:
+        """Apply retention policy to a list of snapshots.
+
+        Args:
+            snapshots: List of snapshot metadata dicts, sorted newest first.
+            retention: The retention policy.
+
+        Returns:
+            Tuple of (to_delete set, to_keep set) of snapshot IDs.
+        """
+        to_keep: set[str] = set()
+        to_delete: set[str] = set()
+
+        if not snapshots:
+            return to_delete, to_keep
+
+        if retention.keep_last_n and retention.keep_last_n > 0:
+            for i, snap in enumerate(snapshots):
+                if i < retention.keep_last_n:
+                    to_keep.add(snap["id"])
+                else:
+                    to_delete.add(snap["id"])
+        else:
+            for snap in snapshots:
+                to_keep.add(snap["id"])
+
+        if retention.keep_days and retention.keep_days > 0:
+            cutoff = datetime.now() - timedelta(days=retention.keep_days)
+            for snap in snapshots:
+                sid = snap["id"]
+                try:
+                    created = datetime.fromisoformat(snap["created_at"])
+                except (ValueError, KeyError):
+                    continue
+                if created < cutoff:
+                    to_delete.add(sid)
+                    to_keep.discard(sid)
+                else:
+                    to_keep.add(sid)
+
+        return to_delete, to_keep
 
     def compare(
         self,

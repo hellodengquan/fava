@@ -1016,3 +1016,36 @@ def delete_snapshot(snapshot_id: str) -> str:
     if not deleted:
         raise NotFoundError
     return f"Deleted snapshot {snapshot_id}."
+
+
+@api_endpoint
+def put_snapshot_clean() -> Mapping[str, Any]:
+    """Clean up snapshots according to a retention policy.
+
+    Request body JSON keys:
+        keep_last_n: Keep the N most recent snapshots (optional).
+        keep_days: Keep snapshots from the last N days (optional).
+        per_report_type: Whether to apply per report type (default true).
+
+    Returns:
+        Dict with 'deleted' and 'kept' lists of snapshot IDs.
+    """
+    from fava.core.snapshots import SnapshotRetention
+
+    body = request.get_json(silent=True) or {}
+    keep_last_n = body.get("keep_last_n")
+    keep_days = body.get("keep_days")
+    per_report_type = body.get("per_report_type", True)
+
+    if keep_last_n is not None:
+        keep_last_n = int(keep_last_n)
+    if keep_days is not None:
+        keep_days = int(keep_days)
+    per_report_type = bool(per_report_type)
+
+    retention = SnapshotRetention(
+        keep_last_n=keep_last_n,
+        keep_days=keep_days,
+        per_report_type=per_report_type,
+    )
+    return g.ledger.snapshots.clean(retention)

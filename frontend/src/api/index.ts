@@ -77,6 +77,7 @@ type PutEndpoint =
   | "format_source"
   | "move"
   | "snapshot"
+  | "snapshot_clean"
   | "source"
   | "source_slice"
   | "upload_import_file";
@@ -458,3 +459,20 @@ export const delete_snapshot = define_endpoint(
   ["snapshot_id"],
   "DELETE",
 );
+
+export async function put_snapshot_clean(params: {
+  keep_last_n?: number;
+  keep_days?: number;
+  per_report_type?: boolean;
+}): Promise<{ deleted: string[]; kept: string[] }> {
+  const url = api_url("snapshot_clean");
+  return fetch_and_handle_api_call(
+    url,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    },
+    object({ deleted: array(string), kept: array(string) }),
+  );
+}

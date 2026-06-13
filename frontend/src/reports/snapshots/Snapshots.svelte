@@ -3,6 +3,7 @@
     delete_snapshot,
     get_snapshot_compare,
     get_snapshots,
+    put_snapshot_clean,
   } from "../../api/index.ts";
   import type { SnapshotMeta } from "../../api/validators.ts";
   import { _ } from "../../i18n.ts";
@@ -20,6 +21,11 @@
   let compare_result = $state<CompareResult | null>(null);
   let loading = $state(false);
   let comparing = $state(false);
+  let show_clean_dialog = $state(false);
+  let clean_keep_last_n = $state<number>(10);
+  let clean_keep_days = $state<number>(30);
+  let clean_per_report_type = $state<boolean>(true);
+  let cleaning = $state(false);
 
   const report_type_labels: Record<string, string> = {
     balance_sheet: _("Balance Sheet"),
@@ -73,6 +79,34 @@
       }
     } catch (error) {
       notify_err(error);
+    }
+  }
+
+  async function clean_snapshots() {
+    if (clean_keep_last_n <= 0 && clean_keep_days <= 0) {
+      notify(_("Please set at least one retention policy."), "warning");
+      return;
+    }
+    cleaning = true;
+    try {
+      const result = await put_snapshot_clean({
+        keep_last_n: clean_keep_last_n > 0 ? clean_keep_last_n : undefined,
+        keep_days: clean_keep_days > 0 ? clean_keep_days : undefined,
+        per_report_type: clean_per_report_type,
+      });
+      notify(
+        _("Cleaned {deleted} snapshots, kept {kept}.").replace(
+          "{deleted}",
+          String(result.deleted.length),
+        ).replace("{kept}", String(result.kept.length)),
+      );
+      await load_snapshots();
+      show_clean_dialog = false;
+      compare_result = null;
+    } catch (error) {
+      notify_err(error);
+    } finally {
+      cleaning = false;
     }
   }
 
@@ -159,9 +193,73 @@
         >
           {comparing ? _("Comparing...") : _("Compare Selected Snapshots")}
         </button>
+        <button
+          type="button"
+          class="clean-btn"
+          onclick={() => (show_clean_dialog = true)}
+        >
+          🗑 {_("Clean Up...")}
+        </button>
       </div>
     {/if}
   </div>
+
+  {#if show_clean_dialog}
+    <div class="modal-overlay" onclick={() => (show_clean_dialog = false)}>
+      <div class="modal-dialog" onclick={(e) => e.stopPropagation()}>
+        <h3>{_("Clean Up Snapshots")}</h3>
+        <p class="modal-desc">
+          {_("Delete old snapshots according to the retention policy below.")}
+        </p>
+        <div class="form-row">
+          <label>
+            {_("Keep last N snapshots per report type:")}
+            <input
+              type="number"
+              min="0"
+              bind:value={clean_keep_last_n}
+            />
+          </label>
+        </div>
+        <div class="form-row">
+          <label>
+            {_("Keep snapshots from last N days:")}
+            <input
+              type="number"
+              min="0"
+              bind:value={clean_keep_days}
+            />
+          </label>
+        </div>
+        <div class="form-row">
+          <label>
+            <input
+              type="checkbox"
+              bind:checked={clean_per_report_type}
+            />
+            {_("Apply per report type")}
+          </label>
+        </div>
+        <div class="form-actions">
+          <button
+            type="button"
+            class="cancel-btn"
+            onclick={() => (show_clean_dialog = false)}
+          >
+            {_("Cancel")}
+          </button>
+          <button
+            type="button"
+            class="confirm-btn"
+            disabled={cleaning}
+            onclick={clean_snapshots}
+          >
+            {cleaning ? _("Cleaning...") : _("Clean Up")}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
 
   {#if compare_result}
     <div class="compare-result-section">
@@ -318,6 +416,8 @@
 
   .compare-actions {
     margin-top: 1rem;
+    display: flex;
+    gap: 0.5rem;
   }
 
   .compare-btn {
@@ -336,6 +436,115 @@
   }
 
   .compare-btn:not(:disabled):hover {
+    opacity: 0.9;
+  }
+
+  .clean-btn {
+    padding: 0.5em 1.5em;
+    color: var(--text);
+    background-color: var(--background);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 0.95em;
+  }
+
+  .clean-btn:hover {
+    border-color: var(--link-color);
+  }
+
+  .modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+
+  .modal-dialog {
+    background: var(--background);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1.5rem;
+    min-width: 360px;
+    max-width: 90vw;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  }
+
+  .modal-dialog h3 {
+    margin-top: 0;
+    margin-bottom: 0.5rem;
+  }
+
+  .modal-desc {
+    color: var(--gray, #666);
+    font-size: 0.9em;
+    margin-bottom: 1rem;
+  }
+
+  .form-row {
+    margin-bottom: 0.8rem;
+  }
+
+  .form-row label {
+    display: block;
+    font-size: 0.9em;
+    margin-bottom: 0.3rem;
+  }
+
+  .form-row input[type="number"] {
+    width: 100%;
+    padding: 0.4em 0.6em;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--background);
+    color: var(--text);
+  }
+
+  .form-row input[type="checkbox"] {
+    margin-right: 0.5em;
+  }
+
+  .form-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 1.5rem;
+  }
+
+  .cancel-btn {
+    padding: 0.5em 1.2em;
+    background: var(--background);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    cursor: pointer;
+  }
+
+  .cancel-btn:hover {
+    border-color: var(--gray, #888);
+  }
+
+  .confirm-btn {
+    padding: 0.5em 1.2em;
+    background: var(--error-text, #c00);
+    color: white;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+
+  .confirm-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .confirm-btn:not(:disabled):hover {
     opacity: 0.9;
   }
 
