@@ -145,3 +145,295 @@ def test_budgets_children(budgets_doc: BudgetDict) -> None:
         date(2017, 1, 2),
     )
     assert budget["USD"] == Decimal("2.00")
+
+
+def test_budgets_empty_dict() -> None:
+    """Test budget calculation with empty budget dictionary."""
+    empty_budgets: BudgetDict = {}
+
+    result = calculate_budget(
+        empty_budgets,
+        "Expenses:Test",
+        date(2020, 1, 1),
+        date(2020, 1, 2),
+    )
+    assert result == {}
+
+    result_children = calculate_budget_children(
+        empty_budgets,
+        "Expenses",
+        date(2020, 1, 1),
+        date(2020, 1, 2),
+    )
+    assert result_children == {}
+
+
+def test_budgets_nonexistent_account(budgets_doc: BudgetDict) -> None:
+    """
+    2020-01-01 custom "budget" Expenses:Food "daily" 50.00 USD"""
+
+    result = calculate_budget(
+        budgets_doc,
+        "Expenses:NonExistent",
+        date(2020, 1, 1),
+        date(2020, 1, 2),
+    )
+    assert result == {}
+
+    result_children = calculate_budget_children(
+        budgets_doc,
+        "NonExistentRoot",
+        date(2020, 1, 1),
+        date(2020, 1, 2),
+    )
+    assert result_children == {}
+
+
+def test_budgets_date_before_start(budgets_doc: BudgetDict) -> None:
+    """
+    2020-06-01 custom "budget" Expenses:Food "daily" 50.00 USD"""
+
+    result = calculate_budget(
+        budgets_doc,
+        "Expenses:Food",
+        date(2020, 1, 1),
+        date(2020, 1, 2),
+    )
+    assert result == {}
+
+    result_partial = calculate_budget(
+        budgets_doc,
+        "Expenses:Food",
+        date(2020, 5, 30),
+        date(2020, 6, 2),
+    )
+    assert "USD" in result_partial
+    assert result_partial["USD"] == Decimal("50.00")
+
+
+def test_budgets_invalid_date_range(budgets_doc: BudgetDict) -> None:
+    """
+    2020-01-01 custom "budget" Expenses:Food "daily" 50.00 USD"""
+
+    result_same_day = calculate_budget(
+        budgets_doc,
+        "Expenses:Food",
+        date(2020, 1, 1),
+        date(2020, 1, 1),
+    )
+    assert result_same_day == {}
+
+    result_reversed = calculate_budget(
+        budgets_doc,
+        "Expenses:Food",
+        date(2020, 1, 2),
+        date(2020, 1, 1),
+    )
+    assert result_reversed == {}
+
+
+def test_budgets_multiple_currencies(budgets_doc: BudgetDict) -> None:
+    """
+    2020-01-01 custom "budget" Expenses:Food "daily" 50.00 USD
+    2020-01-01 custom "budget" Expenses:Food "daily" 40.00 EUR
+    2020-01-01 custom "budget" Expenses:Food "daily" 300.00 CNY"""
+
+    result = calculate_budget(
+        budgets_doc,
+        "Expenses:Food",
+        date(2020, 1, 1),
+        date(2020, 1, 2),
+    )
+    assert result["USD"] == Decimal("50.00")
+    assert result["EUR"] == Decimal("40.00")
+    assert result["CNY"] == Decimal("300.00")
+    assert len(result) == 3
+
+
+def test_budgets_updated_over_time(budgets_doc: BudgetDict) -> None:
+    """
+    2020-01-01 custom "budget" Expenses:Food "monthly" 1000.00 USD
+    2020-06-01 custom "budget" Expenses:Food "monthly" 1500.00 USD
+    2021-01-01 custom "budget" Expenses:Food "monthly" 2000.00 USD"""
+
+    result_may = calculate_budget(
+        budgets_doc,
+        "Expenses:Food",
+        date(2020, 5, 15),
+        date(2020, 5, 16),
+    )
+    assert result_may["USD"] == Decimal(1000) / 31
+
+    result_june = calculate_budget(
+        budgets_doc,
+        "Expenses:Food",
+        date(2020, 6, 15),
+        date(2020, 6, 16),
+    )
+    assert result_june["USD"] == Decimal(1500) / 30
+
+    result_jan_2021 = calculate_budget(
+        budgets_doc,
+        "Expenses:Food",
+        date(2021, 1, 15),
+        date(2021, 1, 16),
+    )
+    assert result_jan_2021["USD"] == Decimal(2000) / 31
+
+    result_cross_update = calculate_budget(
+        budgets_doc,
+        "Expenses:Food",
+        date(2020, 5, 31),
+        date(2020, 6, 2),
+    )
+    days_may = Decimal(1000) / 31
+    days_june = Decimal(1500) / 30
+    assert result_cross_update["USD"] == days_may + days_june
+
+
+def test_budgets_account_prefix_boundary(budgets_doc: BudgetDict) -> None:
+    """
+    2020-01-01 custom "budget" Expenses:Food "daily" 50.00 USD
+    2020-01-01 custom "budget" Expenses:Food:Groceries "daily" 30.00 USD
+    2020-01-01 custom "budget" Expenses:Food:Restaurant "daily" 20.00 USD
+    2020-01-01 custom "budget" Expenses:Foodie "daily" 100.00 USD"""
+
+    result_food = calculate_budget_children(
+        budgets_doc,
+        "Expenses:Food",
+        date(2020, 1, 1),
+        date(2020, 1, 2),
+    )
+    assert result_food["USD"] == Decimal("200.00")
+
+    result_food_exact = calculate_budget(
+        budgets_doc,
+        "Expenses:Food",
+        date(2020, 1, 1),
+        date(2020, 1, 2),
+    )
+    assert result_food_exact["USD"] == Decimal("50.00")
+
+    result_foodie = calculate_budget_children(
+        budgets_doc,
+        "Expenses:Foodie",
+        date(2020, 1, 1),
+        date(2020, 1, 2),
+    )
+    assert result_foodie["USD"] == Decimal("100.00")
+
+    result_expenses = calculate_budget_children(
+        budgets_doc,
+        "Expenses",
+        date(2020, 1, 1),
+        date(2020, 1, 2),
+    )
+    assert result_expenses["USD"] == Decimal("200.00")
+
+
+def test_budgets_leap_year_boundary(budgets_doc: BudgetDict) -> None:
+    """
+    2020-01-01 custom "budget" Expenses:Books "monthly" 290.00 EUR
+    2020-01-01 custom "budget" Expenses:Books "daily" 10.00 USD"""
+
+    result_feb_2020 = calculate_budget(
+        budgets_doc,
+        "Expenses:Books",
+        date(2020, 2, 28),
+        date(2020, 2, 29),
+    )
+    assert result_feb_2020["EUR"] == Decimal(290) / 29
+    assert result_feb_2020["USD"] == Decimal("10.00")
+
+    result_feb_2021 = calculate_budget(
+        budgets_doc,
+        "Expenses:Books",
+        date(2021, 2, 27),
+        date(2021, 2, 28),
+    )
+    assert result_feb_2021["EUR"] == Decimal(290) / 28
+    assert result_feb_2021["USD"] == Decimal("10.00")
+
+    result_leap_day = calculate_budget(
+        budgets_doc,
+        "Expenses:Books",
+        date(2020, 2, 29),
+        date(2020, 3, 1),
+    )
+    assert result_leap_day["EUR"] == Decimal(290) / 29
+    assert result_leap_day["USD"] == Decimal("10.00")
+
+
+def test_budgets_month_end_boundary(budgets_doc: BudgetDict) -> None:
+    """
+    2020-01-01 custom "budget" Expenses:Food "monthly" 3100.00 USD"""
+
+    result_jan_31 = calculate_budget(
+        budgets_doc,
+        "Expenses:Food",
+        date(2020, 1, 31),
+        date(2020, 2, 1),
+    )
+    assert result_jan_31["USD"] == Decimal(3100) / 31
+
+    result_feb_28 = calculate_budget(
+        budgets_doc,
+        "Expenses:Food",
+        date(2020, 2, 28),
+        date(2020, 2, 29),
+    )
+    assert result_feb_28["USD"] == Decimal(3100) / 29
+
+    result_apr_30 = calculate_budget(
+        budgets_doc,
+        "Expenses:Food",
+        date(2020, 4, 30),
+        date(2020, 5, 1),
+    )
+    assert result_apr_30["USD"] == Decimal(3100) / 30
+
+
+def test_budgets_long_date_range(budgets_doc: BudgetDict) -> None:
+    """
+    2020-01-01 custom "budget" Expenses:Books "daily" 10.00 USD"""
+
+    result_full_year = calculate_budget(
+        budgets_doc,
+        "Expenses:Books",
+        date(2020, 1, 1),
+        date(2021, 1, 1),
+    )
+    assert result_full_year["USD"] == Decimal("3660.00")
+
+    result_leap_year = calculate_budget(
+        budgets_doc,
+        "Expenses:Books",
+        date(2020, 2, 1),
+        date(2020, 3, 1),
+    )
+    assert result_leap_year["USD"] == Decimal("290.00")
+
+
+def test_budgets_currency_override(budgets_doc: BudgetDict) -> None:
+    """
+    2020-01-01 custom "budget" Expenses:Food "daily" 50.00 USD
+    2020-06-01 custom "budget" Expenses:Food "daily" 60.00 USD
+    2020-06-01 custom "budget" Expenses:Food "daily" 40.00 EUR"""
+
+    result_jan = calculate_budget(
+        budgets_doc,
+        "Expenses:Food",
+        date(2020, 1, 15),
+        date(2020, 1, 16),
+    )
+    assert result_jan["USD"] == Decimal("50.00")
+    assert "EUR" not in result_jan
+
+    result_july = calculate_budget(
+        budgets_doc,
+        "Expenses:Food",
+        date(2020, 7, 15),
+        date(2020, 7, 16),
+    )
+    assert result_july["USD"] == Decimal("60.00")
+    assert result_july["EUR"] == Decimal("40.00")
