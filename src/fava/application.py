@@ -73,6 +73,7 @@ setup_logging()
 CLIENT_SIDE_REPORTS = [
     "balance_sheet",
     "commodities",
+    "document_gaps",
     "documents",
     "editor",
     "errors",

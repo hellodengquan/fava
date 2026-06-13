@@ -194,6 +194,24 @@ class FileModule(FavaModule):
             self.ledger.watcher.notify(path)
             self.ledger.extensions.after_insert_metadata(entry, key, value)
 
+    def remove_metadata(
+        self,
+        entry_hash: str,
+        key: str,
+    ) -> None:
+        """Remove metadata with a specific key from an entry.
+
+        Args:
+            entry_hash: Hash of an entry.
+            key: Key to remove from metadata.
+        """
+        with self._lock:
+            self.ledger.changed()
+            entry = self.ledger.get_entry(entry_hash)
+            path, _lineno = _get_position(entry)
+            remove_metadata_from_file(path, _lineno, key)
+            self.ledger.watcher.notify(path)
+
     def save_entry_slice(
         self,
         entry_hash: str,
@@ -322,6 +340,43 @@ def insert_metadata_in_file(
     newline = _file_newline_character(path)
     with path.open("w", encoding="utf-8", newline=newline) as file:
         file.write("".join(contents))
+
+
+def remove_metadata_from_file(
+    path: Path,
+    lineno: int,
+    key: str,
+) -> None:
+    """Remove metadata with the specified key from an entry.
+
+    Args:
+        path: Path to the file.
+        lineno: The 1-based line number where the entry starts.
+        key: The metadata key to remove (supports base key with numbers).
+    """
+    with path.open(encoding="utf-8") as file:
+        lines = file.readlines()
+
+    first_entry_line = lineno - 1
+    entry_lines = find_entry_lines(lines, first_entry_line)
+
+    remove_indices: list[int] = []
+    for i, line in enumerate(entry_lines):
+        if i == 0:
+            continue
+        stripped = line.strip()
+        if stripped.startswith(f"{key}:") or re.match(
+            rf"^{re.escape(key)}(\d+):", stripped
+        ):
+            remove_indices.append(first_entry_line + i)
+
+    if remove_indices:
+        for idx in sorted(remove_indices, reverse=True):
+            del lines[idx]
+
+        newline = _file_newline_character(path)
+        with path.open("w", encoding="utf-8", newline=newline) as file:
+            file.writelines(lines)
 
 
 def find_entry_lines(lines: Sequence[str], lineno: int) -> Sequence[str]:

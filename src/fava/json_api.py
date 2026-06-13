@@ -887,3 +887,136 @@ def get_statistics() -> Statistics:
         balances=balances,
         entries_by_type=entries_by_type,
     )
+
+
+########################################################################
+# Document Gaps
+
+
+@dataclass(frozen=True)
+class TransactionGapJSON:
+    """A transaction gap as serialised to JSON."""
+
+    entry_hash: str
+    date: str
+    payee: str
+    narration: str
+    accounts: list[str]
+    total_amount: str
+    has_document_metadata: bool
+    has_linked_documents: bool
+    handled: bool
+    tag_count: int
+    link_count: int
+
+
+@dataclass(frozen=True)
+class AccountGapSummaryJSON:
+    """Account-level gap summary as serialised to JSON."""
+
+    account: str
+    total_transactions: int
+    transactions_with_docs: int
+    transactions_without_docs: int
+    handled_count: int
+    total_amount: str
+    missing_amount: str
+
+
+@dataclass(frozen=True)
+class DocumentGapStatsJSON:
+    """Overall document gap statistics as serialised to JSON."""
+
+    total_transactions: int
+    transactions_with_docs: int
+    transactions_without_docs: int
+    handled_count: int
+    unhandled_count: int
+    total_amount: str
+    missing_amount: str
+    accounts_with_gaps: int
+    total_accounts: int
+
+
+@dataclass(frozen=True)
+class DocumentGapReportJSON:
+    """Complete document gap report as serialised to JSON."""
+
+    stats: DocumentGapStatsJSON
+    transaction_gaps: list[TransactionGapJSON]
+    account_summaries: list[AccountGapSummaryJSON]
+
+
+@api_endpoint
+def get_document_gaps() -> DocumentGapReportJSON:
+    """Get the document gap report."""
+    g.ledger.changed()
+    report = g.ledger.document_gaps.generate_report(g.filtered)
+
+    return DocumentGapReportJSON(
+        stats=DocumentGapStatsJSON(
+            total_transactions=report.stats.total_transactions,
+            transactions_with_docs=report.stats.transactions_with_docs,
+            transactions_without_docs=report.stats.transactions_without_docs,
+            handled_count=report.stats.handled_count,
+            unhandled_count=report.stats.unhandled_count,
+            total_amount=report.stats.total_amount,
+            missing_amount=report.stats.missing_amount,
+            accounts_with_gaps=report.stats.accounts_with_gaps,
+            total_accounts=report.stats.total_accounts,
+        ),
+        transaction_gaps=[
+            TransactionGapJSON(
+                entry_hash=g.entry_hash,
+                date=g.date.isoformat(),
+                payee=g.payee,
+                narration=g.narration,
+                accounts=g.accounts,
+                total_amount=g.total_amount,
+                has_document_metadata=g.has_document_metadata,
+                has_linked_documents=g.has_linked_documents,
+                handled=g.handled,
+                tag_count=g.tag_count,
+                link_count=g.link_count,
+            )
+            for g in report.transaction_gaps
+        ],
+        account_summaries=[
+            AccountGapSummaryJSON(
+                account=a.account,
+                total_transactions=a.total_transactions,
+                transactions_with_docs=a.transactions_with_docs,
+                transactions_without_docs=a.transactions_without_docs,
+                handled_count=a.handled_count,
+                total_amount=a.total_amount,
+                missing_amount=a.missing_amount,
+            )
+            for a in report.account_summaries
+        ],
+    )
+
+
+@api_endpoint
+def put_mark_document_gap(entry_hash: str, handled: str) -> str:
+    """Mark a document gap as handled or unhandled.
+
+    Args:
+        entry_hash: The hash of the transaction entry.
+        handled: "true" to mark handled, "false" to mark unhandled.
+
+    Returns:
+        Success message.
+    """
+    handled_bool = handled.lower() in ("true", "1", "yes")
+    entry = g.ledger.get_entry(entry_hash)
+
+    meta_key = "document_gap_handled"
+    if handled_bool:
+        g.ledger.file.insert_metadata(entry_hash, meta_key, True)
+    else:
+        g.ledger.file.remove_metadata(entry_hash, meta_key)
+
+    return (
+        f"Marked entry {entry_hash} as "
+        f"{'handled' if handled_bool else 'unhandled'}."
+    )

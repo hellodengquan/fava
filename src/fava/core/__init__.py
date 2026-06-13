@@ -32,6 +32,8 @@ from fava.core.budgets import BudgetModule
 from fava.core.charts import ChartModule
 from fava.core.commodities import CommoditiesModule
 from fava.core.conversion import conversion_from_str
+from fava.core.documents import filepath_in_document_folder
+from fava.core.document_gaps import DocumentGapChecker
 from fava.core.extensions import ExtensionModule
 from fava.core.fava_options import parse_options
 from fava.core.file import _incomplete_sortkey
@@ -305,6 +307,7 @@ class FavaLedger:
         "budgets",
         "charts",
         "commodities",
+        "document_gaps",
         "extensions",
         "fava_options",
         "fava_options_errors",
@@ -357,6 +360,9 @@ class FavaLedger:
     #: A :class:`.CommoditiesModule` instance.
     commodities: CommoditiesModule
 
+    #: A :class:`.DocumentGapChecker` instance.
+    document_gaps: DocumentGapChecker
+
     #: A :class:`.ExtensionModule` instance.
     extensions: ExtensionModule
 
@@ -393,6 +399,7 @@ class FavaLedger:
         self.budgets = BudgetModule(self)
         self.charts = ChartModule(self)
         self.commodities = CommoditiesModule(self)
+        self.document_gaps = DocumentGapChecker(self)
         self.extensions = ExtensionModule(self)
         self.file = FileModule(self)
         self.format_decimal = DecimalFormatModule(self)

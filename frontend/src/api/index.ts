@@ -20,6 +20,7 @@ import {
   account_report_validator,
   commodities_validator,
   context_validator,
+  document_gap_report_validator,
   error_validator,
   importable_files_validator,
   ledgerDataValidator,
@@ -49,6 +50,7 @@ type GetEndpoint =
   | "changed"
   | "commodities"
   | "context"
+  | "document_gaps"
   | "documents"
   | "errors"
   | "events"
@@ -71,6 +73,7 @@ type PutEndpoint =
   | "add_entries"
   | "attach_document"
   | "format_source"
+  | "mark_document_gap"
   | "move"
   | "source"
   | "source_slice"
@@ -85,6 +88,7 @@ type ApiParams = Partial<{
   entry_hash: string;
   filename: string;
   filter: string;
+  handled: string;
   importer: string;
   interval: string;
   narration: string;
@@ -245,6 +249,11 @@ export const get_documents = define_endpoint(
   array(Document.validator),
   filters,
 );
+export const get_document_gaps = define_endpoint(
+  "document_gaps",
+  document_gap_report_validator,
+  filters,
+);
 export const get_errors = define_paramless_endpoint(
   "errors",
   array(error_validator),
@@ -346,6 +355,10 @@ export const put_source_slice: Put<{
   source: string;
   sha256sum: string;
 }> = define_put_json("source_slice");
+export const put_mark_document_gap: Put<{
+  entry_hash: string;
+  handled: string;
+}> = define_put_json("mark_document_gap");
 export const put_upload_import_file = define_put_form("upload_import_file");
 
 /**
@@ -400,5 +413,28 @@ export async function save_entries(
   } catch (error) {
     notify_err(error, (e) => `Saving failed: ${e.message}`);
     throw error;
+  }
+}
+
+/**
+ * Mark a document gap as handled or unhandled.
+ * @param entry_hash - the hash of the transaction entry.
+ * @param handled - whether to mark as handled (true) or unhandled (false).
+ * @returns whether the operation was successful.
+ */
+export async function mark_document_gap(
+  entry_hash: string,
+  handled: boolean,
+): Promise<boolean> {
+  try {
+    const msg = await put_mark_document_gap({
+      entry_hash,
+      handled: handled ? "true" : "false",
+    });
+    notify(msg);
+    return true;
+  } catch (error) {
+    notify_err(error);
+    return false;
   }
 }

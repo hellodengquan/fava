@@ -183,3 +183,46 @@ export const options_validator = object({
   fava_options: record(string),
   beancount_options: record(string),
 });
+
+/** Document gap report validators. */
+export const transaction_gap_validator = object({
+  entry_hash: string,
+  date: string,
+  payee: string,
+  narration: string,
+  accounts: array(string),
+  total_amount: string,
+  has_document_metadata: boolean,
+  has_linked_documents: boolean,
+  handled: boolean,
+  tag_count: number,
+  link_count: number,
+});
+
+export const account_gap_summary_validator = object({
+  account: string,
+  total_transactions: number,
+  transactions_with_docs: number,
+  transactions_without_docs: number,
+  handled_count: number,
+  total_amount: string,
+  missing_amount: string,
+});
+
+export const document_gap_stats_validator = object({
+  total_transactions: number,
+  transactions_with_docs: number,
+  transactions_without_docs: number,
+  handled_count: number,
+  unhandled_count: number,
+  total_amount: string,
+  missing_amount: string,
+  accounts_with_gaps: number,
+  total_accounts: number,
+});
+
+export const document_gap_report_validator = object({
+  stats: document_gap_stats_validator,
+  transaction_gaps: array(transaction_gap_validator),
+  account_summaries: array(account_gap_summary_validator),
+});
