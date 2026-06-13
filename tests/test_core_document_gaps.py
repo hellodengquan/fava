@@ -16,6 +16,7 @@ from fava.beans.funcs import hash_entry
 from fava.beans.load import load_string
 from fava.core import FavaLedger
 from fava.core.document_gaps import DocumentGapChecker
+from fava.core.document_gaps import _DOCUMENT_META_RE
 from fava.core.document_gaps import _is_handled
 from fava.core.document_gaps import TransactionGap
 from fava.core.file import remove_metadata_from_file
@@ -660,7 +661,7 @@ def test_only_unhandled_filter_with_persisted_metadata(
     gap_entry = None
     for txn in txns:
         has_doc_meta = any(
-            isinstance(v, str) and k.lower().startswith("document")
+            isinstance(v, str) and _DOCUMENT_META_RE.match(k)
             for k, v in txn.meta.items()
         )
         if not has_doc_meta:
@@ -684,3 +685,115 @@ def test_only_unhandled_filter_with_persisted_metadata(
         ledger_in_tmp_path.get_filtered(), only_unhandled=True
     )
     assert len(report_after.transaction_gaps) == initial_gaps - 1
+
+
+def test_batch_mark_multiple_entries(
+    ledger_in_tmp_path: FavaLedger,
+) -> None:
+    """Marking multiple entries as handled should update all of them."""
+    txns = ledger_in_tmp_path.all_entries_by_type.Transaction
+
+    gap_entry_keys: list[tuple] = []
+    for txn in txns:
+        has_doc_meta = any(
+            isinstance(v, str) and _DOCUMENT_META_RE.match(k)
+            for k, v in txn.meta.items()
+        )
+        if not has_doc_meta:
+            gap_entry_keys.append((txn.date, txn.payee, txn.narration))
+            if len(gap_entry_keys) >= 3:
+                break
+
+    assert len(gap_entry_keys) >= 2, "Need at least 2 transactions without docs"
+
+    report_before = ledger_in_tmp_path.document_gaps.generate_report(
+        ledger_in_tmp_path.get_filtered()
+    )
+    initial_handled = report_before.stats.handled_count
+
+    meta_key = "document_gap_handled"
+    for date, payee, narration in gap_entry_keys:
+        txn = next(
+            t
+            for t in ledger_in_tmp_path.all_entries_by_type.Transaction
+            if t.date == date
+            and t.payee == payee
+            and t.narration == narration
+        )
+        entry_hash = hash_entry(txn)
+        ledger_in_tmp_path.file.insert_metadata(
+            entry_hash, meta_key, "True"
+        )
+        ledger_in_tmp_path.load_file()
+
+    report_after = ledger_in_tmp_path.document_gaps.generate_report(
+        ledger_in_tmp_path.get_filtered()
+    )
+    assert report_after.stats.handled_count == initial_handled + len(
+        gap_entry_keys
+    )
+
+    report_unhandled = ledger_in_tmp_path.document_gaps.generate_report(
+        ledger_in_tmp_path.get_filtered(), only_unhandled=True
+    )
+    assert (
+        len(report_unhandled.transaction_gaps)
+        == len(report_before.transaction_gaps) - len(gap_entry_keys)
+    )
+
+
+def test_document_meta_key_pattern() -> None:
+    """_DOCUMENT_META_RE should only match document/documentN keys."""
+    assert _DOCUMENT_META_RE.match("document") is not None
+    assert _DOCUMENT_META_RE.match("Document") is not None
+    assert _DOCUMENT_META_RE.match("DOCUMENT") is not None
+    assert _DOCUMENT_META_RE.match("document2") is not None
+    assert _DOCUMENT_META_RE.match("document123") is not None
+
+    assert _DOCUMENT_META_RE.match("document_gap_handled") is None
+    assert _DOCUMENT_META_RE.match("document_date") is None
+    assert _DOCUMENT_META_RE.match("documents") is None
+    assert _DOCUMENT_META_RE.match("doc") is None
+    assert _DOCUMENT_META_RE.match("receipt") is None
+
+
+def test_persisted_metadata_survives_multiple_reloads(
+    ledger_in_tmp_path: FavaLedger,
+) -> None:
+    """Handled status should persist through multiple ledger reloads."""
+    txns = ledger_in_tmp_path.all_entries_by_type.Transaction
+
+    gap_entry = None
+    for txn in txns:
+        has_doc_meta = any(
+            isinstance(v, str) and _DOCUMENT_META_RE.match(k)
+            for k, v in txn.meta.items()
+        )
+        if not has_doc_meta:
+            gap_entry = txn
+            break
+
+    assert gap_entry is not None
+
+    entry_date = gap_entry.date
+    entry_payee = gap_entry.payee
+    entry_narration = gap_entry.narration
+
+    entry_hash = hash_entry(gap_entry)
+    ledger_in_tmp_path.file.insert_metadata(
+        entry_hash, "document_gap_handled", "True"
+    )
+
+    for _ in range(3):
+        ledger_in_tmp_path.load_file()
+        found = False
+        for txn in ledger_in_tmp_path.all_entries_by_type.Transaction:
+            if (
+                txn.date == entry_date
+                and txn.payee == entry_payee
+                and txn.narration == entry_narration
+            ):
+                assert _is_handled(txn) is True
+                found = True
+                break
+        assert found, "Transaction should still be found and marked handled"

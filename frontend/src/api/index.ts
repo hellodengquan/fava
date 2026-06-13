@@ -359,6 +359,14 @@ export const put_mark_document_gap: Put<{
   entry_hash: string;
   handled: string;
 }> = define_put_json("mark_document_gap");
+export const put_mark_document_gaps_batch: Put<{
+  entry_hashes: string;
+  handled: string;
+}> = define_put_json("mark_document_gaps_batch");
+export const put_mark_all_document_gaps: Put<{
+  handled: string;
+  only_unhandled?: string;
+}> = define_put_json("mark_all_document_gaps");
 export const put_upload_import_file = define_put_form("upload_import_file");
 
 /**
@@ -436,5 +444,72 @@ export async function mark_document_gap(
   } catch (error) {
     notify_err(error);
     return false;
+  }
+}
+
+const BATCH_CHUNK_SIZE = 500;
+
+/**
+ * Mark multiple document gaps as handled or unhandled in batches.
+ * @param entry_hashes - array of entry hashes to mark.
+ * @param handled - whether to mark as handled (true) or unhandled (false).
+ * @returns total count of successfully processed entries.
+ */
+export async function mark_document_gaps_batch(
+  entry_hashes: string[],
+  handled: boolean,
+): Promise<number> {
+  let totalProcessed = 0;
+
+  for (let i = 0; i < entry_hashes.length; i += BATCH_CHUNK_SIZE) {
+    const chunk = entry_hashes.slice(i, i + BATCH_CHUNK_SIZE);
+    try {
+      const result = (await put_mark_document_gaps_batch({
+        entry_hashes: chunk.join(","),
+        handled: handled ? "true" : "false",
+      })) as unknown as { processed: number; skipped: number };
+      totalProcessed += result.processed || 0;
+    } catch (error) {
+      notify_err(error);
+      break;
+    }
+  }
+
+  if (totalProcessed > 0) {
+    notify(
+      handled
+        ? `Marked ${totalProcessed} gaps as handled.`
+        : `Marked ${totalProcessed} gaps as unhandled.`,
+    );
+  }
+
+  return totalProcessed;
+}
+
+/**
+ * Mark all document gaps matching current filters as handled or unhandled.
+ * Uses the server-side batch processing (500 per batch internally).
+ * @param handled - whether to mark as handled (true) or unhandled (false).
+ * @param only_unhandled - if true, only process currently unhandled gaps.
+ * @returns total count of processed entries.
+ */
+export async function mark_all_document_gaps(
+  handled: boolean,
+  only_unhandled: boolean = true,
+): Promise<number> {
+  try {
+    const result = (await put_mark_all_document_gaps({
+      handled: handled ? "true" : "false",
+      only_unhandled: only_unhandled ? "true" : "false",
+    })) as unknown as { processed: number };
+    notify(
+      handled
+        ? `Marked ${result.processed} gaps as handled.`
+        : `Marked ${result.processed} gaps as unhandled.`,
+    );
+    return result.processed || 0;
+  } catch (error) {
+    notify_err(error);
+    return 0;
   }
 }

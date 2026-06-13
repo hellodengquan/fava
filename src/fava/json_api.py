@@ -1020,3 +1020,76 @@ def put_mark_document_gap(entry_hash: str, handled: str) -> str:
         f"Marked entry {entry_hash} as "
         f"{'handled' if handled_bool else 'unhandled'}."
     )
+
+
+@api_endpoint
+def put_mark_document_gaps_batch(entry_hashes: str, handled: str) -> dict[str, int]:
+    """Mark multiple document gaps as handled or unhandled in batch.
+
+    Args:
+        entry_hashes: Comma-separated list of entry hashes.
+        handled: "true" to mark handled, "false" to mark unhandled.
+
+    Returns:
+        Dict with 'processed' count and 'skipped' count.
+    """
+    handled_bool = handled.lower() in ("true", "1", "yes")
+    hashes = [h.strip() for h in entry_hashes.split(",") if h.strip()]
+
+    meta_key = "document_gap_handled"
+    processed = 0
+    skipped = 0
+
+    for entry_hash in hashes:
+        try:
+            if handled_bool:
+                g.ledger.file.insert_metadata(entry_hash, meta_key, "True")
+            else:
+                g.ledger.file.remove_metadata(entry_hash, meta_key)
+            processed += 1
+        except Exception:
+            skipped += 1
+
+    return {"processed": processed, "skipped": skipped}
+
+
+@api_endpoint
+def put_mark_all_document_gaps(handled: str, only_unhandled: str = "true") -> dict[str, int]:
+    """Mark all document gaps matching the current filter as handled or unhandled.
+
+    This processes gaps in batches to avoid performance issues with large ledgers.
+
+    Args:
+        handled: "true" to mark handled, "false" to mark unhandled.
+        only_unhandled: If "true" (default), only process currently unhandled gaps.
+                        If "false", process all gaps.
+
+    Returns:
+        Dict with 'processed' count.
+    """
+    handled_bool = handled.lower() in ("true", "1", "yes")
+    only_unhandled_bool = only_unhandled.lower() in ("true", "1", "yes")
+
+    gaps = g.ledger.document_gaps.check_transaction_gaps(
+        g.filtered, only_unhandled=only_unhandled_bool
+    )
+
+    meta_key = "document_gap_handled"
+    processed = 0
+    BATCH_SIZE = 500
+
+    for i in range(0, len(gaps), BATCH_SIZE):
+        batch = gaps[i : i + BATCH_SIZE]
+        for gap in batch:
+            try:
+                if handled_bool:
+                    g.ledger.file.insert_metadata(
+                        gap.entry_hash, meta_key, "True"
+                    )
+                else:
+                    g.ledger.file.remove_metadata(gap.entry_hash, meta_key)
+                processed += 1
+            except Exception:
+                pass
+
+    return {"processed": processed}

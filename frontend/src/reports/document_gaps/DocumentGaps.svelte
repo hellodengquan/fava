@@ -32,6 +32,10 @@
     }),
   );
 
+  const unhandledCount = $derived(
+    filteredTransactionGaps.filter((g) => !g.handled).length,
+  );
+
   const filteredAccountSummaries = $derived(
     report.account_summaries.filter((a) => {
       if (a.transactions_without_docs === 0) return false;
@@ -44,6 +48,22 @@
     }),
   );
 
+  function handleViewModeChange(mode: ViewMode) {
+    viewMode = mode;
+  }
+
+  function handleHandledFilterChange(filter: HandledFilter) {
+    handledFilter = filter;
+  }
+
+  function handleAccountFilterChange(value: string) {
+    accountFilter = value;
+  }
+
+  function handleSearchQueryChange(value: string) {
+    searchQuery = value;
+  }
+
   function handleAccountFilter(account: string) {
     accountFilter = account;
     viewMode = "transactions";
@@ -54,12 +74,17 @@
   <GapSummary stats={report.stats} />
 
   <GapFilterBar
-    bind:viewMode
-    bind:handledFilter
-    bind:accountFilter
-    bind:searchQuery
+    viewMode={viewMode}
+    handledFilter={handledFilter}
+    accountFilter={accountFilter}
+    searchQuery={searchQuery}
     transactionCount={filteredTransactionGaps.length}
     accountCount={filteredAccountSummaries.length}
+    unhandledCount={unhandledCount}
+    onViewModeChange={handleViewModeChange}
+    onHandledFilterChange={handleHandledFilterChange}
+    onAccountFilterChange={handleAccountFilterChange}
+    onSearchQueryChange={handleSearchQueryChange}
   />
 
   <GapList

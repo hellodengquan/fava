@@ -1,5 +1,7 @@
 <script lang="ts">
   import { _ } from "../../i18n.ts";
+  import { router } from "../../router.ts";
+  import { mark_all_document_gaps } from "../../api/index.ts";
   import type { HandledFilter, ViewMode } from "./index.ts";
 
   let {
@@ -9,6 +11,11 @@
     searchQuery,
     transactionCount,
     accountCount,
+    unhandledCount,
+    onViewModeChange,
+    onHandledFilterChange,
+    onAccountFilterChange,
+    onSearchQueryChange,
   }: {
     viewMode: ViewMode;
     handledFilter: HandledFilter;
@@ -16,7 +23,37 @@
     searchQuery: string;
     transactionCount: number;
     accountCount: number;
+    unhandledCount: number;
+    onViewModeChange: (mode: ViewMode) => void;
+    onHandledFilterChange: (filter: HandledFilter) => void;
+    onAccountFilterChange: (value: string) => void;
+    onSearchQueryChange: (value: string) => void;
   } = $props();
+
+  let markingAll = $state(false);
+
+  async function handleMarkAllHandled() {
+    if (markingAll || unhandledCount === 0) return;
+    if (
+      !confirm(
+        _("Are you sure you want to mark all {n} unhandled gaps as handled?", {
+          n: unhandledCount,
+        }),
+      )
+    ) {
+      return;
+    }
+
+    markingAll = true;
+    try {
+      const count = await mark_all_document_gaps(true, true);
+      if (count > 0) {
+        router.reload();
+      }
+    } finally {
+      markingAll = false;
+    }
+  }
 </script>
 
 <section class="controls-section">
@@ -24,14 +61,14 @@
     <div class="view-switcher">
       <button
         class={viewMode === "transactions" ? "active" : ""}
-        onclick={() => (viewMode = "transactions")}
+        onclick={() => onViewModeChange("transactions")}
       >
         {_("By Transaction")}
         <span class="badge">{transactionCount}</span>
       </button>
       <button
         class={viewMode === "accounts" ? "active" : ""}
-        onclick={() => (viewMode = "accounts")}
+        onclick={() => onViewModeChange("accounts")}
       >
         {_("By Account")}
         <span class="badge">{accountCount}</span>
@@ -42,24 +79,41 @@
       <input
         type="search"
         placeholder={_("Search payee, narration, account...")}
-        bind:value={searchQuery}
+        value={searchQuery}
+        oninput={(e) =>
+          onSearchQueryChange((e.target as HTMLInputElement).value)}
         class="search-input"
       />
       <input
         type="text"
         placeholder={_("Account filter (e.g. Expenses)")}
-        bind:value={accountFilter}
+        value={accountFilter}
+        oninput={(e) =>
+          onAccountFilterChange((e.target as HTMLInputElement).value)}
         class="account-input"
       />
       {#if viewMode === "transactions"}
         <select
-          bind:value={handledFilter}
+          value={handledFilter}
+          onchange={(e) =>
+            onHandledFilterChange(
+              (e.target as HTMLSelectElement).value as HandledFilter,
+            )}
           class="handled-select"
         >
           <option value="all">{_("All Items")}</option>
           <option value="unhandled">{_("Unhandled Only")}</option>
           <option value="handled">{_("Handled Only")}</option>
         </select>
+        <button
+          class="batch-handle-btn"
+          disabled={markingAll || unhandledCount === 0}
+          onclick={handleMarkAllHandled}
+        >
+          {markingAll
+            ? _("Processing...")
+            : _("Mark all unhandled as handled")}
+        </button>
       {/if}
     </div>
   </div>
@@ -138,6 +192,26 @@
   }
   .account-input {
     min-width: 200px;
+  }
+
+  .batch-handle-btn {
+    padding: 0.4rem 1rem;
+    border: 1px solid var(--sidebar-border);
+    border-radius: 4px;
+    background: var(--primary-color, #1976d2);
+    color: white;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+
+  .batch-handle-btn:hover:not(:disabled) {
+    opacity: 0.9;
+  }
+
+  .batch-handle-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   @media (max-width: 768px) {
