@@ -1,13 +1,17 @@
 import { deepEqual, equal, ok } from "node:assert/strict";
 import { test } from "node:test";
 
+import { get as store_get } from "svelte/store";
+
 import {
   getReportFilterContext,
   reportFilterContextFromDict,
   reportFilterContextToUrlParams,
   reportFilterContextEqual,
+  report_filter_context,
   type ReportFilterContext,
 } from "../src/stores/filters.ts";
+import { current_url } from "../src/stores/url.ts";
 import { setup_jsdom } from "./dom.ts";
 
 test.beforeEach(setup_jsdom);
@@ -336,4 +340,181 @@ test("link filter preserved through context", () => {
   );
   const ctx = getReportFilterContext(url);
   equal(ctx.filter, "^trip-link");
+});
+
+test("store: report_filter_context reflects current URL state", () => {
+  current_url.set(
+    new URL(
+      "http://localhost/income_statement/?time=2024&account=Assets&conversion=EUR&interval=year",
+    ),
+  );
+  const ctx = store_get(report_filter_context);
+  equal(ctx.time, "2024");
+  equal(ctx.account, "Assets");
+  equal(ctx.conversion, "EUR");
+  equal(ctx.interval, "year");
+});
+
+test("store: reset URL to empty resets context to defaults", () => {
+  current_url.set(
+    new URL(
+      "http://localhost/income_statement/?time=2024&account=Assets&conversion=EUR&interval=year",
+    ),
+  );
+  let ctx = store_get(report_filter_context);
+  equal(ctx.time, "2024");
+  equal(ctx.conversion, "EUR");
+
+  current_url.set(new URL("http://localhost/income_statement/"));
+  ctx = store_get(report_filter_context);
+  equal(ctx.time, "");
+  equal(ctx.account, "");
+  equal(ctx.filter, "");
+  equal(ctx.conversion, "at_cost");
+  equal(ctx.interval, "month");
+});
+
+test("store: replace individual param preserves others", () => {
+  current_url.set(
+    new URL(
+      "http://localhost/income_statement/?time=2024&account=Assets&conversion=EUR",
+    ),
+  );
+  let ctx = store_get(report_filter_context);
+  equal(ctx.time, "2024");
+  equal(ctx.account, "Assets");
+  equal(ctx.conversion, "EUR");
+
+  current_url.set(
+    new URL(
+      "http://localhost/income_statement/?time=2025&account=Assets&conversion=EUR",
+    ),
+  );
+  ctx = store_get(report_filter_context);
+  equal(ctx.time, "2025");
+  equal(ctx.account, "Assets");
+  equal(ctx.conversion, "EUR");
+});
+
+test("store: merge new param into existing URL", () => {
+  current_url.set(
+    new URL("http://localhost/income_statement/?time=2024&account=Assets"),
+  );
+  let ctx = store_get(report_filter_context);
+  equal(ctx.time, "2024");
+  equal(ctx.account, "Assets");
+  equal(ctx.conversion, "at_cost");
+  equal(ctx.interval, "month");
+
+  current_url.set(
+    new URL(
+      "http://localhost/income_statement/?time=2024&account=Assets&conversion=USD&interval=quarter",
+    ),
+  );
+  ctx = store_get(report_filter_context);
+  equal(ctx.time, "2024");
+  equal(ctx.account, "Assets");
+  equal(ctx.conversion, "USD");
+  equal(ctx.interval, "quarter");
+});
+
+test("store: removing a param reverts to default", () => {
+  current_url.set(
+    new URL(
+      "http://localhost/income_statement/?time=2024&conversion=EUR",
+    ),
+  );
+  let ctx = store_get(report_filter_context);
+  equal(ctx.time, "2024");
+  equal(ctx.conversion, "EUR");
+
+  current_url.set(
+    new URL("http://localhost/income_statement/?time=2024"),
+  );
+  ctx = store_get(report_filter_context);
+  equal(ctx.time, "2024");
+  equal(ctx.conversion, "at_cost");
+});
+
+test("store: setting empty conversion falls back to at_cost", () => {
+  current_url.set(
+    new URL(
+      "http://localhost/income_statement/?conversion=",
+    ),
+  );
+  const ctx = store_get(report_filter_context);
+  equal(ctx.conversion, "at_cost");
+});
+
+test("store: setting empty interval falls back to month", () => {
+  current_url.set(
+    new URL(
+      "http://localhost/income_statement/?interval=",
+    ),
+  );
+  const ctx = store_get(report_filter_context);
+  equal(ctx.interval, "month");
+});
+
+test("store: uppercase interval normalized to lowercase", () => {
+  current_url.set(
+    new URL("http://localhost/income_statement/?interval=WEEK"),
+  );
+  const ctx = store_get(report_filter_context);
+  equal(ctx.interval, "week");
+});
+
+test("store: searchParams change triggers context update", () => {
+  current_url.set(
+    new URL("http://localhost/income_statement/?time=2024"),
+  );
+  let ctx = store_get(report_filter_context);
+  equal(ctx.time, "2024");
+
+  current_url.set(
+    new URL("http://localhost/income_statement/?time=2025"),
+  );
+  ctx = store_get(report_filter_context);
+  equal(ctx.time, "2025");
+});
+
+test("store: multiple rapid URL updates produce correct final state", () => {
+  current_url.set(new URL("http://localhost/income_statement/?time=2020"));
+  current_url.set(new URL("http://localhost/income_statement/?time=2021"));
+  current_url.set(new URL("http://localhost/income_statement/?time=2022"));
+  const ctx = store_get(report_filter_context);
+  equal(ctx.time, "2022");
+});
+
+test("store: filter with hash tag preserved", () => {
+  current_url.set(
+    new URL("http://localhost/income_statement/?filter=%23trip"),
+  );
+  const ctx = store_get(report_filter_context);
+  equal(ctx.filter, "#trip");
+});
+
+test("store: filter with negated tag preserved", () => {
+  current_url.set(
+    new URL("http://localhost/income_statement/?filter=-%23trip"),
+  );
+  const ctx = store_get(report_filter_context);
+  equal(ctx.filter, "-#trip");
+});
+
+test("store: full params roundtrip through URL", () => {
+  const original: ReportFilterContext = {
+    time: "2024-Q1",
+    account: "Expenses:Travel",
+    filter: "#business",
+    conversion: "USD",
+    interval: "quarter",
+  };
+  const params = reportFilterContextToUrlParams(original);
+  const qs = new URLSearchParams(params).toString();
+  current_url.set(
+    new URL(`http://localhost/income_statement/?${qs}`),
+  );
+  const fromStore = store_get(report_filter_context);
+  ok(reportFilterContextEqual(original, fromStore));
 });

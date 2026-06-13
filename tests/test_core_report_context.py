@@ -377,3 +377,350 @@ class TestReportContextRepr:
         assert "ReportContext" in r
         assert "2024" in r
         assert "Assets" in r
+
+
+class TestReportContextEmptyFilters:
+    def test_empty_filter_string(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(filter="")
+        filtered = ctx.create_filtered_ledger(ledger)
+        assert len(filtered.entries) == len(ledger.all_entries)
+
+    def test_empty_account_string(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(account="")
+        filtered = ctx.create_filtered_ledger(ledger)
+        assert len(filtered.entries) == len(ledger.all_entries)
+
+    def test_empty_time_string(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(time="")
+        filtered = ctx.create_filtered_ledger(ledger)
+        assert len(filtered.entries) == len(ledger.all_entries)
+
+    def test_all_empty_produces_full_ledger(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(time="", account="", filter="")
+        filtered = ctx.create_filtered_ledger(ledger)
+        assert len(filtered.entries) == len(ledger.all_entries)
+        assert filtered.date_range is None
+
+    def test_whitespace_only_filter(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(filter="  ")
+        filtered = ctx.create_filtered_ledger(ledger)
+        assert len(filtered.entries) == len(ledger.all_entries)
+
+    def test_whitespace_only_account(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(account="  ")
+        filtered = ctx.create_filtered_ledger(ledger)
+        assert len(filtered.entries) == 0
+
+
+class TestReportContextCrossYearTimePeriods:
+    def test_cross_year_range(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(time="2013-10-01 - 2015-03-31")
+        filtered = ctx.create_filtered_ledger(ledger)
+        assert filtered.date_range is not None
+        assert filtered.date_range.begin.year == 2013
+        assert filtered.date_range.begin.month == 10
+        assert filtered.date_range.end.year == 2015
+        assert filtered.date_range.end.month == 4
+        assert len(filtered.entries) < len(ledger.all_entries)
+
+    def test_single_year(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(time="2014")
+        filtered = ctx.create_filtered_ledger(ledger)
+        assert filtered.date_range is not None
+        assert filtered.date_range.begin.year == 2014
+        assert filtered.date_range.end.year == 2015
+
+    def test_single_month(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(time="2014-06")
+        filtered = ctx.create_filtered_ledger(ledger)
+        assert filtered.date_range is not None
+        assert filtered.date_range.begin.year == 2014
+        assert filtered.date_range.begin.month == 6
+
+    def test_single_day(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(time="2014-06-15")
+        filtered = ctx.create_filtered_ledger(ledger)
+        assert filtered.date_range is not None
+        assert filtered.date_range.begin.day == 15
+
+    def test_quarter(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(time="2014-Q2")
+        filtered = ctx.create_filtered_ledger(ledger)
+        assert filtered.date_range is not None
+        assert filtered.date_range.begin.month == 4
+        assert filtered.date_range.end.month == 7
+
+    def test_year_range(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(time="2013 - 2015")
+        filtered = ctx.create_filtered_ledger(ledger)
+        assert filtered.date_range is not None
+        assert filtered.date_range.begin.year == 2013
+        assert filtered.date_range.end.year == 2016
+
+    def test_time_filter_narrows_results(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx_broad = ReportContext(time="2014")
+        ctx_narrow = ReportContext(time="2014-06")
+        broad = ctx_broad.create_filtered_ledger(ledger)
+        narrow = ctx_narrow.create_filtered_ledger(ledger)
+        assert len(broad.entries) >= len(narrow.entries)
+
+
+class TestReportContextCombinedEdgeCases:
+    def test_time_and_account_combined(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(time="2014", account="Expenses")
+        filtered = ctx.create_filtered_ledger(ledger)
+        assert filtered.date_range is not None
+        assert len(filtered.entries) > 0
+        assert len(filtered.entries) < len(ledger.all_entries)
+
+    def test_time_and_filter_combined(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(time="2014", filter="#test")
+        filtered = ctx.create_filtered_ledger(ledger)
+        assert filtered.date_range is not None
+
+    def test_account_and_filter_combined(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(account="Expenses", filter="#test")
+        filtered = ctx.create_filtered_ledger(ledger)
+        from fava.beans.account import get_entry_accounts
+
+        for entry in filtered.entries:
+            accounts = get_entry_accounts(entry)
+            tags = getattr(entry, "tags", None)
+            assert tags is not None and "test" in tags
+            assert any("Expenses" in a for a in accounts)
+
+    def test_all_three_filters_combined(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(time="2014", account="Expenses", filter="#test")
+        filtered = ctx.create_filtered_ledger(ledger)
+        assert filtered.date_range is not None
+        from fava.beans.account import get_entry_accounts
+
+        for entry in filtered.entries:
+            accounts = get_entry_accounts(entry)
+            tags = getattr(entry, "tags", None)
+            assert tags is not None and "test" in tags
+            assert any("Expenses" in a for a in accounts)
+
+    def test_nonexistent_account_produces_empty(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(account="NonExistent:Account:Path")
+        filtered = ctx.create_filtered_ledger(ledger)
+        assert len(filtered.entries) == 0
+
+    def test_nonexistent_tag_produces_empty(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(filter="#nonexistent-tag-xyz")
+        filtered = ctx.create_filtered_ledger(ledger)
+        assert len(filtered.entries) == 0
+
+    def test_conversion_does_not_affect_filter(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx_at_cost = ReportContext(
+            time="2014", conversion="at_cost"
+        )
+        ctx_units = ReportContext(time="2014", conversion="units")
+        filtered_at_cost = ctx_at_cost.create_filtered_ledger(ledger)
+        filtered_units = ctx_units.create_filtered_ledger(ledger)
+        assert len(filtered_at_cost.entries) == len(
+            filtered_units.entries
+        )
+
+    def test_interval_does_not_affect_filter(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx_month = ReportContext(time="2014", interval="month")
+        ctx_year = ReportContext(time="2014", interval="year")
+        filtered_month = ctx_month.create_filtered_ledger(ledger)
+        filtered_year = ctx_year.create_filtered_ledger(ledger)
+        assert len(filtered_month.entries) == len(
+            filtered_year.entries
+        )
+
+
+class TestReportContextFromRequestEdgeCases:
+    def test_from_request_with_time_range(
+        self, app: pytest.FixtureRequest
+    ) -> None:
+        from flask import Flask
+
+        flask_app: Flask = app  # type: ignore[assignment]
+        with flask_app.test_request_context(
+            "/long-example/?time=2013+ - +2015"
+        ):
+            ctx = ReportContext.from_request()
+            assert "2013" in ctx.time
+            assert "2015" in ctx.time
+
+    def test_from_request_with_hash_filter(
+        self, app: pytest.FixtureRequest
+    ) -> None:
+        from flask import Flask
+
+        flask_app: Flask = app  # type: ignore[assignment]
+        with flask_app.test_request_context(
+            "/long-example/?filter=%23trip"
+        ):
+            ctx = ReportContext.from_request()
+            assert ctx.filter == "#trip"
+
+    def test_from_request_with_link_filter(
+        self, app: pytest.FixtureRequest
+    ) -> None:
+        from flask import Flask
+
+        flask_app: Flask = app  # type: ignore[assignment]
+        with flask_app.test_request_context(
+            "/long-example/?filter=%5Emy-link"
+        ):
+            ctx = ReportContext.from_request()
+            assert ctx.filter == "^my-link"
+
+    def test_from_request_with_negated_tag(
+        self, app: pytest.FixtureRequest
+    ) -> None:
+        from flask import Flask
+
+        flask_app: Flask = app  # type: ignore[assignment]
+        with flask_app.test_request_context(
+            "/long-example/?filter=-%23trip"
+        ):
+            ctx = ReportContext.from_request()
+            assert ctx.filter == "-#trip"
+
+    def test_from_request_with_multiple_params(
+        self, app: pytest.FixtureRequest
+    ) -> None:
+        from flask import Flask
+
+        flask_app: Flask = app  # type: ignore[assignment]
+        with flask_app.test_request_context(
+            "/long-example/?time=2014&account=Assets&filter=%23test&conversion=units&interval=week"
+        ):
+            ctx = ReportContext.from_request()
+            assert ctx.time == "2014"
+            assert ctx.account == "Assets"
+            assert ctx.filter == "#test"
+            assert ctx.conversion == "units"
+            assert ctx.interval == "week"
+
+
+class TestReportContextEquality:
+    def test_same_params_are_equal(self) -> None:
+        ctx1 = ReportContext(time="2024", account="Assets")
+        ctx2 = ReportContext(time="2024", account="Assets")
+        assert ctx1 == ctx2
+
+    def test_different_params_are_not_equal(self) -> None:
+        ctx1 = ReportContext(time="2024")
+        ctx2 = ReportContext(time="2025")
+        assert ctx1 != ctx2
+
+    def test_hash_consistency(self) -> None:
+        ctx1 = ReportContext(time="2024", account="Assets")
+        ctx2 = ReportContext(time="2024", account="Assets")
+        assert hash(ctx1) == hash(ctx2)
+
+    def test_usable_as_dict_key(self) -> None:
+        ctx = ReportContext(time="2024")
+        d = {ctx: "value"}
+        assert d[ReportContext(time="2024")] == "value"

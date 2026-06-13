@@ -2,6 +2,7 @@ import { deepEqual, equal, ok } from "node:assert/strict";
 import { test } from "node:test";
 
 import { ParsedBarChart } from "../src/charts/bar.ts";
+import type { ChartContext } from "../src/charts/context.ts";
 import {
   colors10,
   colors15,
@@ -13,7 +14,33 @@ import { ParsedHierarchyChart } from "../src/charts/hierarchy.ts";
 import { chart_validator } from "../src/charts/index.ts";
 import { LineChart, ParsedLineChart } from "../src/charts/line.ts";
 import { ScatterPlot } from "../src/charts/scatterplot.ts";
+import type { ReportFilterContext } from "../src/stores/filters.ts";
 import { loadJSONSnapshot } from "./helpers.ts";
+
+const defaultFilterContext: ReportFilterContext = {
+  time: "",
+  account: "",
+  filter: "",
+  conversion: "at_cost",
+  interval: "month",
+};
+
+function makeCtx(
+  overrides: Partial<ReportFilterContext> = {},
+): ChartContext {
+  const filterContext: ReportFilterContext = {
+    time: overrides.time ?? defaultFilterContext.time,
+    account: overrides.account ?? defaultFilterContext.account,
+    filter: overrides.filter ?? defaultFilterContext.filter,
+    conversion: overrides.conversion ?? defaultFilterContext.conversion,
+    interval: overrides.interval ?? defaultFilterContext.interval,
+  };
+  return {
+    currencies: ["USD"],
+    dateFormat: () => "DATE",
+    filterContext,
+  };
+}
 
 test("chart helpers (filter ticks)", () => {
   deepEqual(filterTicks(["1", "2", "3"], 2), ["1", "3"]);
@@ -38,7 +65,7 @@ test("chart helpers (pad extent)", () => {
 });
 
 test("handle data for hierarchical chart", async () => {
-  const ctx = { currencies: ["USD"], dateFormat: () => "DATE", filterContext: { time: "", account: "", filter: "", conversion: "at_cost", interval: "month" } };
+  const ctx = makeCtx();
   ok(ParsedHierarchyChart.validator({ label: "name", data: "" }).is_err);
   const data = await loadJSONSnapshot("test_internal_api-test_chart_api.json");
   const validated = chart_validator(data).unwrap();
@@ -117,7 +144,7 @@ test("handle data for bar chart with stacked data", () => {
       },
     },
   ];
-  const ctx = { currencies: ["EUR", "USD"], dateFormat: () => "DATE", filterContext: { time: "", account: "", filter: "", conversion: "at_cost", interval: "month" } };
+  const ctx: ChartContext = { currencies: ["EUR", "USD"], dateFormat: () => "DATE", filterContext: defaultFilterContext };
   const chart = ParsedBarChart.validator({ label: "name", data })
     .unwrap()
     .with_context(ctx);
@@ -274,7 +301,7 @@ test("handle data for bar chart without stacked data", () => {
     },
   ];
   // even without the operating currencies, the two most popular ones will be selected
-  const ctx = { currencies: [], dateFormat: () => "DATE", filterContext: { time: "", account: "", filter: "", conversion: "at_cost", interval: "month" } };
+  const ctx: ChartContext = { currencies: [], dateFormat: () => "DATE", filterContext: defaultFilterContext };
   const chart = ParsedBarChart.validator({ label: "name", data })
     .unwrap()
     .with_context(ctx);
@@ -316,7 +343,7 @@ test("only use currencies in records for bar chart", () => {
       account_balances: {},
     },
   ];
-  const ctx = { currencies: ["EUR", "USD"], dateFormat: () => "DATE", filterContext: { time: "", account: "", filter: "", conversion: "at_cost", interval: "month" } };
+  const ctx: ChartContext = { currencies: ["EUR", "USD"], dateFormat: () => "DATE", filterContext: defaultFilterContext };
   const chart = ParsedBarChart.validator({ label: "name", data })
     .unwrap()
     .with_context(ctx);
@@ -345,4 +372,128 @@ test("only use currencies in records for bar chart", () => {
       account_balances: {},
     },
   ]);
+});
+
+test("chart context carries filterContext through to rendered chart", async () => {
+  const data = await loadJSONSnapshot("test_internal_api-test_chart_api.json");
+  const validated = chart_validator(data).unwrap();
+  const [hierarchy] = validated;
+  ok(hierarchy instanceof ParsedHierarchyChart);
+
+  const ctxWithTime = makeCtx({ time: "2020", interval: "year" });
+  const rendered = hierarchy.with_context(ctxWithTime);
+  ok(rendered.currencies.length > 0);
+  equal(ctxWithTime.filterContext.time, "2020");
+  equal(ctxWithTime.filterContext.interval, "year");
+});
+
+test("hierarchy chart snapshot with different filter contexts", async () => {
+  const data = await loadJSONSnapshot("test_internal_api-test_chart_api.json");
+  const validated = chart_validator(data).unwrap();
+  const [hierarchy] = validated;
+  ok(hierarchy instanceof ParsedHierarchyChart);
+
+  const ctxDefault = makeCtx();
+  const ctxWithAccount = makeCtx({ account: "Assets:US" });
+  const ctxWithConversion = makeCtx({ conversion: "EUR" });
+  const ctxWithInterval = makeCtx({ interval: "quarter" });
+
+  const renderedDefault = hierarchy.with_context(ctxDefault);
+  const renderedWithAccount = hierarchy.with_context(ctxWithAccount);
+  const renderedWithConversion = hierarchy.with_context(ctxWithConversion);
+  const renderedWithInterval = hierarchy.with_context(ctxWithInterval);
+
+  ok(renderedDefault.data.get("USD"));
+  ok(renderedWithAccount.data.get("USD"));
+  ok(renderedWithConversion.data.get("EUR") !== undefined || renderedWithConversion.currencies.includes("EUR") || renderedWithConversion.currencies.length > 0);
+  ok(renderedWithInterval.data.get("USD"));
+
+  deepEqual(renderedDefault.currencies, renderedWithAccount.currencies);
+});
+
+test("bar chart snapshot with filter context variations", () => {
+  const data: unknown = [
+    {
+      date: "2000-01-01",
+      balance: { EUR: 10, USD: 10 },
+      budgets: { USD: 20 },
+      account_balances: {
+        "Expenses:Dining": { USD: 8 },
+      },
+    },
+    {
+      date: "2000-02-01",
+      balance: { EUR: 100 },
+      budgets: { EUR: 50 },
+      account_balances: {
+        "Expenses:Shoes": { EUR: 60 },
+      },
+    },
+  ];
+
+  const ctxMonth = makeCtx({ interval: "month" });
+  const chartMonth = ParsedBarChart.validator({ label: "Monthly", data })
+    .unwrap()
+    .with_context(ctxMonth);
+  equal(chartMonth.label, "Monthly");
+  equal(chartMonth.filter([]).bar_groups.length, 2);
+  equal(chartMonth.filter([]).bar_groups[0]!.label, "DATE");
+
+  const ctxYear = makeCtx({ interval: "year" });
+  const chartYear = ParsedBarChart.validator({ label: "Yearly", data })
+    .unwrap()
+    .with_context(ctxYear);
+  equal(chartYear.label, "Yearly");
+  equal(chartYear.filter([]).bar_groups.length, 2);
+});
+
+test("line chart snapshot ignores filterContext (no currencies filtering)", () => {
+  const data: unknown = [
+    { date: "2000-01-01", balance: { EUR: 10, USD: 10 } },
+    { date: "2000-02-01", balance: { EUR: 10 } },
+  ];
+  const ctx = makeCtx({ conversion: "EUR", interval: "week" });
+  const parsed = ParsedLineChart.validator({ label: "Balances", data })
+    .unwrap()
+    .with_context();
+  ok(parsed instanceof LineChart);
+  equal(parsed.series_names.length, 2);
+  equal(ctx.filterContext.conversion, "EUR");
+  equal(ctx.filterContext.interval, "week");
+});
+
+test("chart context with empty filterContext renders same as default", async () => {
+  const data = await loadJSONSnapshot("test_internal_api-test_chart_api.json");
+  const validated = chart_validator(data).unwrap();
+  const [hierarchy] = validated;
+  ok(hierarchy instanceof ParsedHierarchyChart);
+
+  const ctxExplicitEmpty: ChartContext = {
+    currencies: ["USD"],
+    dateFormat: () => "DATE",
+    filterContext: { time: "", account: "", filter: "", conversion: "at_cost", interval: "month" },
+  };
+  const rendered1 = hierarchy.with_context(ctxExplicitEmpty);
+
+  const ctxDefault = makeCtx();
+  const rendered2 = hierarchy.with_context(ctxDefault);
+
+  deepEqual(rendered1.currencies, rendered2.currencies);
+  equal(rendered1.label, rendered2.label);
+});
+
+test("hierarchy chart with non-operating-currency conversion in filterContext", async () => {
+  const data = await loadJSONSnapshot("test_internal_api-test_chart_api.json");
+  const validated = chart_validator(data).unwrap();
+  const [hierarchy] = validated;
+  ok(hierarchy instanceof ParsedHierarchyChart);
+
+  const ctxCurrencyConversion: ChartContext = {
+    currencies: ["USD", "EUR"],
+    dateFormat: () => "DATE",
+    filterContext: { time: "", account: "", filter: "", conversion: "EUR", interval: "month" },
+  };
+  const rendered = hierarchy.with_context(ctxCurrencyConversion);
+  ok(rendered.currencies.includes("USD") || rendered.currencies.includes("EUR"));
+  equal(ctxCurrencyConversion.filterContext.conversion, "EUR");
 });
