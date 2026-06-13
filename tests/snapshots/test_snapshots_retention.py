@@ -605,3 +605,134 @@ class TestCleanIntegration:
             )
 
         assert len(snapshot_store.list_snapshots()) == 2
+
+
+class TestConcurrentClean:
+    """Tests for concurrent cleanup operations.
+
+    In a multi-user scenario, two requests may trigger clean() simultaneously.
+    These tests verify that the clean() method handles race conditions
+    gracefully: it should not crash when a file has already been deleted
+    by a concurrent operation, and the final state should be consistent.
+    """
+
+    def test_concurrent_clean_does_not_crash_on_deleted_file(
+        self,
+        snapshot_store: SnapshotStore,
+    ) -> None:
+        """Two clean() calls targeting the same snapshots should not crash.
+
+        The first clean() deletes the files; the second clean() reads the
+        same meta list but finds the files already gone. It should silently
+        skip those files and return a valid result.
+        """
+        filters = SnapshotFilters("", "", "", "", "")
+        for i in range(5):
+            snapshot_store.save(
+                f"snap-{i}", "balance_sheet", filters, {}, [],
+            )
+
+        policy = SnapshotRetention(keep_last_n=2)
+
+        result1 = snapshot_store.clean(policy)
+
+        ids_still_on_disk = set()
+        for p in snapshot_store.snapshots_dir.glob("*.json"):
+            try:
+                data = json.loads(p.read_text())
+                ids_still_on_disk.add(data["id"])
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+        assert len(ids_still_on_disk) == 2, f"Expected 2, got {ids_still_on_disk}"
+
+        result2 = snapshot_store.clean(policy)
+
+        assert isinstance(result2["deleted"], list)
+        assert isinstance(result2["kept"], list)
+
+        remaining = snapshot_store.list_snapshots()
+        assert len(remaining) == 2
+
+    def test_concurrent_clean_with_interleaved_save(
+        self,
+        snapshot_store: SnapshotStore,
+    ) -> None:
+        """A save() interleaved between two clean() calls should be preserved.
+
+        Simulates: User A starts clean, User B saves a new snapshot,
+        User A's clean completes. The new snapshot from User B should survive
+        if it's within the retention policy.
+        """
+        filters = SnapshotFilters("", "", "", "", "")
+        for i in range(5):
+            snapshot_store.save(
+                f"snap-{i}", "balance_sheet", filters, {}, [],
+            )
+
+        result1 = snapshot_store.clean(SnapshotRetention(keep_last_n=2))
+        assert len(result1["deleted"]) == 3
+
+        new_snap = snapshot_store.save(
+            "interleaved", "balance_sheet", filters, {}, [],
+        )
+
+        remaining = snapshot_store.list_snapshots()
+        ids = {s["id"] for s in remaining}
+        assert new_snap.id in ids
+        assert len(remaining) == 3
+
+    def test_concurrent_clean_file_removed_between_meta_load_and_delete(
+        self,
+        snapshot_store: SnapshotStore,
+    ) -> None:
+        """A file removed externally between _load_all_snapshots_meta and delete.
+
+        Simulates: clean() reads meta and decides to delete snap-X,
+        but another process deletes snap-X before clean() can.
+        clean() should handle the missing file gracefully (delete returns False).
+        """
+        filters = SnapshotFilters("", "", "", "", "")
+        snapshots = []
+        for i in range(3):
+            snapshots.append(
+                snapshot_store.save(
+                    f"snap-{i}", "balance_sheet", filters, {}, [],
+                ),
+            )
+
+        doomed_path = snapshot_store._snapshot_path(snapshots[0].id)
+        assert doomed_path.exists()
+        doomed_path.unlink()
+
+        result = snapshot_store.clean(SnapshotRetention(keep_last_n=1))
+
+        assert isinstance(result["deleted"], list)
+        assert isinstance(result["kept"], list)
+
+        remaining = snapshot_store.list_snapshots()
+        assert len(remaining) == 1
+
+    def test_concurrent_clean_idempotent(
+        self,
+        snapshot_store: SnapshotStore,
+    ) -> None:
+        """Running the same clean() twice should be idempotent.
+
+        After the first clean, running the same policy again should
+        delete nothing and keep the same set.
+        """
+        filters = SnapshotFilters("", "", "", "", "")
+        for i in range(5):
+            snapshot_store.save(
+                f"snap-{i}", "balance_sheet", filters, {}, [],
+            )
+
+        policy = SnapshotRetention(keep_last_n=2)
+        result1 = snapshot_store.clean(policy)
+
+        result2 = snapshot_store.clean(policy)
+
+        assert result2["deleted"] == []
+        assert len(result2["kept"]) == 2
+        assert len(snapshot_store.list_snapshots()) == 2

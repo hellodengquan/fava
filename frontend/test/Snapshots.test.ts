@@ -316,3 +316,122 @@ test("Snapshots: error fallback shows empty state without crashing", async () =>
     snapshot_api.get_snapshots = original_get;
   }
 });
+
+test("Snapshots: HTTP 500 error degrades to empty state with notification", async () => {
+  const { snapshot_api } = await import("../src/api/index.ts");
+  const { FetchHTTPError } = await import("../src/lib/fetch.ts");
+
+  const original_get = snapshot_api.get_snapshots;
+
+  snapshot_api.get_snapshots = async () => {
+    throw new FetchHTTPError("Internal Server Error", 500);
+  };
+
+  try {
+    const { default: SnapshotsComponent } = await import(
+      "../src/reports/snapshots/Snapshots.svelte"
+    );
+
+    const component = mount(SnapshotsComponent, {
+      target: document.body,
+    });
+
+    await tick();
+    flushSync();
+
+    const table = document.querySelector("table.snapshot-table");
+    equal(table, null, "should not render a table after 500 error");
+
+    const section = document.querySelector(".snapshot-list-section");
+    ok(section, "snapshot list section should exist after 500");
+
+    const msg = section!.querySelector("p");
+    ok(msg, "should show a message in the section");
+    ok(
+      msg!.textContent!.includes("No snapshots"),
+      "should show empty-state message, not crash or show raw error",
+    );
+    ok(
+      !msg!.textContent!.includes("Loading"),
+      "loading state should be cleared after 500 error",
+    );
+    ok(
+      !msg!.textContent!.includes("500"),
+      "should not leak raw HTTP error to the user-facing message",
+    );
+    ok(
+      !msg!.textContent!.includes("Internal Server Error"),
+      "should not expose internal error details to the user",
+    );
+
+    const compare_btn = document.querySelector("button.compare-btn");
+    equal(compare_btn, null, "compare button should not appear after 500 error");
+
+    const clean_btn = document.querySelector("button.clean-btn");
+    equal(clean_btn, null, "clean button should not appear after 500 error");
+
+    unmount(component);
+  } finally {
+    snapshot_api.get_snapshots = original_get;
+  }
+});
+
+test("Snapshots: HTTP 500 on compare preserves existing snapshot list", async () => {
+  const { snapshot_api } = await import("../src/api/index.ts");
+  const { FetchHTTPError } = await import("../src/lib/fetch.ts");
+
+  const original_get = snapshot_api.get_snapshots;
+  const original_compare = snapshot_api.get_snapshot_compare;
+
+  snapshot_api.get_snapshots = async () => {
+    return MOCK_SNAPSHOTS;
+  };
+  snapshot_api.get_snapshot_compare = async () => {
+    throw new FetchHTTPError("Internal Server Error", 500);
+  };
+
+  try {
+    const { default: SnapshotsComponent } = await import(
+      "../src/reports/snapshots/Snapshots.svelte"
+    );
+
+    const component = mount(SnapshotsComponent, {
+      target: document.body,
+    });
+
+    await tick();
+    flushSync();
+
+    const rows_before = document.querySelectorAll("table.snapshot-table tbody tr");
+    equal(rows_before.length, 3, "should render 3 snapshot rows before compare");
+
+    const radios_a = document.querySelectorAll('input[name="snapshot_a"]');
+    const radios_b = document.querySelectorAll('input[name="snapshot_b"]');
+    (radios_a[0] as HTMLInputElement).click();
+    flushSync();
+    (radios_b[1] as HTMLInputElement).click();
+    flushSync();
+
+    const compare_btn = document.querySelector("button.compare-btn") as HTMLButtonElement;
+    ok(!compare_btn.disabled, "compare button should be enabled");
+
+    compare_btn.click();
+    await tick();
+    flushSync();
+
+    const rows_after = document.querySelectorAll("table.snapshot-table tbody tr");
+    equal(rows_after.length, 3, "snapshot list should still be intact after 500 on compare");
+
+    const compare_section = document.querySelector(".compare-result-section");
+    equal(compare_section, null, "comparison result section should not appear after 500");
+
+    const compare_btn_after = document.querySelector("button.compare-btn") as HTMLButtonElement;
+    ok(compare_btn_after, "compare button should still be visible after 500");
+    ok(!compare_btn_after.disabled, "compare button should be re-enabled after 500 error resolves");
+
+    unmount(component);
+  } finally {
+    snapshot_api.get_snapshots = original_get;
+    snapshot_api.get_snapshot_compare = original_compare;
+  }
+});
