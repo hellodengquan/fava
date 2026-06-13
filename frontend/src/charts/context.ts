@@ -3,32 +3,33 @@ import { derived } from "svelte/store";
 import { currentDateFormat } from "../stores/format.ts";
 import { currencies } from "../stores/index.ts";
 import { operating_currency } from "../stores/options.ts";
-import { conversion } from "../stores/url.ts";
+import {
+  type ReportFilterContext,
+  report_filter_context,
+} from "../stores/filters.ts";
 
-/** Context data for parsing and rendering of the charts. */
 export interface ChartContext {
-  /** The list of operating currencies, complemented by the current conversion currency. */
   readonly currencies: readonly string[];
-  /** The current date format as determined from the interval. */
   readonly dateFormat: (date: Date) => string;
+  readonly filterContext: ReportFilterContext;
 }
 
-/**
- * The list of operating currencies, adding in the current conversion currency.
- */
 const operatingCurrenciesWithConversion = derived(
-  [operating_currency, currencies, conversion],
-  ([$operating_currency, $currencies, $conversion]) =>
-    $currencies.includes($conversion) &&
-    !$operating_currency.includes($conversion)
-      ? [...$operating_currency, $conversion]
+  [operating_currency, currencies, report_filter_context],
+  ([$operating_currency, $currencies, $context]) =>
+    $currencies.includes($context.conversion) &&
+    !$operating_currency.includes($context.conversion)
+      ? [...$operating_currency, $context.conversion]
       : $operating_currency,
 );
 
 export const chartContext = derived(
-  [operatingCurrenciesWithConversion, currentDateFormat],
-  ([$operatingCurrenciesWithConversion, $currentDateFormat]): ChartContext => ({
+  [operatingCurrenciesWithConversion, currentDateFormat, report_filter_context],
+  (
+    [$operatingCurrenciesWithConversion, $currentDateFormat, $filterContext],
+  ): ChartContext => ({
     currencies: $operatingCurrenciesWithConversion,
     dateFormat: $currentDateFormat,
+    filterContext: $filterContext,
   }),
 );

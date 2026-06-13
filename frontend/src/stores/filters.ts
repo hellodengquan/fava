@@ -62,12 +62,14 @@ export interface ReportFilterContext extends FiltersConversionInterval {
  * @returns A ReportFilterContext populated from the URL's search params.
  */
 export function getReportFilterContext(url: URL): ReportFilterContext {
+  const conversion = url.searchParams.get("conversion");
+  const interval = url.searchParams.get("interval");
   return {
     time: url.searchParams.get("time") ?? "",
     account: url.searchParams.get("account") ?? "",
     filter: url.searchParams.get("filter") ?? "",
-    conversion: url.searchParams.get("conversion") ?? "at_cost",
-    interval: url.searchParams.get("interval")?.toLowerCase() ?? "month",
+    conversion: conversion || "at_cost",
+    interval: interval ? interval.toLowerCase() : "month",
   };
 }
 
@@ -84,8 +86,8 @@ export function reportFilterContextFromDict(
     time: params.time ?? "",
     account: params.account ?? "",
     filter: params.filter ?? "",
-    conversion: params.conversion ?? "at_cost",
-    interval: params.interval?.toLowerCase() ?? "month",
+    conversion: params.conversion || "at_cost",
+    interval: params.interval ? params.interval.toLowerCase() : "month",
   };
 }
 
@@ -150,13 +152,17 @@ export const filter_params = derived(
  */
 export const report_filter_context: Readable<ReportFilterContext> = derived(
   searchParams,
-  ($searchParams): ReportFilterContext => ({
-    time: $searchParams.get("time") ?? "",
-    account: $searchParams.get("account") ?? "",
-    filter: $searchParams.get("filter") ?? "",
-    conversion: $searchParams.get("conversion") ?? "at_cost",
-    interval: $searchParams.get("interval")?.toLowerCase() ?? "month",
-  }),
+  ($searchParams): ReportFilterContext => {
+    const conversion = $searchParams.get("conversion");
+    const interval = $searchParams.get("interval");
+    return {
+      time: $searchParams.get("time") ?? "",
+      account: $searchParams.get("account") ?? "",
+      filter: $searchParams.get("filter") ?? "",
+      conversion: conversion || "at_cost",
+      interval: interval ? interval.toLowerCase() : "month",
+    };
+  },
 );
 
 /**

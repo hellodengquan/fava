@@ -8,7 +8,7 @@
   } from "../lib/interval.ts";
   import { router } from "../router.ts";
   import { conversions } from "../stores/chart.ts";
-  import { conversion, interval } from "../stores/url.ts";
+  import { report_filter_context } from "../stores/filters.ts";
   import SelectCombobox from "./SelectCombobox.svelte";
 
   const conversion_description = (option: string) => {
@@ -30,7 +30,7 @@
 
 <SelectCombobox
   bind:value={
-    () => $conversion,
+    () => $report_filter_context.conversion,
     (value: string) => {
       router.set_search_param("conversion", value === "at_cost" ? "" : value);
     }
@@ -42,7 +42,7 @@
 
 <SelectCombobox
   bind:value={
-    () => $interval,
+    () => $report_filter_context.interval,
     (value: string) => {
       router.set_search_param(
         "interval",

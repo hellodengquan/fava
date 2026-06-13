@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from fava.core import ReportContext
 from fava.internal_api import BalancesChart
 from fava.internal_api import BarChart
 from fava.internal_api import ChartApi
 from fava.internal_api import get_ledger_data
 from fava.internal_api import HierarchyChart
-from fava.util.date import Month
 
 if TYPE_CHECKING:  # pragma: no cover
     from flask import Flask
@@ -47,7 +47,7 @@ def test_chart_api(app: Flask, snapshot: SnapshotFunc) -> None:
         assert net_worth.label == "Net Worth"
         assert net_worth.type == "balances"
 
-        interval_totals = ChartApi.interval_totals(Month, "Income")
+        interval_totals = ChartApi.interval_totals("Income")
         assert isinstance(interval_totals, BarChart)
         assert len(interval_totals.data) == 100
         assert interval_totals.label == "Income"
@@ -56,4 +56,27 @@ def test_chart_api(app: Flask, snapshot: SnapshotFunc) -> None:
         snapshot(
             [hierarchy, balances, net_worth, interval_totals],
             json=True,
+        )
+
+
+def test_chart_api_with_context(app: Flask, snapshot: SnapshotFunc) -> None:
+    """Chart API works with explicit ReportContext."""
+    with app.test_request_context("/long-example/"):
+        app.preprocess_request()
+
+        ctx_year = ReportContext(interval="year")
+        interval_totals_year = ChartApi.interval_totals(
+            "Income", context=ctx_year
+        )
+        assert isinstance(interval_totals_year, BarChart)
+        assert interval_totals_year.type == "bar"
+
+        ctx_quarter = ReportContext(interval="quarter")
+        interval_totals_quarter = ChartApi.interval_totals(
+            "Income", context=ctx_quarter
+        )
+        assert isinstance(interval_totals_quarter, BarChart)
+
+        assert len(interval_totals_year.data) != len(
+            interval_totals_quarter.data
         )

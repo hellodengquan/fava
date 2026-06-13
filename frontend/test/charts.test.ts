@@ -38,7 +38,7 @@ test("chart helpers (pad extent)", () => {
 });
 
 test("handle data for hierarchical chart", async () => {
-  const ctx = { currencies: ["USD"], dateFormat: () => "DATE" };
+  const ctx = { currencies: ["USD"], dateFormat: () => "DATE", filterContext: { time: "", account: "", filter: "", conversion: "at_cost", interval: "month" } };
   ok(ParsedHierarchyChart.validator({ label: "name", data: "" }).is_err);
   const data = await loadJSONSnapshot("test_internal_api-test_chart_api.json");
   const validated = chart_validator(data).unwrap();
@@ -117,7 +117,7 @@ test("handle data for bar chart with stacked data", () => {
       },
     },
   ];
-  const ctx = { currencies: ["EUR", "USD"], dateFormat: () => "DATE" };
+  const ctx = { currencies: ["EUR", "USD"], dateFormat: () => "DATE", filterContext: { time: "", account: "", filter: "", conversion: "at_cost", interval: "month" } };
   const chart = ParsedBarChart.validator({ label: "name", data })
     .unwrap()
     .with_context(ctx);
@@ -274,7 +274,7 @@ test("handle data for bar chart without stacked data", () => {
     },
   ];
   // even without the operating currencies, the two most popular ones will be selected
-  const ctx = { currencies: [], dateFormat: () => "DATE" };
+  const ctx = { currencies: [], dateFormat: () => "DATE", filterContext: { time: "", account: "", filter: "", conversion: "at_cost", interval: "month" } };
   const chart = ParsedBarChart.validator({ label: "name", data })
     .unwrap()
     .with_context(ctx);
@@ -316,7 +316,7 @@ test("only use currencies in records for bar chart", () => {
       account_balances: {},
     },
   ];
-  const ctx = { currencies: ["EUR", "USD"], dateFormat: () => "DATE" };
+  const ctx = { currencies: ["EUR", "USD"], dateFormat: () => "DATE", filterContext: { time: "", account: "", filter: "", conversion: "at_cost", interval: "month" } };
   const chart = ParsedBarChart.validator({ label: "name", data })
     .unwrap()
     .with_context(ctx);

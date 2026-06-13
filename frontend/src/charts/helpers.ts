@@ -6,11 +6,6 @@ import { currentTimeFilterDateFormat } from "../stores/format.ts";
 import { accounts, currencies_sorted } from "../stores/index.ts";
 import { operating_currency } from "../stores/options.ts";
 
-/**
- * Set the time filter to the given value (formatted according to the current interval).
- * @param date - a date.
- * @returns A URL for the given interval.
- */
 export function urlForTimeFilter(date: Date): string {
   const url = new URL(window.location.href);
   url.searchParams.set("time", store_get(currentTimeFilterDateFormat)(date));
