@@ -1,4 +1,4 @@
-"""Document gap checking functionality.
+"""Document gap checking functionality for Fava.
 
 This module provides functionality to check for missing documents/receipts
 for transactions, both by transaction and by account dimensions.
@@ -7,8 +7,10 @@ It supports filtering, marking items as handled, and viewing statistics.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from fava.beans.abc import Document
@@ -94,10 +96,17 @@ def _posting_total_amount(postings: Sequence[Posting]) -> str:
     return ""
 
 
+_DOCUMENT_META_RE = re.compile(r"^document(\d*)$", re.IGNORECASE)
+
+
 def _has_document_metadata(entry: Directive) -> bool:
-    """Check if entry has document-related metadata keys."""
+    """Check if entry has document-related metadata keys.
+
+    Matches keys like 'document', 'document2', 'Document' etc.,
+    but not keys like 'document_gap_handled'.
+    """
     return any(
-        isinstance(v, str) and k.lower().startswith("document")
+        isinstance(v, str) and _DOCUMENT_META_RE.match(k)
         for k, v in entry.meta.items()
     )
 
@@ -105,7 +114,13 @@ def _has_document_metadata(entry: Directive) -> bool:
 def _is_handled(entry: Directive) -> bool:
     """Check if a transaction has been marked as having its document gap handled."""
     value = entry.meta.get("document_gap_handled", None)
-    return value is not None and value is not False
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in ("true", "1", "yes", "t", "y")
+    return bool(value)
 
 
 def _build_document_link_set(

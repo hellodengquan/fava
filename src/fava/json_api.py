@@ -1012,7 +1012,7 @@ def put_mark_document_gap(entry_hash: str, handled: str) -> str:
 
     meta_key = "document_gap_handled"
     if handled_bool:
-        g.ledger.file.insert_metadata(entry_hash, meta_key, True)
+        g.ledger.file.insert_metadata(entry_hash, meta_key, "True")
     else:
         g.ledger.file.remove_metadata(entry_hash, meta_key)
 

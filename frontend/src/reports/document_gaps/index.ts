@@ -50,6 +50,9 @@ export interface DocumentGapsReportProps {
   report: DocumentGapReport;
 }
 
+export type ViewMode = "transactions" | "accounts";
+export type HandledFilter = "all" | "unhandled" | "handled";
+
 export const document_gaps = new Route(
   "document_gaps",
   DocumentGaps,
