@@ -24,5 +24,6 @@
 *.so
 .DS_Store
 .env
+.fava-snapshots/
 __pycache__
 npm-debug.log

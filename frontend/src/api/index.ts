@@ -24,6 +24,8 @@ import {
   importable_files_validator,
   ledgerDataValidator,
   options_validator,
+  snapshot_compare_validator,
+  snapshot_meta_validator,
   source_validator,
   type SourceFile,
   statistics_validator,
@@ -42,7 +44,7 @@ class InvalidResponseDataError extends Error {
 //
 // For each HTTP endpoint, a function with types for the parameters and
 // a validator for the response should be added to this module.
-type DeleteEndpoint = "document" | "source_slice";
+type DeleteEndpoint = "document" | "snapshot" | "source_slice";
 type GetEndpoint =
   | "balance_sheet"
   | "account_report"
@@ -64,6 +66,8 @@ type GetEndpoint =
   | "narration_transaction"
   | "narrations"
   | "query"
+  | "snapshot_compare"
+  | "snapshots"
   | "source"
   | "statistics";
 type PutEndpoint =
@@ -72,6 +76,7 @@ type PutEndpoint =
   | "attach_document"
   | "format_source"
   | "move"
+  | "snapshot"
   | "source"
   | "source_slice"
   | "upload_import_file";
@@ -93,7 +98,11 @@ type ApiParams = Partial<{
   payee: string;
   query_string: string;
   r: string;
+  report_type: string;
   sha256sum: string;
+  snapshot_a: string;
+  snapshot_b: string;
+  snapshot_id: string;
   time: string;
 }>;
 type ApiParam = keyof ApiParams;
@@ -402,3 +411,50 @@ export async function save_entries(
     throw error;
   }
 }
+
+const filters_conversion_interval = [
+  "account",
+  "conversion",
+  "filter",
+  "interval",
+  "time",
+] as const;
+
+export const get_snapshots = define_endpoint(
+  "snapshots",
+  array(snapshot_meta_validator),
+  [],
+);
+
+export const get_snapshot_compare = define_endpoint(
+  "snapshot_compare",
+  snapshot_compare_validator,
+  ["snapshot_a", "snapshot_b"],
+);
+
+export async function put_snapshot(
+  params: Record<string, string>,
+): Promise<{ id: string; name: string; created_at: string }> {
+  const { name, report_type, ...url_params } = params;
+  const url = api_url(
+    "snapshot",
+    filters_conversion_interval as readonly ApiParam[],
+    url_params,
+  );
+  return fetch_and_handle_api_call(
+    url,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, report_type }),
+    },
+    object({ id: string, name: string, created_at: string }),
+  );
+}
+
+export const delete_snapshot = define_endpoint(
+  "snapshot",
+  string,
+  ["snapshot_id"],
+  "DELETE",
+);

@@ -83,6 +83,7 @@ CLIENT_SIDE_REPORTS = [
     "income_statement",
     "options",
     "query",
+    "snapshots",
     "statistics",
     "trial_balance",
 ]

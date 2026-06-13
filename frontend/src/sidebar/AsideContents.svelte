@@ -51,6 +51,7 @@
     key="g E"
     bubble={[upcoming_events_count, "info"]}
   />
+  <Link report="snapshots" name={_("Snapshots")} key="g S" />
   <Link report="statistics" name={_("Statistics")} key="g s" />
 </ul>
 <ul class="navigation">

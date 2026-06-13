@@ -10,6 +10,7 @@ import { journal } from "./journal/index.ts";
 import { options } from "./options/index.ts";
 import { query } from "./query/index.ts";
 import type { FrontendRoute } from "./route.ts";
+import { snapshots } from "./snapshots/index.ts";
 import { statistics } from "./statistics/index.ts";
 import {
   balance_sheet,
@@ -39,6 +40,7 @@ export const frontend_routes: FrontendRoute[] = [
   journal,
   options,
   query,
+  snapshots,
   statistics,
   trial_balance,
 ];

@@ -887,3 +887,132 @@ def get_statistics() -> Statistics:
         balances=balances,
         entries_by_type=entries_by_type,
     )
+
+
+@api_endpoint
+def put_snapshot(name: str, report_type: str) -> Mapping[str, Any]:
+    """Save a report snapshot with the current filters."""
+    from fava.core.conversion import UNITS
+    from fava.core.snapshots import SnapshotFilters
+
+    filters = SnapshotFilters(
+        time=request.args.get("time", ""),
+        account=request.args.get("account", ""),
+        filter=request.args.get("filter", ""),
+        conversion=request.args.get("conversion", ""),
+        interval=request.args.get("interval", ""),
+    )
+
+    balances = {
+        account_name: UNITS.apply(node.balance)
+        for account_name, node in g.filtered.root_tree.items()
+    }
+
+    trees: list[Any] = []
+    budgets_data = None
+    if report_type == "balance_sheet":
+        options = g.ledger.options
+        root_tree_closed = g.filtered.root_tree_closed
+        trees = [
+            root_tree_closed.get(options["name_assets"]).serialise_with_context(),
+            root_tree_closed.get(options["name_liabilities"]).serialise_with_context(),
+            root_tree_closed.get(options["name_equity"]).serialise_with_context(),
+        ]
+    elif report_type == "income_statement":
+        options = g.ledger.options
+        root_tree = g.filtered.root_tree
+        trees = [
+            root_tree.get(options["name_income"]).serialise_with_context(),
+            root_tree.net_profit(options, gettext("Net Profit")).serialise_with_context(),
+            root_tree.get(options["name_expenses"]).serialise_with_context(),
+        ]
+    elif report_type == "trial_balance":
+        trees = [g.filtered.root_tree.get("").serialise_with_context()]
+
+    if report_type == "account_report":
+        account_name = request.args.get("a", "")
+        subreport = request.args.get("r")
+        if subreport in {"changes", "balances"}:
+            accumulate = subreport == "balances"
+            interval_balances, dates = g.ledger.interval_balances(
+                g.filtered,
+                g.interval,
+                account_name,
+                accumulate=accumulate,
+            )
+            all_accounts = (
+                interval_balances[0].accounts if interval_balances else []
+            )
+            budget_accounts = [
+                a for a in all_accounts if a.startswith(account_name)
+            ]
+            budgets_mod = g.ledger.budgets
+            first_date_range = dates[-1] if dates else None
+            budgets_data = {}
+            for account in budget_accounts:
+                budget_list = []
+                for date_range in dates:
+                    budget_list.append(
+                        {
+                            "budget": budgets_mod.calculate(
+                                account,
+                                (first_date_range if accumulate else date_range).begin,
+                                date_range.end,
+                            ),
+                            "budget_children": budgets_mod.calculate_children(
+                                account,
+                                (first_date_range if accumulate else date_range).begin,
+                                date_range.end,
+                            ),
+                        },
+                    )
+                budgets_data[account] = budget_list
+            trees = [
+                tree.get(account_name).serialise(
+                    g.conv,
+                    g.ledger.prices,
+                    date_range.end_inclusive,
+                    with_cost=False,
+                )
+                for tree, date_range in zip(
+                    interval_balances, dates, strict=True
+                )
+            ]
+
+    snapshot = g.ledger.snapshots.save(
+        name=name,
+        report_type=report_type,
+        filters=filters,
+        balances=balances,
+        trees=trees,
+        budgets=budgets_data,
+    )
+    return {
+        "id": snapshot.id,
+        "name": snapshot.name,
+        "created_at": snapshot.created_at,
+    }
+
+
+@api_endpoint
+def get_snapshots() -> Sequence[Mapping[str, Any]]:
+    """List all snapshots."""
+    return g.ledger.snapshots.list_snapshots()
+
+
+@api_endpoint
+def get_snapshot_compare(snapshot_a: str, snapshot_b: str) -> Mapping[str, Any]:
+    """Compare two snapshots."""
+    result = g.ledger.snapshots.compare(snapshot_a, snapshot_b)
+    if result is None:
+        raise NotFoundError
+    return result
+
+
+@api_endpoint
+def delete_snapshot(snapshot_id: str) -> str:
+    """Delete a snapshot."""
+    deleted = g.ledger.snapshots.delete(snapshot_id)
+    if not deleted:
+        raise NotFoundError
+    return f"Deleted snapshot {snapshot_id}."

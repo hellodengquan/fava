@@ -1,18 +1,21 @@
 import { account_hierarchy_validator } from "../charts/hierarchy.ts";
 import { chart_validator } from "../charts/index.ts";
 import { entryBaseValidator } from "../entries/index.ts";
-import type { ValidationT } from "../lib/validation.ts";
+import type { ValidationT, Validator } from "../lib/validation.ts";
 import {
   array,
   boolean,
   constants,
   date,
+  defaultValue,
+  lazy,
   number,
   object,
   optional,
   record,
   string,
   tuple,
+  unknown,
 } from "../lib/validation.ts";
 import { Inventory } from "../reports/query/query_table.ts";
 
@@ -182,4 +185,66 @@ export const statistics_validator = object({
 export const options_validator = object({
   fava_options: record(string),
   beancount_options: record(string),
+});
+
+const snapshot_filters = object({
+  time: string,
+  account: string,
+  filter: string,
+  conversion: string,
+  interval: string,
+});
+
+export const snapshot_meta_validator = object({
+  id: string,
+  name: string,
+  created_at: string,
+  filters: snapshot_filters,
+  report_type: string,
+});
+
+export type SnapshotMeta = ValidationT<typeof snapshot_meta_validator>;
+
+const tree_node_diff_validator: Validator<TreeNodeDiff> = lazy(() =>
+  object({
+    account: string,
+    balance_diff: record(number),
+    balance_children_diff: record(number),
+    cost_diff: optional(record(number)),
+    cost_children_diff: optional(record(number)),
+    has_txns: defaultValue(boolean, () => false),
+    children: array(tree_node_diff_validator),
+  }),
+);
+
+interface TreeNodeDiff {
+  account: string;
+  balance_diff: Record<string, number>;
+  balance_children_diff: Record<string, number>;
+  cost_diff: Record<string, number> | null;
+  cost_children_diff: Record<string, number> | null;
+  has_txns: boolean;
+  children: TreeNodeDiff[];
+}
+
+export const snapshot_compare_validator = object({
+  snapshot_a: object({
+    id: string,
+    name: string,
+    created_at: string,
+    filters: snapshot_filters,
+  }),
+  snapshot_b: object({
+    id: string,
+    name: string,
+    created_at: string,
+    filters: snapshot_filters,
+  }),
+  balance_diff: record(record(number)),
+  tree_diff: array(tree_node_diff_validator),
+  budget_diff: optional(record(array(object({
+    budget_diff: record(number),
+    budget_children_diff: record(number),
+  })))),
+  holdings_diff: optional(array(record(unknown))),
 });

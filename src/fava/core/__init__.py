@@ -46,6 +46,7 @@ from fava.core.misc import FavaMisc
 from fava.core.number import DecimalFormatModule
 from fava.core.query_shell import QueryShell
 from fava.core.tree import Tree
+from fava.core.snapshots import SnapshotStore
 from fava.core.watcher import Watcher
 from fava.core.watcher import WatchfilesWatcher
 from fava.helpers import FavaAPIError
@@ -318,6 +319,7 @@ class FavaLedger:
         "options",
         "prices",
         "query_shell",
+        "snapshots",
         "watcher",
     )
 
@@ -399,6 +401,7 @@ class FavaLedger:
         self.ingest = IngestModule(self)
         self.misc = FavaMisc(self)
         self.query_shell = QueryShell(self)
+        self.snapshots = SnapshotStore(self)
 
         self.watcher = WatchfilesWatcher() if not poll_watcher else Watcher()
 
@@ -436,6 +439,7 @@ class FavaLedger:
         self.format_decimal.load_file()
         self.misc.load_file()
         self.query_shell.load_file()
+        self.snapshots.load_file()
         self.ingest.load_file()
 
         self.extensions.after_load_file()
