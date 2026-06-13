@@ -6,7 +6,7 @@ import type { NonRelativeUrlPathError } from "../../helpers.ts";
 import { getUrlPath } from "../../helpers.ts";
 import { fragment_from_string } from "../../lib/dom.ts";
 import { err, ok, type Result } from "../../lib/result.ts";
-import { getURLFilters } from "../../stores/filters.ts";
+import { getReportFilterContext } from "../../stores/filters.ts";
 import { Route } from "../route.ts";
 import AccountReport from "./AccountReport.svelte";
 
@@ -52,9 +52,10 @@ export const account_report = new Route<AccountReportProps>(
   async (url) => {
     const account = get_account_from_url(url).unwrap();
     const report_type = to_report_type(url.searchParams.get("r"));
+    const context = getReportFilterContext(url);
     const { charts, journal, interval_balances, dates, budgets } =
       await get_account_report({
-        ...getURLFilters(url),
+        ...context,
         a: account,
         r: report_type,
       });

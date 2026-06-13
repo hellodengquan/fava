@@ -15,6 +15,7 @@ from flask import url_for
 from flask_babel import gettext
 
 from fava.context import g
+from fava.core import ReportContext
 from fava.util.excel import HAVE_EXCEL
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -162,17 +163,35 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 class ChartApi:
-    """Functions to generate chart data."""
+    """Functions to generate chart data.
+
+    All chart generation methods should use the same ReportContext as the
+    corresponding table data to ensure consistency. The context provides
+    a single source of truth for all filtering parameters (time, account,
+    filter, conversion, interval).
+    """
 
     @staticmethod
-    def account_balance(account_name: str) -> ChartData:
-        """Generate data for an account balances chart."""
+    def account_balance(
+        account_name: str,
+        *,
+        context: ReportContext | None = None,
+    ) -> ChartData:
+        """Generate data for an account balances chart.
+
+        Args:
+            account_name: The account to generate balance data for.
+            context: Optional ReportContext to use. If not provided,
+                uses the current request context.
+        """
+        ctx = context or g.report_context
+        filtered = ctx.create_filtered_ledger(g.ledger)
         return BalancesChart(
             gettext("Account Balance"),
             g.ledger.charts.linechart(
-                g.filtered,
+                filtered,
                 account_name,
-                g.conv,
+                ctx.parsed_conversion,
             ),
         )
 
@@ -181,41 +200,76 @@ class ChartApi:
         account_name: str,
         *,
         label: str | None = None,
+        context: ReportContext | None = None,
     ) -> ChartData:
-        """Generate data for an account hierarchy chart."""
+        """Generate data for an account hierarchy chart.
+
+        Args:
+            account_name: The root account for the hierarchy.
+            label: Optional label for the chart.
+            context: Optional ReportContext to use. If not provided,
+                uses the current request context.
+        """
+        ctx = context or g.report_context
+        filtered = ctx.create_filtered_ledger(g.ledger)
         return HierarchyChart(
             label or account_name,
             g.ledger.charts.hierarchy(
-                g.filtered,
+                filtered,
                 account_name,
-                g.conv,
+                ctx.parsed_conversion,
             ),
         )
 
     @staticmethod
     def interval_totals(
-        interval: Interval,
         account_name: str | tuple[str, ...],
         label: str | None = None,
         *,
         invert: bool = False,
+        context: ReportContext | None = None,
     ) -> ChartData:
-        """Generate data for an account per interval chart."""
+        """Generate data for an account per interval chart.
+
+        The interval is automatically derived from the context, ensuring
+        consistency with the table data.
+
+        Args:
+            account_name: The account(s) to generate totals for.
+            label: Optional label for the chart.
+            invert: Whether to invert the values.
+            context: Optional ReportContext to use. If not provided,
+                uses the current request context.
+        """
+        ctx = context or g.report_context
+        filtered = ctx.create_filtered_ledger(g.ledger)
         return BarChart(
             label or str(account_name),
             g.ledger.charts.interval_totals(
-                g.filtered,
-                interval,
+                filtered,
+                ctx.parsed_interval,
                 account_name,
-                g.conv,
+                ctx.parsed_conversion,
                 invert=invert,
             ),
         )
 
     @staticmethod
-    def net_worth() -> ChartData:
-        """Generate data for net worth chart."""
+    def net_worth(
+        *,
+        context: ReportContext | None = None,
+    ) -> ChartData:
+        """Generate data for net worth chart.
+
+        Args:
+            context: Optional ReportContext to use. If not provided,
+                uses the current request context.
+        """
+        ctx = context or g.report_context
+        filtered = ctx.create_filtered_ledger(g.ledger)
         return BalancesChart(
             gettext("Net Worth"),
-            g.ledger.charts.net_worth(g.filtered, g.interval, g.conv),
+            g.ledger.charts.net_worth(
+                filtered, ctx.parsed_interval, ctx.parsed_conversion
+            ),
         )

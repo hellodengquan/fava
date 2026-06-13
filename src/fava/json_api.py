@@ -670,28 +670,33 @@ class TreeReport:
 
 @api_endpoint
 def get_income_statement() -> TreeReport:
-    """Get the data for the income statement."""
+    """Get the data for the income statement.
+
+    Uses the unified ReportContext to ensure charts and tables use the
+    same filtering parameters.
+    """
     g.ledger.changed()
     options = g.ledger.options
     invert = g.ledger.fava_options.invert_income_liabilities_equity
+    context = g.report_context
 
     charts = [
         ChartApi.interval_totals(
-            g.interval,
             (options["name_income"], options["name_expenses"]),
             label=gettext("Net Profit"),
             invert=invert,
+            context=context,
         ),
         ChartApi.interval_totals(
-            g.interval,
             options["name_income"],
-            label=f"{gettext('Income')} ({g.interval.label})",
+            label=f"{gettext('Income')} ({context.parsed_interval.label})",
             invert=invert,
+            context=context,
         ),
         ChartApi.interval_totals(
-            g.interval,
             options["name_expenses"],
-            label=f"{gettext('Expenses')} ({g.interval.label})",
+            label=f"{gettext('Expenses')} ({context.parsed_interval.label})",
+            context=context,
         ),
     ]
     root_tree = g.filtered.root_tree
@@ -710,11 +715,16 @@ def get_income_statement() -> TreeReport:
 
 @api_endpoint
 def get_balance_sheet() -> TreeReport:
-    """Get the data for the balance sheet."""
+    """Get the data for the balance sheet.
+
+    Uses the unified ReportContext to ensure charts and tables use the
+    same filtering parameters.
+    """
     g.ledger.changed()
     options = g.ledger.options
+    context = g.report_context
 
-    charts = [ChartApi.net_worth()]
+    charts = [ChartApi.net_worth(context=context)]
     root_tree_closed = g.filtered.root_tree_closed
     trees = [
         root_tree_closed.get(options["name_assets"]),
@@ -771,18 +781,23 @@ class AccountReportTree:
 
 @api_endpoint
 def get_account_report() -> AccountReportJournal | AccountReportTree:
-    """Get the data for the account report."""
+    """Get the data for the account report.
+
+    Uses the unified ReportContext to ensure charts and tables use the
+    same filtering parameters.
+    """
     g.ledger.changed()
 
     account_name = request.args.get("a", "")
     subreport = request.args.get("r")
+    context = g.report_context
 
     charts = [
-        ChartApi.account_balance(account_name),
+        ChartApi.account_balance(account_name, context=context),
         ChartApi.interval_totals(
-            g.interval,
             account_name,
             label=gettext("Changes"),
+            context=context,
         ),
     ]
 
@@ -790,7 +805,7 @@ def get_account_report() -> AccountReportJournal | AccountReportTree:
         accumulate = subreport == "balances"
         interval_balances, dates = g.ledger.interval_balances(
             g.filtered,
-            g.interval,
+            context.parsed_interval,
             account_name,
             accumulate=accumulate,
         )

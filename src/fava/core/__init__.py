@@ -46,6 +46,7 @@ from fava.core.misc import FavaMisc
 from fava.core.number import DecimalFormatModule
 from fava.core.query_shell import QueryShell
 from fava.core.tree import Tree
+from fava.core.report_context import ReportContext
 from fava.core.watcher import Watcher
 from fava.core.watcher import WatchfilesWatcher
 from fava.helpers import FavaAPIError
@@ -169,6 +170,30 @@ class FilteredLedger:
             if isinstance(entry, (Transaction, Price)):
                 self._date_last = entry.date + timedelta(1)
                 break
+
+    @classmethod
+    def from_report_context(
+        cls, ledger: FavaLedger, context: ReportContext
+    ) -> "FilteredLedger":
+        """Create a FilteredLedger from a ReportContext.
+
+        This ensures that the FilteredLedger uses exactly the same parameters
+        as the rest of the report context, guaranteeing consistency between
+        chart and table data sources.
+
+        Args:
+            ledger: The FavaLedger to filter.
+            context: The ReportContext containing filter parameters.
+
+        Returns:
+            A FilteredLedger configured with the context's parameters.
+        """
+        return cls(
+            ledger=ledger,
+            account=context.account,
+            filter=context.filter,
+            time=context.time,
+        )
 
     @property
     def end_date(self) -> date | None:
@@ -455,6 +480,27 @@ class FavaLedger:
         """
         return FilteredLedger(
             ledger=self, account=account, filter=filter, time=time
+        )
+
+    def get_filtered_from_context(
+        self, context: ReportContext
+    ) -> FilteredLedger:
+        """Create a FilteredLedger from a ReportContext.
+
+        This method ensures that the FilteredLedger is created using the
+        same parameters as the report context, maintaining consistency
+        between charts and tables.
+
+        Args:
+            context: The ReportContext containing filter parameters.
+
+        Returns:
+            A FilteredLedger configured with the context's parameters.
+        """
+        return self.get_filtered(
+            account=context.account,
+            filter=context.filter,
+            time=context.time,
         )
 
     @property

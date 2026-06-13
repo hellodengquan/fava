@@ -1,7 +1,7 @@
 import { get_query } from "../../api/index.ts";
 import { getUrlPath } from "../../helpers.ts";
 import { _ } from "../../i18n.ts";
-import { getURLFilters } from "../../stores/filters.ts";
+import { getReportFilterContext } from "../../stores/filters.ts";
 import type { QueryResultTable } from "../query/query_table.ts";
 import { Route } from "../route.ts";
 import Holdings from "./Holdings.svelte";
@@ -80,9 +80,10 @@ export const holdings = new Route<HoldingsReportProps>(
     const [, key = ""] = getUrlPath(url).unwrap().split("/");
     const aggregation_key = to_report_type(key);
     const query_string = QUERIES[aggregation_key];
+    const context = getReportFilterContext(url);
     const query_result_table = await get_query({
       query_string,
-      ...getURLFilters(url),
+      ...context,
     });
     if (query_result_table.t !== "table") {
       throw new Error("Internal error: expected a query result table");

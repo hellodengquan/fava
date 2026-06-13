@@ -5,8 +5,7 @@ from __future__ import annotations
 from functools import cached_property
 from typing import TYPE_CHECKING
 
-from flask import request
-
+from fava.core import ReportContext
 from fava.core.conversion import conversion_from_str
 from fava.util.date import INTERVALS
 from fava.util.date import Month
@@ -30,26 +29,32 @@ class Context:
     extension: FavaExtensionBase | None
 
     @cached_property
+    def report_context(self) -> ReportContext:
+        """The unified report filter context.
+
+        This provides a single source of truth for all filtering and display
+        parameters (time, account, filter, conversion, interval).
+        All other properties that depend on these parameters should derive
+        from this context to ensure consistency.
+        """
+        return ReportContext.from_request()
+
+    @cached_property
     def conversion(self) -> str:
         """Conversion to apply (raw string)."""
-        return request.args.get("conversion", "") or "at_cost"
+        return self.report_context.conversion
 
     @cached_property
     def conv(self) -> Conversion:
         """Conversion to apply (parsed)."""
-        return conversion_from_str(self.conversion)
+        return self.report_context.parsed_conversion
 
     @cached_property
     def interval(self) -> Interval:
         """Interval to group by."""
-        return INTERVALS.get(request.args.get("interval", "").lower(), Month)
+        return self.report_context.parsed_interval
 
     @cached_property
     def filtered(self) -> FilteredLedger:
         """The filtered ledger."""
-        args = request.args
-        return self.ledger.get_filtered(
-            account=args.get("account", ""),
-            filter=args.get("filter", ""),
-            time=args.get("time", ""),
-        )
+        return self.report_context.create_filtered_ledger(self.ledger)

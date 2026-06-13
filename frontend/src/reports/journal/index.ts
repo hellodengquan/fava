@@ -7,7 +7,7 @@ import { fragment_from_string } from "../../lib/dom.ts";
 import { shallow_equal } from "../../lib/equals.ts";
 import { log_error } from "../../log.ts";
 import { notify_err } from "../../notifications.ts";
-import { getURLFilters } from "../../stores/filters.ts";
+import { getReportFilterContext } from "../../stores/filters.ts";
 import { journal_sort, type JournalSort } from "../../stores/journal.ts";
 import { Route } from "../route.ts";
 import Journal from "./Journal.svelte";
@@ -22,13 +22,13 @@ export const journal = new Route<JournalReportProps>(
   "journal",
   Journal,
   async (url: URL) => {
-    const filters = getURLFilters(url);
+    const context = getReportFilterContext(url);
     const $journal_sort = store_get(journal_sort);
     const order = shallow_equal($journal_sort, ["date", "asc"])
       ? "asc"
       : "desc";
     const { journal, total_pages } = await get_journal_page({
-      ...filters,
+      ...context,
       page: 1,
       order,
     });
@@ -36,7 +36,7 @@ export const journal = new Route<JournalReportProps>(
     let error_shown = false;
     const pages = range(2, total_pages + 1);
     const all_pages = pages.map(async (page) => {
-      return get_journal_page({ ...filters, page, order }).then(
+      return get_journal_page({ ...context, page, order }).then(
         (res) => fragment_from_string(res.journal),
         (error: unknown) => {
           log_error(`Failed to fetch page ${page.toString()}`, error);
