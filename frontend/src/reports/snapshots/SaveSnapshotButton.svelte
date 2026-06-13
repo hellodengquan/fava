@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { put_snapshot } from "../../api/index.ts";
+  import { snapshot_api } from "../../api/index.ts";
   import { _ } from "../../i18n.ts";
   import { notify, notify_err } from "../../notifications.ts";
   import { searchParams } from "../../stores/url.ts";
@@ -43,7 +43,7 @@
       }
       if ($params.get("a")) params.a = $params.get("a")!;
       if ($params.get("r")) params.r = $params.get("r")!;
-      await put_snapshot(params);
+      await snapshot_api.put_snapshot(params);
       notify(_("Snapshot saved successfully."));
       close_dialog();
     } catch (error) {

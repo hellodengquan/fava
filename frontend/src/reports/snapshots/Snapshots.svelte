@@ -1,9 +1,6 @@
 <script lang="ts">
   import {
-    delete_snapshot,
-    get_snapshot_compare,
-    get_snapshots,
-    put_snapshot_clean,
+    snapshot_api,
   } from "../../api/index.ts";
   import type { SnapshotMeta } from "../../api/validators.ts";
   import { _ } from "../../i18n.ts";
@@ -13,7 +10,7 @@
   import { currency_name } from "../../stores/index.ts";
   import SnapshotDiffTree from "./SnapshotDiffTree.svelte";
 
-  type CompareResult = Awaited<ReturnType<typeof get_snapshot_compare>>;
+  type CompareResult = Awaited<ReturnType<typeof snapshot_api.get_snapshot_compare>>;
 
   let snapshots = $state<SnapshotMeta[]>([]);
   let selected_a = $state<string>("");
@@ -25,6 +22,7 @@
   let clean_keep_last_n = $state<number>(10);
   let clean_keep_days = $state<number>(30);
   let clean_per_report_type = $state<boolean>(true);
+  let clean_archive_per_month = $state<number>(1);
   let cleaning = $state(false);
 
   const report_type_labels: Record<string, string> = {
@@ -37,7 +35,7 @@
   async function load_snapshots() {
     loading = true;
     try {
-      snapshots = await get_snapshots({});
+      snapshots = await snapshot_api.get_snapshots({});
     } catch (error) {
       notify_err(error);
     } finally {
@@ -56,7 +54,7 @@
     }
     comparing = true;
     try {
-      compare_result = await get_snapshot_compare({
+      compare_result = await snapshot_api.get_snapshot_compare({
         snapshot_a: selected_a,
         snapshot_b: selected_b,
       });
@@ -69,7 +67,7 @@
 
   async function remove(id: string) {
     try {
-      await delete_snapshot({ snapshot_id: id });
+      await snapshot_api.delete_snapshot({ snapshot_id: id });
       notify(_("Snapshot deleted."));
       snapshots = snapshots.filter((s) => s.id !== id);
       if (selected_a === id) selected_a = "";
@@ -89,10 +87,11 @@
     }
     cleaning = true;
     try {
-      const result = await put_snapshot_clean({
+      const result = await snapshot_api.put_snapshot_clean({
         keep_last_n: clean_keep_last_n > 0 ? clean_keep_last_n : undefined,
         keep_days: clean_keep_days > 0 ? clean_keep_days : undefined,
         per_report_type: clean_per_report_type,
+        archive_per_month: clean_archive_per_month > 0 ? clean_archive_per_month : undefined,
       });
       notify(
         _("Cleaned {deleted} snapshots, kept {kept}.").replace(
@@ -238,6 +237,16 @@
               bind:checked={clean_per_report_type}
             />
             {_("Apply per report type")}
+          </label>
+        </div>
+        <div class="form-row">
+          <label>
+            {_("Archive per month (for older snapshots):")}
+            <input
+              type="number"
+              min="0"
+              bind:value={clean_archive_per_month}
+            />
           </label>
         </div>
         <div class="form-actions">

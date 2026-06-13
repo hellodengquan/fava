@@ -1026,6 +1026,7 @@ def put_snapshot_clean() -> Mapping[str, Any]:
         keep_last_n: Keep the N most recent snapshots (optional).
         keep_days: Keep snapshots from the last N days (optional).
         per_report_type: Whether to apply per report type (default true).
+        archive_per_month: For older snapshots, keep at most M per month (optional).
 
     Returns:
         Dict with 'deleted' and 'kept' lists of snapshot IDs.
@@ -1036,16 +1037,20 @@ def put_snapshot_clean() -> Mapping[str, Any]:
     keep_last_n = body.get("keep_last_n")
     keep_days = body.get("keep_days")
     per_report_type = body.get("per_report_type", True)
+    archive_per_month = body.get("archive_per_month")
 
     if keep_last_n is not None:
         keep_last_n = int(keep_last_n)
     if keep_days is not None:
         keep_days = int(keep_days)
     per_report_type = bool(per_report_type)
+    if archive_per_month is not None:
+        archive_per_month = int(archive_per_month)
 
     retention = SnapshotRetention(
         keep_last_n=keep_last_n,
         keep_days=keep_days,
         per_report_type=per_report_type,
+        archive_per_month=archive_per_month,
     )
     return g.ledger.snapshots.clean(retention)

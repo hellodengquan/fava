@@ -39,11 +39,15 @@ class SnapshotRetention:
                    0 or None means no limit.
         per_report_type: Whether the retention policy applies per report type
                          or globally across all report types.
+        archive_per_month: For snapshots older than keep_days, keep at most
+                           this many per calendar month. Requires keep_days
+                           to be set. 0 or None means no monthly archiving.
     """
 
     keep_last_n: int | None = None
     keep_days: int | None = None
     per_report_type: bool = True
+    archive_per_month: int | None = None
 
     def validate(self) -> None:
         """Validate the retention policy configuration."""
@@ -51,6 +55,12 @@ class SnapshotRetention:
             raise ValueError("keep_last_n must be non-negative")
         if self.keep_days is not None and self.keep_days < 0:
             raise ValueError("keep_days must be non-negative")
+        if self.archive_per_month is not None and self.archive_per_month < 0:
+            raise ValueError("archive_per_month must be non-negative")
+        if self.archive_per_month and not self.keep_days:
+            raise ValueError(
+                "archive_per_month requires keep_days to be set",
+            )
         if (
             self.keep_last_n in (None, 0)
             and self.keep_days in (None, 0)
@@ -325,17 +335,55 @@ class SnapshotStore(FavaModule):
 
         if retention.keep_days and retention.keep_days > 0:
             cutoff = datetime.now() - timedelta(days=retention.keep_days)
-            for snap in snapshots:
-                sid = snap["id"]
-                try:
-                    created = datetime.fromisoformat(snap["created_at"])
-                except (ValueError, KeyError):
-                    continue
-                if created < cutoff:
-                    to_delete.add(sid)
-                    to_keep.discard(sid)
-                else:
-                    to_keep.add(sid)
+
+            if retention.archive_per_month and retention.archive_per_month > 0:
+                recent: list[Mapping[str, Any]] = []
+                older: list[Mapping[str, Any]] = []
+                for snap in snapshots:
+                    try:
+                        created = datetime.fromisoformat(snap["created_at"])
+                    except (ValueError, KeyError):
+                        recent.append(snap)
+                        continue
+                    if created >= cutoff:
+                        recent.append(snap)
+                    else:
+                        older.append(snap)
+
+                for snap in recent:
+                    to_keep.add(snap["id"])
+                    to_delete.discard(snap["id"])
+
+                monthly_buckets: dict[str, list[Mapping[str, Any]]] = {}
+                for snap in older:
+                    try:
+                        created = datetime.fromisoformat(snap["created_at"])
+                    except (ValueError, KeyError):
+                        continue
+                    month_key = created.strftime("%Y-%m")
+                    monthly_buckets.setdefault(month_key, []).append(snap)
+
+                for _month_key, month_snaps in monthly_buckets.items():
+                    for i, snap in enumerate(month_snaps):
+                        sid = snap["id"]
+                        if i < retention.archive_per_month:
+                            to_keep.add(sid)
+                            to_delete.discard(sid)
+                        else:
+                            to_delete.add(sid)
+                            to_keep.discard(sid)
+            else:
+                for snap in snapshots:
+                    sid = snap["id"]
+                    try:
+                        created = datetime.fromisoformat(snap["created_at"])
+                    except (ValueError, KeyError):
+                        continue
+                    if created < cutoff:
+                        to_delete.add(sid)
+                        to_keep.discard(sid)
+                    else:
+                        to_keep.add(sid)
 
         return to_delete, to_keep
 

@@ -413,27 +413,19 @@ export async function save_entries(
   }
 }
 
-const filters_conversion_interval = [
-  "account",
-  "conversion",
-  "filter",
-  "interval",
-  "time",
-] as const;
-
-export const get_snapshots = define_endpoint(
+const _get_snapshots = define_endpoint(
   "snapshots",
   array(snapshot_meta_validator),
   [],
 );
 
-export const get_snapshot_compare = define_endpoint(
+const _get_snapshot_compare = define_endpoint(
   "snapshot_compare",
   snapshot_compare_validator,
   ["snapshot_a", "snapshot_b"],
 );
 
-export async function put_snapshot(
+async function _put_snapshot(
   params: Record<string, string>,
 ): Promise<{ id: string; name: string; created_at: string }> {
   const { name, report_type, ...url_params } = params;
@@ -453,17 +445,18 @@ export async function put_snapshot(
   );
 }
 
-export const delete_snapshot = define_endpoint(
+const _delete_snapshot = define_endpoint(
   "snapshot",
   string,
   ["snapshot_id"],
   "DELETE",
 );
 
-export async function put_snapshot_clean(params: {
+async function _put_snapshot_clean(params: {
   keep_last_n?: number;
   keep_days?: number;
   per_report_type?: boolean;
+  archive_per_month?: number;
 }): Promise<{ deleted: string[]; kept: string[] }> {
   const url = api_url("snapshot_clean");
   return fetch_and_handle_api_call(
@@ -476,3 +469,17 @@ export async function put_snapshot_clean(params: {
     object({ deleted: array(string), kept: array(string) }),
   );
 }
+
+export const snapshot_api = {
+  get_snapshots: _get_snapshots,
+  get_snapshot_compare: _get_snapshot_compare,
+  put_snapshot: _put_snapshot,
+  delete_snapshot: _delete_snapshot,
+  put_snapshot_clean: _put_snapshot_clean,
+};
+
+export const get_snapshots = _get_snapshots;
+export const get_snapshot_compare = _get_snapshot_compare;
+export const put_snapshot = _put_snapshot;
+export const delete_snapshot = _delete_snapshot;
+export const put_snapshot_clean = _put_snapshot_clean;
