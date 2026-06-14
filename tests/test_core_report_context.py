@@ -369,6 +369,120 @@ class TestReportContextAccountMatching:
         filtered = ctx.create_filtered_ledger(ledger)
         assert len(filtered.entries) > 0
 
+    def test_account_nested_namespace_three_levels(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(account="Assets:US:ETrade")
+        filtered = ctx.create_filtered_ledger(ledger)
+        from fava.beans.account import get_entry_accounts
+
+        assert len(filtered.entries) > 0
+        for entry in filtered.entries:
+            accounts = get_entry_accounts(entry)
+            assert any("ETrade" in a for a in accounts)
+
+    def test_account_nested_namespace_four_levels(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(account="Assets:US:Vanguard:VBMPX")
+        filtered = ctx.create_filtered_ledger(ledger)
+        assert len(filtered.entries) > 0
+        from fava.beans.account import get_entry_accounts
+
+        for entry in filtered.entries:
+            accounts = get_entry_accounts(entry)
+            assert any("VBMPX" in a for a in accounts)
+
+    def test_account_nested_parent_vs_child(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx_parent = ReportContext(account="Assets:US:BofA")
+        parent_filtered = ctx_parent.create_filtered_ledger(ledger)
+        ctx_child = ReportContext(account="Assets:US:BofA:Checking")
+        child_filtered = ctx_child.create_filtered_ledger(ledger)
+        assert len(parent_filtered.entries) >= len(child_filtered.entries)
+        assert len(child_filtered.entries) > 0
+
+    def test_account_deeply_nested_vanguard(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx_cash = ReportContext(account="Assets:US:Vanguard:Cash")
+        cash_filtered = ctx_cash.create_filtered_ledger(ledger)
+        ctx_vbmpx = ReportContext(account="Assets:US:Vanguard:VBMPX")
+        vbmpx_filtered = ctx_vbmpx.create_filtered_ledger(ledger)
+        assert len(cash_filtered.entries) > 0
+        assert len(vbmpx_filtered.entries) > 0
+        assert len(cash_filtered.entries) != len(vbmpx_filtered.entries)
+
+    def test_account_expenses_nested(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(account="Expenses")
+        filtered = ctx.create_filtered_ledger(ledger)
+        from fava.beans.account import get_entry_accounts
+
+        assert len(filtered.entries) > 0
+        for entry in filtered.entries:
+            accounts = get_entry_accounts(entry)
+            assert any(a.startswith("Expenses:") for a in accounts)
+
+    def test_account_income_nested(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(account="Income")
+        filtered = ctx.create_filtered_ledger(ledger)
+        from fava.beans.account import get_entry_accounts
+
+        assert len(filtered.entries) > 0
+        for entry in filtered.entries:
+            accounts = get_entry_accounts(entry)
+            assert any(a.startswith("Income:") for a in accounts)
+
+    def test_account_exact_leaf_account(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(account="Assets:US:BofA:Checking")
+        filtered = ctx.create_filtered_ledger(ledger)
+        from fava.beans.account import get_entry_accounts
+
+        for entry in filtered.entries:
+            accounts = get_entry_accounts(entry)
+            assert any("Checking" in a for a in accounts)
+
+    def test_account_sibling_namespaces_independent(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx_bofa = ReportContext(account="Assets:US:BofA")
+        ctx_vanguard = ReportContext(account="Assets:US:Vanguard")
+        bofa_filtered = ctx_bofa.create_filtered_ledger(ledger)
+        vanguard_filtered = ctx_vanguard.create_filtered_ledger(ledger)
+        assert len(bofa_filtered.entries) > 0
+        assert len(vanguard_filtered.entries) > 0
+
 
 class TestReportContextRepr:
     def test_repr(self) -> None:
