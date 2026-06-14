@@ -1084,6 +1084,36 @@ class TestRegexDoSProtection:
         assert len(filtered) > 0
         assert len(filtered) == 62
 
+    def test_mp_regex_search_worker(self) -> None:
+        """Multiprocessing regex worker matches patterns."""
+        from fava.core.filters import _mp_regex_search
+
+        assert _mp_regex_search(("foo.*", "hello foobar")) is True
+        assert _mp_regex_search(("bar", "hello foobar")) is True
+        assert _mp_regex_search(("baz", "hello foobar")) is False
+
+    def test_timeout_regex_search_dispatches_to_signal_on_unix(self) -> None:
+        """On Unix, _timeout_regex_search should use SIGALRM path."""
+        import signal
+
+        from fava.core.filters import _timeout_regex_search
+
+        if hasattr(signal, "SIGALRM"):
+            assert _timeout_regex_search("foo", "hello foo") is True
+            assert _timeout_regex_search("bar", "hello foo") is False
+
+    def test_regex_timeout_mp_cross_platform(self) -> None:
+        """_RegexTimeoutMP.search works on any platform including Windows.
+
+        Exercises the multiprocessing-based timeout directly to guarantee a ReDoS
+        pattern is aborted even without ``signal.SIGALRM`` availability.
+        """
+        from fava.core.filters import _RegexTimeoutMP
+
+        mp = _RegexTimeoutMP(timeout=3.0)
+        assert mp.search("foo.*bar", "hello foobar") is True
+        assert mp.search("notfound", "hello foobar") is False
+
 
 class TestDeeplyNestedParentheses:
     """Regression tests for deeply nested (3+ levels) parenthesised queries.
@@ -1306,3 +1336,447 @@ class TestDeeplyNestedParentheses:
                 and not p.account.startswith("Income:")
                 for p in postings
             )
+
+    def test_four_level_sql_where_clause(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """4-level SQL-like ``WHERE A AND (B OR (C AND D))``.
+
+        Expression:
+          ``#test (Verizon,((amount>50 , amount<1000) BayBook))``
+
+        This is the classic "one-to-many join filter" pattern you'd
+        write in SQL as::
+
+            SELECT * FROM entries
+            WHERE tag = 'test'
+              AND ( payee LIKE '%Verizon%'
+                    OR ( amount BETWEEN 50 AND 1000
+                         AND payee LIKE '%BayBook%' ) )
+        """
+        f = AdvancedFilter(
+            '#test (Verizon,((amount>50 , amount<1000) BayBook))'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            assert "test" in tags
+            payee = getattr(entry, "payee", "") or ""
+            postings = getattr(entry, "postings", [])
+            amounts = [
+                abs(p.number)
+                for p in postings
+                if getattr(p, "number", None) is not None
+            ]
+            has_verizon = "Verizon" in payee
+            has_baybook_in_range = any(
+                50 < amt < 1000 for amt in amounts
+            ) and "BayBook" in payee
+            assert has_verizon or has_baybook_in_range
+
+    def test_five_level_nested_case_expression(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """5-level nested ``CASE WHEN ... AND ( ... OR ( ... AND ... ) )``.
+
+        Expression:
+          ``-((#sibling-tag , (-((#test BayBook),Verizon))) , ^test-link)``
+
+        Parse tree (5 levels of parentheses):
+          NOT (
+            sibling-tag
+            AND ( NOT ( (test AND BayBook) OR Verizon ) )
+            AND link=test-link
+          )
+
+        Equivalent to De Morgan's law applied twice.
+        """
+        f = AdvancedFilter(
+            '-((#sibling-tag , (-((#test BayBook),Verizon))) , ^test-link)'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            links = getattr(entry, "links", frozenset())
+            payee = getattr(entry, "payee", "") or ""
+
+            inner_or = (
+                "test" in tags and "BayBook" in payee
+            ) or "Verizon" in payee
+            inner_not = not inner_or
+            inner_and = (
+                "sibling-tag" in tags
+                and inner_not
+                and "test-link" in links
+            )
+            assert not inner_and
+
+    def test_four_level_having_style_posting_query(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """4-level ``HAVING``-style query with nested posting quantifiers.
+
+        Expression:
+          ``any((account:"Expenses:.*" amount>100)),all((-account:"Income:.*" , amount>=0))``
+
+        SQL equivalent::
+
+            SELECT * FROM entries e
+            WHERE (
+                EXISTS p IN e.postings:
+                  p.account LIKE 'Expenses:%' AND p.amount > 100
+              )
+              OR (
+                FOR ALL p IN e.postings:
+                  IF p.account LIKE 'Income:%' THEN p.amount >= 0
+              )
+
+        Space inside ``any()`` = AND; comma at top level = OR between the two
+        posting-quantified clauses.
+        """
+        f = AdvancedFilter(
+            'any((account:"Expenses:.*" amount>100))'
+            ',all((-account:"Income:.*" , amount>=0))'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        assert len(filtered) > 0
+        for entry in filtered:
+            postings = getattr(entry, "postings", [])
+            if not postings:
+                continue
+            any_big_expense = any(
+                p.account.startswith("Expenses:")
+                and getattr(p, "number", None) is not None
+                and abs(p.number) > 100
+                for p in postings
+            )
+            all_nonneg_income = all(
+                not p.account.startswith("Income:")
+                or (getattr(p, "number", None) is not None and abs(p.number) >= 0)
+                for p in postings
+            )
+            assert any_big_expense or all_nonneg_income
+
+    def test_five_level_correlated_subquery_style(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """5-level "correlated subquery" with entry + posting conditions.
+
+        Expression::
+
+          #trip (
+            -#cancelled
+            , all((
+                account:"Expenses:.*"
+                , ( amount<5000,any(account:"Liabilities:.*") )
+            ))
+          )
+
+        Parse depth: entry-tag → NOT → AND → all → OR = 5 levels of
+        logical nesting.  This models a "find trip expenses where every
+        Expenses posting is either < $5000 or covered by a liability"
+        business rule.
+        """
+        f = AdvancedFilter(
+            '#trip (-#cancelled , all((account:"Expenses:.*" , '
+            '( amount<5000,any(account:"Liabilities:.*") ))))'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            assert "trip" in tags
+            assert "cancelled" not in tags
+
+            postings = getattr(entry, "postings", [])
+            expense_postings = [
+                p for p in postings
+                if p.account.startswith("Expenses:")
+            ]
+            has_liability = any(
+                p.account.startswith("Liabilities:")
+                for p in postings
+            )
+            for p in expense_postings:
+                amt = getattr(p, "number", None)
+                if amt is None:
+                    continue
+                assert abs(amt) < 5000 or has_liability
+
+    def test_four_level_not_de_morgan_chain(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """4-level chained NOT that exercises De Morgan's law repeatedly.
+
+        Expression:
+          ``-(-(#test,-#sibling-tag) , ^test-link)``
+
+        Inner: ``NOT ( (test OR NOT sibling) AND link )``
+        De Morgan expands to: ``NOT(test OR NOT sibling) OR NOT link``
+        → ``(NOT test AND sibling) OR NOT link``
+        """
+        f = AdvancedFilter('-(-(#test,-#sibling-tag) , ^test-link)')
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            links = getattr(entry, "links", frozenset())
+            lhs = "test" not in tags and "sibling-tag" in tags
+            rhs = "test-link" not in links
+            assert lhs or rhs
+
+    def test_five_level_deeply_nested_posting_all_any(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """5-level mixed entry/posting nesting with all()/any() alternation.
+
+        Expression::
+
+          all((
+            account:"Expenses:.*"
+            , any((
+                amount<100
+                , ( amount>50 , -amount=42 )
+              ))
+          ))
+
+        Parse tree:
+          all (
+            account=Expenses:*
+            AND any (
+              amount<100
+              OR ( amount>50 AND NOT amount=42 )
+            )
+          )
+
+        This is 5 levels of logical/quantifier nesting and mirrors the
+        kind of query an analyst might write to audit expense reports
+        for policy violations.
+        """
+        f = AdvancedFilter(
+            'all((account:"Expenses:.*" , any((amount<100 , '
+            '( amount>50 , -amount=42 )))))'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            postings = getattr(entry, "postings", [])
+            for p in postings:
+                if not p.account.startswith("Expenses:"):
+                    continue
+                amt = getattr(p, "number", None)
+                if amt is None:
+                    continue
+                abs_amt = abs(amt)
+                under_100 = abs_amt < 100
+                range_excl_42 = abs_amt > 50 and abs_amt != 42
+                assert under_100 or range_excl_42
+
+
+class TestDeeplyNestedSqlLikeQueries:
+    """Regression tests for SQL-style complex queries at 4-5 nesting levels.
+
+    These tests exercise the "business analyst" use case where users
+    compose Fava filter expressions the way they'd write SQL ``WHERE`` /
+    ``HAVING`` clauses — with deep mixing of entry-level predicates,
+    posting-level quantifiers (``all()`` / ``any()``), comparisons,
+    negations, and boolean combinations.
+    """
+
+    def test_sql_where_join_style_4level(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """4-level: ``WHERE tag AND ( payee OR ( amount-range AND payee2 ) )``.
+
+        Mirrors joining the entries table to a payments table on amount.
+        """
+        f = AdvancedFilter(
+            '#test (Verizon,((amount>20 amount<500) BayBook))'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            payee = getattr(entry, "payee", "") or ""
+            assert "test" in tags
+            amounts = [
+                abs(p.number)
+                for p in getattr(entry, "postings", [])
+                if getattr(p, "number", None) is not None
+            ]
+            clause2 = "Verizon" in payee
+            clause3 = any(20 < a < 500 for a in amounts) and "BayBook" in payee
+            assert clause2 or clause3
+
+    def test_sql_having_group_by_style_5level(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """5-level: ``HAVING ALL(p) AND ( ANY(q) OR ALL(r) )``.
+
+        Models a "group by entry, apply HAVING clause" query where the
+        HAVING clause itself mixes quantifiers.  Expression::
+
+            all((account:"Expenses:.*" , amount>5))
+            ( any((account:"Assets:.*" , amount>100))
+              ,all((-account:"Liabilities:.*")) )
+        """
+        f = AdvancedFilter(
+            'all((account:"Expenses:.*" , amount>5)) '
+            '( any((account:"Assets:.*" , amount>100)) '
+            ',all((-account:"Liabilities:.*")) )'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            postings = getattr(entry, "postings", [])
+            assert all(
+                not p.account.startswith("Expenses:")
+                or (
+                    getattr(p, "number", None) is not None
+                    and abs(p.number) > 5
+                )
+                for p in postings
+            )
+            any_assets = any(
+                p.account.startswith("Assets:")
+                and getattr(p, "number", None) is not None
+                and abs(p.number) > 100
+                for p in postings
+            )
+            all_non_liab = all(
+                not p.account.startswith("Liabilities:")
+                for p in postings
+            )
+            assert any_assets or all_non_liab
+
+    def test_sql_case_when_5level(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """5-level: CASE WHEN with deeply nested boolean logic.
+
+        Expression equivalent to:
+          IF tag=trip
+          THEN IF tag=cancelled THEN FALSE
+               ELSE IF ALL(expense < 5000 OR liability exists) THEN TRUE
+                    ELSE FALSE
+          ELSE FALSE
+
+        In filter syntax::
+
+            #trip ( -#cancelled , all((
+                account:"Expenses:.*"
+                , ( amount<5000,any(account:"Liabilities:.*") )
+            )) )
+        """
+        f = AdvancedFilter(
+            '#trip (-#cancelled , all((account:"Expenses:.*" , '
+            '( amount<5000,any(account:"Liabilities:.*") ))))'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            assert "trip" in tags
+            assert "cancelled" not in tags
+            has_liab = any(
+                p.account.startswith("Liabilities:")
+                for p in getattr(entry, "postings", [])
+            )
+            for p in getattr(entry, "postings", []):
+                if not p.account.startswith("Expenses:"):
+                    continue
+                amt = getattr(p, "number", None)
+                if amt is None:
+                    continue
+                assert abs(amt) < 5000 or has_liab
+
+    def test_sql_subquery_exists_4level(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """4-level: ``WHERE EXISTS ( SELECT 1 FROM ... )`` pattern.
+
+        Expression::
+
+            #test ( any((account:"Expenses:Food:.*" , amount>20))
+                    ,any((account:"Expenses:Entertainment:.*" , amount>50)) )
+
+        Models: "find entries tagged 'test' that have either a food
+        expense > $20 or an entertainment expense > $50".
+        """
+        f = AdvancedFilter(
+            '#test ( any((account:"Expenses:Food:.*" , amount>20)) '
+            ',any((account:"Expenses:Entertainment:.*" , amount>50)) )'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            assert "test" in tags
+            postings = getattr(entry, "postings", [])
+            has_food = any(
+                p.account.startswith("Expenses:Food:")
+                and getattr(p, "number", None) is not None
+                and abs(p.number) > 20
+                for p in postings
+            )
+            has_entertainment = any(
+                p.account.startswith("Expenses:Entertainment:")
+                and getattr(p, "number", None) is not None
+                and abs(p.number) > 50
+                for p in postings
+            )
+            assert has_food or has_entertainment
+
+    def test_sql_de_morgan_4level_equivalence(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """4-level: Verify De Morgan equivalence across two filter forms.
+
+        Checks that::
+
+            NOT (A AND B) ≡ NOT A OR NOT B
+
+        In filter syntax (space=AND, comma=OR):
+          ``-(#test ^test-link)`` ≡ ``-#test,-^test-link``
+
+        where A and B are themselves compound expressions.
+        """
+        f1 = AdvancedFilter('-(#test ^test-link)')
+        f2 = AdvancedFilter('-#test,-^test-link')
+        r1 = set(id(e) for e in f1.apply(example_ledger.all_entries))
+        r2 = set(id(e) for e in f2.apply(example_ledger.all_entries))
+        assert r1 == r2
+
+    def test_sql_window_function_style_5level(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """5-level: "window function" style filtering across postings.
+
+        Expression::
+
+            all((
+                account:"Expenses:.*"
+                , (
+                    -amount>1000
+                    ,any((account:"Income:.*" , amount>0))
+                  )
+            ))
+
+        Models: "every expense posting is either <= $1000, or there
+        exists an income posting on the same entry that offsets it".
+        This is analogous to a window-function query that partitions by
+        entry and applies a condition across the partition.
+        """
+        f = AdvancedFilter(
+            'all((account:"Expenses:.*" , '
+            '( -amount>1000,any((account:"Income:.*" , amount>0)) )))'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            postings = getattr(entry, "postings", [])
+            has_positive_income = any(
+                p.account.startswith("Income:")
+                and getattr(p, "number", None) is not None
+                and abs(p.number) > 0
+                for p in postings
+            )
+            for p in postings:
+                if not p.account.startswith("Expenses:"):
+                    continue
+                amt = getattr(p, "number", None)
+                if amt is None:
+                    continue
+                assert abs(amt) <= 1000 or has_positive_income

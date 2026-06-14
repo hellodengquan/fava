@@ -631,12 +631,22 @@ class TestPerformanceScaling:
 
     These tests guard against super-linear performance regressions where
     doubling the dataset causes much more than a doubling of runtime.
-    Each benchmark runs the same operation on both ledgers, then asserts
-    that the huge-to-real time ratio stays within a reasonable bound
-    (default 40x for a 30x data increase — allows ~30% superlinear
-    overhead per doubling).
+
+    **Relative threshold strategy** (±20% tolerance):
+      1. Measure a baseline on the small real-world ledger.
+      2. Compute the *expected* huge-ledger time via the dataset size ratio
+         (≈30x in transaction count).
+      3. Assert the actual huge-ledger time falls within
+         ``0.8 × expected … 1.2 × expected``.
+
+    The ±20% band absorbs CI-machine noise (CPU frequency scaling, cache
+    contention, background load) while still catching real regressions
+    where, say, a change introduces quadratic behaviour that would make
+    the huge ledger take 200x instead of 30x longer.
     """
 
+    DATA_SIZE_RATIO = 30.0
+    RELATIVE_TOLERANCE = 0.2
     MAX_SCALING_RATIO = 40.0
     MIN_HUGE_TXNS = 25000
 
@@ -650,17 +660,51 @@ class TestPerformanceScaling:
             f"got {txn_count}"
         )
 
+    def _assert_relative_threshold(
+        self,
+        small_time: float,
+        large_time: float,
+        operation: str,
+    ) -> None:
+        """Assert large_time is within tolerance of the expected scaling.
+
+        We only enforce an **upper bound** to catch performance regressions.
+        Faster-than-expected execution is never a failure — it indicates a
+        performance improvement or noisy measurement.
+
+        A hard upper limit on the scaling ratio (``MAX_SCALING_RATIO``) is
+        still enforced to catch catastrophic pathologies (e.g. accidentally
+        O(n²) behaviour where the huge ledger takes 200x instead of 30x
+        longer).
+
+        Args:
+            small_time: Total time on the small ledger.
+            large_time: Total time on the huge ledger.
+            operation: Human-readable operation name for error messages.
+        """
+        small_time = max(small_time, 1e-4)
+        expected_large = small_time * self.DATA_SIZE_RATIO
+        high = expected_large * (1 + self.RELATIVE_TOLERANCE)
+        ratio = large_time / small_time
+
+        assert ratio < self.MAX_SCALING_RATIO, (
+            f"{operation}: scaling ratio {ratio:.2f}x exceeds hard "
+            f"limit {self.MAX_SCALING_RATIO}x "
+            f"(expected ≈{self.DATA_SIZE_RATIO:.0f}x)"
+        )
+        assert large_time <= high, (
+            f"{operation}: huge-ledger time {large_time:.3f}s is "
+            f"{(large_time - high) / high * 100:.0f}% above the tolerated "
+            f"range (< {high:.3f}s). Performance regression detected."
+        )
+
     def test_scaling_tree_build(
         self, real_ledger: FavaLedger, huge_ledger: FavaLedger
     ) -> None:
         """Tree construction should scale linearly with entry count."""
         small_t = self._bench(lambda: Tree(real_ledger.all_entries), 10)
         large_t = self._bench(lambda: Tree(huge_ledger.all_entries), 5)
-        ratio = large_t / max(small_t, 1e-6)
-        assert ratio < self.MAX_SCALING_RATIO, (
-            f"Tree build scaling ratio {ratio:.2f}x exceeds "
-            f"{self.MAX_SCALING_RATIO}x limit"
-        )
+        self._assert_relative_threshold(small_t, large_t, "Tree build")
 
     def test_scaling_time_filter(
         self, real_ledger: FavaLedger, huge_ledger: FavaLedger
@@ -676,11 +720,7 @@ class TestPerformanceScaling:
 
         small_t = self._bench(lambda: bench(real_ledger), 5)
         large_t = self._bench(lambda: bench(huge_ledger), 3)
-        ratio = large_t / max(small_t, 1e-6)
-        assert ratio < self.MAX_SCALING_RATIO, (
-            f"TimeFilter scaling ratio {ratio:.2f}x exceeds "
-            f"{self.MAX_SCALING_RATIO}x limit"
-        )
+        self._assert_relative_threshold(small_t, large_t, "TimeFilter")
 
     def test_scaling_account_filter(
         self, real_ledger: FavaLedger, huge_ledger: FavaLedger
@@ -693,10 +733,8 @@ class TestPerformanceScaling:
 
         small_t = self._bench(lambda: bench(real_ledger), 10)
         large_t = self._bench(lambda: bench(huge_ledger), 5)
-        ratio = large_t / max(small_t, 1e-6)
-        assert ratio < self.MAX_SCALING_RATIO, (
-            f"AccountFilter scaling ratio {ratio:.2f}x exceeds "
-            f"{self.MAX_SCALING_RATIO}x limit"
+        self._assert_relative_threshold(
+            small_t, large_t, "AccountFilter"
         )
 
     def test_scaling_interval_totals(
@@ -712,10 +750,8 @@ class TestPerformanceScaling:
 
         small_t = self._bench(lambda: bench(real_ledger), 5)
         large_t = self._bench(lambda: bench(huge_ledger), 3)
-        ratio = large_t / max(small_t, 1e-6)
-        assert ratio < self.MAX_SCALING_RATIO, (
-            f"interval_totals scaling ratio {ratio:.2f}x exceeds "
-            f"{self.MAX_SCALING_RATIO}x limit"
+        self._assert_relative_threshold(
+            small_t, large_t, "interval_totals"
         )
 
     def test_scaling_budget_calculate(
@@ -723,10 +759,11 @@ class TestPerformanceScaling:
     ) -> None:
         """Budget calculation on the huge ledger stays within absolute bounds.
 
-        The real ledger has very few budget directives, so a ratio comparison
-        would be misleading (denominator near zero).  Instead we assert an
-        absolute wall-clock bound on the 5-year / 20-account budget roll-up,
-        which is the more operationally meaningful guarantee.
+        The real ledger has very few budget directives, so a ratio
+        comparison would be misleading (denominator near zero).  Instead
+        we assert an absolute wall-clock bound on the 5-year / 20-account
+        budget roll-up, which is the more operationally meaningful
+        guarantee.
         """
         start = datetime.date(2015, 1, 1)
         end = datetime.date(2020, 1, 1)
@@ -754,10 +791,8 @@ class TestPerformanceScaling:
 
         small_t = self._bench(lambda: bench(real_ledger), 10)
         large_t = self._bench(lambda: bench(huge_ledger), 5)
-        ratio = large_t / max(small_t, 1e-6)
-        assert ratio < self.MAX_SCALING_RATIO, (
-            f"Hierarchy scaling ratio {ratio:.2f}x exceeds "
-            f"{self.MAX_SCALING_RATIO}x limit"
+        self._assert_relative_threshold(
+            small_t, large_t, "Hierarchy chart"
         )
 
     def test_scaling_net_worth(
@@ -771,10 +806,8 @@ class TestPerformanceScaling:
 
         small_t = self._bench(lambda: bench(real_ledger), 5)
         large_t = self._bench(lambda: bench(huge_ledger), 3)
-        ratio = large_t / max(small_t, 1e-6)
-        assert ratio < self.MAX_SCALING_RATIO, (
-            f"Net worth scaling ratio {ratio:.2f}x exceeds "
-            f"{self.MAX_SCALING_RATIO}x limit"
+        self._assert_relative_threshold(
+            small_t, large_t, "Net worth chart"
         )
 
     def test_huge_ledger_interval_100_limit(

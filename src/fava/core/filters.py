@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import multiprocessing
 import re
 import signal
 from abc import ABC
@@ -70,7 +71,8 @@ def _check_regex_safety(pattern: str) -> None:
     through to the Python engine.  Detected families include:
 
     * nested quantifiers ``(a+)+``, ``(a|b)+`` where branches overlap
-    * two overlapping ``.*`` / ``.+`` groups in sequence
+    * two overlapping ``.*`` / ``.+`` groups in sequence without sufficient
+      fixed content between them
     * excessive bracket / parenthesis nesting depth
     * overlong patterns
     """
@@ -88,9 +90,30 @@ def _check_regex_safety(pattern: str) -> None:
         if max_depth > MAX_REGEX_NEST_DEPTH:
             raise RegexDoSError
 
-    for danger_re in _REDOS_DANGER_PATTERNS:
-        if danger_re.search(pattern):
+    # Nested quantifier check: (a+)+, (a|b)+ etc.
+    if _REDOS_DANGER_PATTERNS[0].search(pattern):
+        raise RegexDoSError
+
+    # Two .* / .+ in sequence — but allow the common "contains" pattern
+    # .*<fixed>.* with exactly two wildcards and enough fixed content
+    # between them to anchor the match.  Patterns with 3+ wildcards
+    # (e.g. .*foo.*bar.*) are always rejected due to backtracking risk.
+    if _REDOS_DANGER_PATTERNS[1].search(pattern):
+        wildcard_positions = [
+            m.start() for m in re.finditer(r"\.[*+]", pattern)
+        ]
+        if len(wildcard_positions) > 2:
+            # 3+ wildcards — too many degrees of freedom for backtracking
             raise RegexDoSError
+        if len(wildcard_positions) == 2:
+            pos1, pos2 = wildcard_positions
+            between = pattern[pos1 + 2 : pos2]
+            anchor_chars = sum(
+                1 for ch in between
+                if ch not in ".+*?|()[]{}^$\\"
+            )
+            if anchor_chars < 3:
+                raise RegexDoSError
 
     _check_alternation_overlap(pattern)
 
@@ -128,8 +151,8 @@ class _RegexTimeout:
     """Context manager that aborts a regex match after a timeout.
 
     Uses :py:data:`signal.SIGALRM` on Unix platforms where the main
-    thread can be interrupted; on other platforms falls back to a no-op
-    so that the static safety checks above are still effective.
+    thread can be interrupted; on other platforms falls back to a no-op so that
+    the static safety checks above are still effective.
     """
 
     def __init__(self, timeout: float = REGEX_TIMEOUT_SECONDS) -> None:
@@ -155,6 +178,67 @@ class _RegexTimeout:
     @staticmethod
     def _handler(signum: int, frame: Any) -> None:  # noqa: ARG004
         raise RegexDoSError
+
+
+def _mp_regex_search(args: tuple[str, str]) -> bool:
+    """Multiprocessing worker: compile + search, must be module-level for pickle."""
+    pattern, text = args
+    compiled = re.compile(pattern, re.IGNORECASE)
+    return bool(compiled.search(text))
+
+
+class _RegexTimeoutMP:
+    """Cross-platform regex timeout using multiprocessing.
+
+    On Windows (or any platform without :py:data:`signal.SIGALRM`), we
+    spawn a short-lived child process to perform the regex match and enforce the
+    timeout via :py:meth:`multiprocessing.Process.join`.  This is heavier than
+    the signal approach but guarantees the only portable way to abort a stuck
+    regex engine.
+    """
+
+    def __init__(self, timeout: float = REGEX_TIMEOUT_SECONDS) -> None:
+        self.timeout = timeout
+
+    def search(self, pattern: str, text: str) -> bool:
+        """Run ``re.search(pattern, text)`` with a timeout.
+
+        Returns ``True`` if the pattern matches, ``False`` if it doesn't, and
+        raises :class:`RegexDoSError` on timeout or any other error.
+
+        Note: on macOS with ``spawn`` start method, process creation can add
+        ~1s of overhead, so we pad the user-supplied timeout with a small
+        buffer to avoid false positives from slow process spawn.
+        """
+        import sys
+
+        timeout = self.timeout
+        if sys.platform == "darwin":
+            timeout += 2.0
+        try:
+            with multiprocessing.Pool(1) as pool:
+                result = pool.apply_async(
+                    _mp_regex_search, ((pattern, text),)
+                )
+                return result.get(timeout=timeout)
+        except multiprocessing.TimeoutError as exc:
+            raise RegexDoSError from exc
+        except Exception as exc:
+            raise RegexDoSError from exc
+
+
+def _timeout_regex_search(pattern: str, text: str) -> bool:
+    """Platform-aware regex search with timeout.
+
+    Chooses between :class:`_RegexTimeout` (Unix) or :class:`_RegexTimeoutMP`
+    (Windows / no SIGALRM) based on what the platform provides.
+    """
+    if hasattr(signal, "SIGALRM"):
+        compiled = re.compile(pattern, re.IGNORECASE)
+        with _RegexTimeout():
+            return bool(compiled.search(text))
+    mp = _RegexTimeoutMP()
+    return mp.search(pattern, text)
 
 
 class FilterParseError(FilterError):
@@ -331,8 +415,7 @@ class Match:
 
         probe_text = s[:1024] if len(s) > 1024 else s
         try:
-            with _RegexTimeout():
-                result = bool(self._compiled.search(probe_text))
+            result = _timeout_regex_search(self._search, probe_text)
         except RegexDoSError:
             self._safe = False
             self._match = self._literal_match
