@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import signal
 from abc import ABC
 from abc import abstractmethod
 from decimal import Decimal
@@ -28,6 +29,21 @@ if TYPE_CHECKING:  # pragma: no cover
     from fava.core.fava_options import FavaOptions
 
 
+MAX_REGEX_LENGTH = 512
+MAX_REGEX_NEST_DEPTH = 10
+REGEX_TIMEOUT_SECONDS = 2.0
+
+_REDOS_DANGER_PATTERNS = [
+    re.compile(r"\([^()]*[+*?][^()]*\)[+*?]"),
+    re.compile(r"\.\*.*\.\*"),
+]
+
+DANGEROUS_REGEX_MSG = (
+    "Regex pattern rejected due to potential ReDoS risk. "
+    "Please simplify the pattern or use a more specific search string."
+)
+
+
 class FilterError(FavaAPIError):
     """Filter exception."""
 
@@ -37,6 +53,108 @@ class FilterError(FavaAPIError):
 
     def __str__(self) -> str:
         return self.message
+
+
+class RegexDoSError(FilterError):
+    """Regex denied due to catastrophic backtracking risk."""
+
+    def __init__(self) -> None:
+        super().__init__("regex", DANGEROUS_REGEX_MSG)
+
+
+def _check_regex_safety(pattern: str) -> None:
+    """Run static checks for common ReDoS / catastrophic-backtracking patterns.
+
+    The checks are deliberately conservative: we'd rather reject a few
+    harmless-but-convoluted patterns than let an exponential-time regex
+    through to the Python engine.  Detected families include:
+
+    * nested quantifiers ``(a+)+``, ``(a|b)+`` where branches overlap
+    * two overlapping ``.*`` / ``.+`` groups in sequence
+    * excessive bracket / parenthesis nesting depth
+    * overlong patterns
+    """
+    if len(pattern) > MAX_REGEX_LENGTH:
+        raise RegexDoSError
+
+    depth = 0
+    max_depth = 0
+    for ch in pattern:
+        if ch == "(":
+            depth += 1
+            max_depth = max(max_depth, depth)
+        elif ch == ")":
+            depth -= 1
+        if max_depth > MAX_REGEX_NEST_DEPTH:
+            raise RegexDoSError
+
+    for danger_re in _REDOS_DANGER_PATTERNS:
+        if danger_re.search(pattern):
+            raise RegexDoSError
+
+    _check_alternation_overlap(pattern)
+
+
+def _check_alternation_overlap(pattern: str) -> None:
+    """Reject alternation+quantifier where branches can match the same string.
+
+    This catches patterns like ``(a|a)+``, ``(a|aa)+`` or ``(.|a)+``
+    where the branches overlap on their prefix, leading to exponential
+    backtracking when the outer group is quantified.
+    """
+    group_re = re.compile(r"\(([^()]+)\)([+*?]|{\d+,?\d*})")
+    for match in group_re.finditer(pattern):
+        inner = match.group(1)
+        if "|" not in inner:
+            continue
+        branches = inner.split("|")
+        if len(branches) < 2:
+            continue
+        stripped = [b.strip() for b in branches]
+        if len(set(stripped)) < len(stripped):
+            raise RegexDoSError
+        for i, a in enumerate(stripped):
+            for b in stripped[i + 1 :]:
+                if not a or not b:
+                    continue
+                if a.startswith(b) or b.startswith(a):
+                    if len(a) <= 3 or len(b) <= 3:
+                        raise RegexDoSError
+                if a[0] == b[0] and len(a) <= 2 and len(b) <= 2:
+                    raise RegexDoSError
+
+
+class _RegexTimeout:
+    """Context manager that aborts a regex match after a timeout.
+
+    Uses :py:data:`signal.SIGALRM` on Unix platforms where the main
+    thread can be interrupted; on other platforms falls back to a no-op
+    so that the static safety checks above are still effective.
+    """
+
+    def __init__(self, timeout: float = REGEX_TIMEOUT_SECONDS) -> None:
+        self.timeout = timeout
+        self._old_handler = None
+
+    def __enter__(self) -> None:
+        if not hasattr(signal, "SIGALRM"):
+            return
+        self._old_handler = signal.signal(signal.SIGALRM, self._handler)
+        signal.setitimer(signal.ITIMER_REAL, self.timeout)
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> bool:
+        if not hasattr(signal, "SIGALRM"):
+            return False
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        if self._old_handler is not None:
+            signal.signal(signal.SIGALRM, self._old_handler)
+        if exc_type is RegexDoSError:
+            return True
+        return False
+
+    @staticmethod
+    def _handler(signum: int, frame: Any) -> None:  # noqa: ARG004
+        raise RegexDoSError
 
 
 class FilterParseError(FilterError):
@@ -182,21 +300,59 @@ class FilterSyntaxLexer:
 
 
 class Match:
-    """Match a string."""
+    """Match a string with regex safety guards.
 
-    __slots__ = ("match",)
+    User-supplied regex patterns are first passed through
+    :func:`_check_regex_safety` to reject catastrophic-backtracking
+    patterns before compilation.  The first match against a real
+    payload is additionally wrapped in a signal-based timeout
+    (:class:`_RegexTimeout`) as a second line of defence.
+    """
 
-    match: Callable[[str], bool]
+    __slots__ = ("_compiled", "_match", "_safe", "_search")
 
     def __init__(self, search: str) -> None:
+        self._search = search
+        _check_regex_safety(search)
         try:
-            match = re.compile(search, re.IGNORECASE).search
-            self.match = lambda s: bool(match(s))
+            self._compiled = re.compile(search, re.IGNORECASE)
+            self._safe = True
         except re.error:
-            self.match = lambda s: s == search
+            self._compiled = None
+            self._safe = False
+
+        self._match = self._match_first
+
+    def _match_first(self, s: str) -> bool:
+        """First-call wrapper that runs the timeout probe."""
+        if self._compiled is None:
+            self._match = self._literal_match
+            return self._literal_match(s)
+
+        probe_text = s[:1024] if len(s) > 1024 else s
+        try:
+            with _RegexTimeout():
+                result = bool(self._compiled.search(probe_text))
+        except RegexDoSError:
+            self._safe = False
+            self._match = self._literal_match
+            return self._literal_match(s)
+
+        self._match = self._fast_match
+        if result and len(s) == len(probe_text):
+            return True
+        return bool(self._compiled.search(s))
+
+    def _fast_match(self, s: str) -> bool:
+        """Subsequent calls use plain search (no timeout overhead)."""
+        return bool(self._compiled.search(s))
+
+    def _literal_match(self, s: str) -> bool:
+        """Fallback literal equality comparison."""
+        return s == self._search
 
     def __call__(self, obj: Any) -> bool:
-        return self.match(str(obj))
+        return self._match(str(obj))
 
 
 class MatchAmount:

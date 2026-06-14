@@ -13,6 +13,8 @@ import datetime
 import time
 from decimal import Decimal
 from typing import TYPE_CHECKING
+from typing import Any
+from typing import Callable
 
 import pytest
 from fava.beans.account import get_entry_accounts
@@ -515,3 +517,296 @@ class TestCrossTimezone:
             datetime.date(2016, 2, 1),
         )
         assert r1 == r2
+
+
+def _generate_large_beancount(
+    num_years: int = 5,
+    txns_per_day: int = 15,
+    num_accounts: int = 20,
+) -> str:
+    """Generate a large synthetic Beancount ledger for scaling benchmarks.
+
+    Produces a ledger with approximately ``num_years * 365 * txns_per_day``
+    transactions spread across ``num_accounts`` expense accounts, plus a
+    bank account and an equity opening balance.  A monthly budget is
+    declared for every fifth expense account so that budget calculations
+    have a realistic mix of budgeted and unbudgeted accounts.
+    """
+    lines: list[str] = []
+    lines.append('option "title" "Performance Scaling Ledger"')
+    lines.append('option "operating_currency" "USD"')
+    lines.append("")
+
+    lines.append("1792-01-01 commodity USD")
+    lines.append("")
+
+    for i in range(num_accounts):
+        acct = f"Expenses:Cat{i:03d}"
+        lines.append(f"2000-01-01 open {acct} USD")
+    lines.append("2000-01-01 open Assets:Bank USD")
+    lines.append("2000-01-01 open Equity:Opening USD")
+    lines.append("")
+
+    lines.append('2010-01-01 * "Opening balance"')
+    lines.append("  Assets:Bank 10000000.00 USD")
+    lines.append("  Equity:Opening -10000000.00 USD")
+    lines.append("")
+
+    start_date = datetime.date(2015, 1, 1)
+    current = start_date
+    idx = 0
+    end_date = start_date + datetime.timedelta(days=num_years * 365)
+    while current < end_date:
+        for t in range(txns_per_day):
+            acct_idx = (idx + t) % num_accounts
+            acct = f"Expenses:Cat{acct_idx:03d}"
+            amount = Decimal("10") + Decimal(idx % 1000) / Decimal(100)
+            lines.append(
+                f'{current.isoformat()} * "Vendor {idx % 50}" '
+                f'"Purchase {idx}"'
+            )
+            lines.append(f"  {acct}  {amount:.2f} USD")
+            lines.append(f"  Assets:Bank -{amount:.2f} USD")
+            idx += 1
+        current += datetime.timedelta(days=1)
+
+    for i in range(0, num_accounts, 5):
+        acct = f"Expenses:Cat{i:03d}"
+        lines.append(
+            f'2015-01-01 custom "budget" {acct} "monthly" 5000.00 USD'
+        )
+
+    return "\n".join(lines)
+
+
+_HUGE_LEDGER_CACHE: str | None = None
+
+
+def _get_huge_ledger_string() -> str:
+    """Lazy singleton for the huge generated ledger string."""
+    global _HUGE_LEDGER_CACHE
+    if _HUGE_LEDGER_CACHE is None:
+        _HUGE_LEDGER_CACHE = _generate_large_beancount(
+            num_years=5, txns_per_day=15, num_accounts=20
+        )
+    return _HUGE_LEDGER_CACHE
+
+
+@pytest.fixture(scope="module")
+def huge_ledger() -> FavaLedger:
+    """Load a synthetic ~27k-transaction ledger for scaling benchmarks.
+
+    The ledger is generated once per session and re-used across all
+    scaling tests so that the expensive generation + load step does not
+    dominate runtime.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from fava.application import create_app
+    from fava.core import FavaLedger as FL
+
+    ledger_str = _get_huge_ledger_string()
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".beancount", delete=False
+    ) as f:
+        f.write(ledger_str)
+        f.flush()
+        path = Path(f.name)
+
+    try:
+        app = create_app([str(path)], load=True)
+        ledgers = app.config["LEDGERS"]
+        first_slug = ledgers.first_slug()
+        ledger = ledgers[first_slug]
+        assert isinstance(ledger, FL)
+        yield ledger
+    finally:
+        path.unlink(missing_ok=True)
+
+
+class TestPerformanceScaling:
+    """Compare performance between the real ~1k ledger and the ~27k one.
+
+    These tests guard against super-linear performance regressions where
+    doubling the dataset causes much more than a doubling of runtime.
+    Each benchmark runs the same operation on both ledgers, then asserts
+    that the huge-to-real time ratio stays within a reasonable bound
+    (default 40x for a 30x data increase — allows ~30% superlinear
+    overhead per doubling).
+    """
+
+    MAX_SCALING_RATIO = 40.0
+    MIN_HUGE_TXNS = 25000
+
+    def test_huge_ledger_size(self, huge_ledger: FavaLedger) -> None:
+        """Sanity check: the synthetic ledger has tens of thousands of txns."""
+        txn_count = sum(
+            1 for e in huge_ledger.all_entries if isinstance(e, Transaction)
+        )
+        assert txn_count >= self.MIN_HUGE_TXNS, (
+            f"Expected >= {self.MIN_HUGE_TXNS} huge-ledger transactions, "
+            f"got {txn_count}"
+        )
+
+    def test_scaling_tree_build(
+        self, real_ledger: FavaLedger, huge_ledger: FavaLedger
+    ) -> None:
+        """Tree construction should scale linearly with entry count."""
+        small_t = self._bench(lambda: Tree(real_ledger.all_entries), 10)
+        large_t = self._bench(lambda: Tree(huge_ledger.all_entries), 5)
+        ratio = large_t / max(small_t, 1e-6)
+        assert ratio < self.MAX_SCALING_RATIO, (
+            f"Tree build scaling ratio {ratio:.2f}x exceeds "
+            f"{self.MAX_SCALING_RATIO}x limit"
+        )
+
+    def test_scaling_time_filter(
+        self, real_ledger: FavaLedger, huge_ledger: FavaLedger
+    ) -> None:
+        """TimeFilter should scale linearly with entry count."""
+
+        def bench(ledger: FavaLedger) -> None:
+            for year in ["2015", "2016", "2017"]:
+                tf = TimeFilter(
+                    ledger.options, ledger.fava_options, year
+                )
+                tf.apply(ledger.all_entries)
+
+        small_t = self._bench(lambda: bench(real_ledger), 5)
+        large_t = self._bench(lambda: bench(huge_ledger), 3)
+        ratio = large_t / max(small_t, 1e-6)
+        assert ratio < self.MAX_SCALING_RATIO, (
+            f"TimeFilter scaling ratio {ratio:.2f}x exceeds "
+            f"{self.MAX_SCALING_RATIO}x limit"
+        )
+
+    def test_scaling_account_filter(
+        self, real_ledger: FavaLedger, huge_ledger: FavaLedger
+    ) -> None:
+        """AccountFilter should scale linearly with entry count."""
+
+        def bench(ledger: FavaLedger) -> None:
+            af = AccountFilter("Expenses")
+            af.apply(ledger.all_entries)
+
+        small_t = self._bench(lambda: bench(real_ledger), 10)
+        large_t = self._bench(lambda: bench(huge_ledger), 5)
+        ratio = large_t / max(small_t, 1e-6)
+        assert ratio < self.MAX_SCALING_RATIO, (
+            f"AccountFilter scaling ratio {ratio:.2f}x exceeds "
+            f"{self.MAX_SCALING_RATIO}x limit"
+        )
+
+    def test_scaling_interval_totals(
+        self, real_ledger: FavaLedger, huge_ledger: FavaLedger
+    ) -> None:
+        """interval_totals chart should scale near-linearly."""
+
+        def bench(ledger: FavaLedger) -> None:
+            filtered = ledger.get_filtered()
+            ledger.charts.interval_totals(
+                filtered, Month, "Expenses", "at_cost"
+            )
+
+        small_t = self._bench(lambda: bench(real_ledger), 5)
+        large_t = self._bench(lambda: bench(huge_ledger), 3)
+        ratio = large_t / max(small_t, 1e-6)
+        assert ratio < self.MAX_SCALING_RATIO, (
+            f"interval_totals scaling ratio {ratio:.2f}x exceeds "
+            f"{self.MAX_SCALING_RATIO}x limit"
+        )
+
+    def test_scaling_budget_calculate(
+        self, huge_ledger: FavaLedger
+    ) -> None:
+        """Budget calculation on the huge ledger stays within absolute bounds.
+
+        The real ledger has very few budget directives, so a ratio comparison
+        would be misleading (denominator near zero).  Instead we assert an
+        absolute wall-clock bound on the 5-year / 20-account budget roll-up,
+        which is the more operationally meaningful guarantee.
+        """
+        start = datetime.date(2015, 1, 1)
+        end = datetime.date(2020, 1, 1)
+        budgets = huge_ledger.budgets._budget_entries
+
+        t_single = self._bench(
+            lambda: (
+                calculate_budget(budgets, "Expenses", start, end),
+                calculate_budget_children(budgets, "Expenses", start, end),
+            ),
+            50,
+        )
+        assert t_single < 5.0, (
+            f"50× budget roll-up on huge ledger took {t_single:.3f}s (> 5s)"
+        )
+
+    def test_scaling_hierarchy(
+        self, real_ledger: FavaLedger, huge_ledger: FavaLedger
+    ) -> None:
+        """Hierarchy chart should scale near-linearly."""
+
+        def bench(ledger: FavaLedger) -> None:
+            filtered = ledger.get_filtered()
+            ledger.charts.hierarchy(filtered, "Expenses", AT_COST)
+
+        small_t = self._bench(lambda: bench(real_ledger), 10)
+        large_t = self._bench(lambda: bench(huge_ledger), 5)
+        ratio = large_t / max(small_t, 1e-6)
+        assert ratio < self.MAX_SCALING_RATIO, (
+            f"Hierarchy scaling ratio {ratio:.2f}x exceeds "
+            f"{self.MAX_SCALING_RATIO}x limit"
+        )
+
+    def test_scaling_net_worth(
+        self, real_ledger: FavaLedger, huge_ledger: FavaLedger
+    ) -> None:
+        """Net worth chart should scale near-linearly."""
+
+        def bench(ledger: FavaLedger) -> None:
+            filtered = ledger.get_filtered()
+            ledger.charts.net_worth(filtered, Month, "USD")
+
+        small_t = self._bench(lambda: bench(real_ledger), 5)
+        large_t = self._bench(lambda: bench(huge_ledger), 3)
+        ratio = large_t / max(small_t, 1e-6)
+        assert ratio < self.MAX_SCALING_RATIO, (
+            f"Net worth scaling ratio {ratio:.2f}x exceeds "
+            f"{self.MAX_SCALING_RATIO}x limit"
+        )
+
+    def test_huge_ledger_interval_100_limit(
+        self, huge_ledger: FavaLedger
+    ) -> None:
+        """Even on a huge ledger, Day intervals are capped at 100 entries."""
+        filtered = FilteredLedger(huge_ledger, time="2015-2020")
+        data = huge_ledger.charts.interval_totals(
+            filtered, Day, "Expenses", "at_cost"
+        )
+        assert len(data) <= 100
+
+    def test_huge_ledger_filtered_correctness(
+        self, huge_ledger: FavaLedger
+    ) -> None:
+        """Filter a slice of the huge ledger and verify result shape."""
+        filtered = FilteredLedger(huge_ledger, time="2017")
+        txn_count = sum(
+            1
+            for e in filtered.entries
+            if isinstance(e, Transaction)
+        )
+        assert txn_count > 5000
+        tree = Tree(filtered.entries)
+        expenses = tree.get("Expenses")
+        assert expenses is not None
+        assert len(expenses.children) > 10
+
+    @staticmethod
+    def _bench(fn: Callable[[], Any], iterations: int) -> float:
+        """Run ``fn`` ``iterations`` times and return total wall-clock time."""
+        start = time.perf_counter()
+        for _ in range(iterations):
+            fn()
+        return time.perf_counter() - start

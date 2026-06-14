@@ -971,3 +971,338 @@ class TestFilterCombinationsMixed:
         chained2 = AdvancedFilter('#sibling-tag').apply(chained1)
         assert len(combined) == len(chained2)
         assert [e.date for e in combined] == [e.date for e in chained2]
+
+
+class TestRegexDoSProtection:
+    """Regression tests for regex denial-of-service protection.
+
+    Verifies that :class:`Match` and :class:`AdvancedFilter` reject or
+    safely degrade catastrophic-backtracking patterns instead of letting
+    them spin the worker.
+    """
+
+    def test_nested_quantifier_rejected(self) -> None:
+        """Classic ``(a+)+`` pattern must be rejected statically."""
+        with pytest.raises(Exception):
+            Match("(a+)+")
+
+    def test_nested_quantifier_alternation_rejected(self) -> None:
+        """``(a|aa)+`` pattern triggers exponential backtracking."""
+        with pytest.raises(Exception):
+            Match("(a|a)+")
+
+    def test_two_dot_star_sequence_rejected(self) -> None:
+        """``.*.*`` is a trivial but dangerous double-wildcard pattern."""
+        with pytest.raises(Exception):
+            Match(".*foo.*bar.*")
+
+    def test_deeply_nested_groups_rejected(self) -> None:
+        """Excessively deep parentheses nests are rejected."""
+        pattern = "(" * 20 + "x" + ")" * 20
+        with pytest.raises(Exception):
+            Match(pattern)
+
+    def test_overlong_pattern_rejected(self) -> None:
+        """Patterns longer than MAX_REGEX_LENGTH are rejected."""
+        long_pattern = "a" * 600
+        with pytest.raises(Exception):
+            Match(long_pattern)
+
+    def test_safe_patterns_still_work(self) -> None:
+        """Harmless regex patterns must still compile and match."""
+        assert Match("Expenses.*")("Expenses:Food")
+        assert Match("^Assets:")("Assets:Bank")
+        assert Match("\\d+")("abc123")
+        assert Match("[a-z]+")("hello")
+
+    def test_advanced_filter_account_redos_rejected(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """AdvancedFilter with a ReDoS account regex must raise."""
+        with pytest.raises(Exception):
+            AdvancedFilter('account:"(Expenses:.*)+"')
+
+    def test_advanced_filter_name_regex_redos_rejected(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """AdvancedFilter key:value with ReDoS in value must raise."""
+        with pytest.raises(Exception):
+            AdvancedFilter('name:"(ETF+)+"')
+
+    def test_account_filter_redos_rejected(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """AccountFilter with a ReDoS pattern must raise."""
+        with pytest.raises(Exception):
+            AccountFilter("(Expenses.*)+")
+
+    def test_regex_compile_failure_falls_back_to_literal(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """If a regex fails to compile, fall back to literal equality.
+
+        An unclosed bracket ``[invalid`` is a valid string but not a
+        valid regex; :class:`Match` should degrade to exact string
+        comparison rather than raising.
+        """
+        m = Match("[invalid")
+        assert m("[invalid")
+        assert not m("[invalid]_extra")
+        assert not m("invalid")
+
+    def test_filter_error_is_fava_api_error(self) -> None:
+        """RegexDoSError is a kind of FilterError → FavaAPIError."""
+        from fava.core.filters import RegexDoSError
+        from fava.helpers import FavaAPIError
+
+        assert issubclass(RegexDoSError, FavaAPIError)
+        err = RegexDoSError()
+        assert "ReDoS" in str(err)
+        assert err.filter_type == "regex"
+
+    def test_boundary_safe_quantifiers_allowed(self) -> None:
+        """Non-nested quantifiers must not be flagged as ReDoS."""
+        assert Match("a+b*c?")("aaabbbc")
+        assert Match("\\d{2,4}")("1234")
+        assert Match("(foo|bar)+")("foobarfoo")
+
+    def test_redos_in_nested_posting_filter(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """ReDoS patterns inside any()/all() posting filters are rejected."""
+        with pytest.raises(Exception):
+            AdvancedFilter('any(account:"(Expenses:.*)+")')
+        with pytest.raises(Exception):
+            AdvancedFilter('all(-account:"(Income:.*)+")')
+
+    def test_static_check_does_not_break_string_filter(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """Normal string search (no regex metacharacters) still works."""
+        f = AdvancedFilter("BayBook")
+        filtered = f.apply(example_ledger.all_entries)
+        assert len(filtered) > 0
+        assert len(filtered) == 62
+
+
+class TestDeeplyNestedParentheses:
+    """Regression tests for deeply nested (3+ levels) parenthesised queries.
+
+    Fava's filter syntax supports arbitrary ``(expr)`` nesting via the
+    parser's ``expr : '(' expr ')'`` rule.  This class exercises 3- and
+    4-level-deep combinations of AND / OR / NOT / posting-quantifier
+    parentheses to make sure the parser's precedence and associativity
+    remain correct after any refactor.
+    """
+
+    def test_two_level_nested_or_inside_and(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """``#tag (stringA, stringB)`` — OR nested inside an implicit AND."""
+        f = AdvancedFilter('#test (BayBook,Verizon)')
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            payee = getattr(entry, "payee", "") or ""
+            narration = getattr(entry, "narration", "") or ""
+            assert "test" in tags
+            assert "BayBook" in payee + narration or "Verizon" in payee + narration
+
+    def test_three_level_nested_and_or_and(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """``((A B), (C D))`` — 3 levels: OR of two AND groups.
+
+        Equivalent to disjunctive normal form (DNF): (A∧B) ∨ (C∧D).
+        """
+        f = AdvancedFilter('((#test ^test-link), (#sibling-tag BayBook))')
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            links = getattr(entry, "links", frozenset())
+            payee = getattr(entry, "payee", "") or ""
+            clause1 = "test" in tags and "test-link" in links
+            clause2 = "sibling-tag" in tags and "BayBook" in payee
+            assert clause1 or clause2
+
+    def test_three_level_deeply_nested_not(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """``(-(-(tag)))`` — double negation through 3 levels of parens.
+
+        Two negations should cancel out and leave the original tag match.
+        """
+        f_double_neg = AdvancedFilter('-(-(#test))')
+        f_plain = AdvancedFilter('#test')
+        filtered_double = f_double_neg.apply(example_ledger.all_entries)
+        filtered_plain = f_plain.apply(example_ledger.all_entries)
+        assert len(filtered_double) == len(filtered_plain)
+        assert [e.date for e in filtered_double] == [e.date for e in filtered_plain]
+
+    def test_three_level_mixed_posting_and_entry(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """``#tag (any(account:...) , all(-account:...))`` — 3-level mix.
+
+        Entry-level tag ANDed with an OR of two posting-level quantifiers.
+        """
+        f = AdvancedFilter(
+            '#test (any(account:"Expenses:.*"), all(-account:"Liabilities:.*"))'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            postings = getattr(entry, "postings", [])
+            assert "test" in tags
+            clause_any = any(
+                p.account.startswith("Expenses:") for p in postings
+            )
+            clause_all = all(
+                not p.account.startswith("Liabilities:") for p in postings
+            )
+            assert clause_any or clause_all
+
+    def test_four_level_deeply_nested_dnf(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """``(((A B) , (C D)) , (E F))`` — 4 levels deep DNF-style.
+
+        Three AND-clauses combined with OR, nested in multiple layers.
+        """
+        f = AdvancedFilter(
+            '(((#test ^test-link), (#sibling-tag payee:BayBook)), '
+            '(payee:Verizon #test))'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            links = getattr(entry, "links", frozenset())
+            payee = getattr(entry, "payee", "") or ""
+            c1 = "test" in tags and "test-link" in links
+            c2 = "sibling-tag" in tags and "BayBook" in payee
+            c3 = "Verizon" in payee and "test" in tags
+            assert c1 or c2 or c3
+
+    def test_four_level_negated_disjunction(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """``-((-(A), -(B)))`` — De Morgan's law sanity check.
+
+        ``¬(¬A ∨ ¬B)`` should equal ``A ∧ B``.
+        """
+        f_demorgan = AdvancedFilter('-((-(#test), -(^test-link)))')
+        f_and = AdvancedFilter('#test ^test-link')
+        filtered_demorgan = f_demorgan.apply(example_ledger.all_entries)
+        filtered_and = f_and.apply(example_ledger.all_entries)
+        assert len(filtered_demorgan) == len(filtered_and)
+
+    def test_three_level_with_posting_all_any(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """``all( ... ) ( any(...) , ... )`` — posting + entry nesting.
+
+        Mix of posting-level quantifiers (all/any) nested inside
+        entry-level AND/OR parentheses, 3+ levels deep.
+        """
+        f = AdvancedFilter(
+            'all(-account:"Assets:US:ETrade:.*") '
+            '(any(account:"Expenses:Food:.*"), #test)'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            postings = getattr(entry, "postings", [])
+            tags = getattr(entry, "tags", frozenset())
+            assert all(
+                not p.account.startswith("Assets:US:ETrade:") for p in postings
+            )
+            has_food = any(
+                p.account.startswith("Expenses:Food:") for p in postings
+            )
+            assert has_food or "test" in tags
+
+    def test_deep_nesting_vs_flat_equivalence(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """Deeply nested redundant parens should equal flat version.
+
+        ``((((tag))))`` must match exactly the same entries as ``tag``.
+        """
+        f_deep = AdvancedFilter('(((#test)))')
+        f_flat = AdvancedFilter('#test')
+        assert len(f_deep.apply(example_ledger.all_entries)) == len(
+            f_flat.apply(example_ledger.all_entries)
+        )
+
+    def test_five_level_nesting_correctness(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """5 levels of nesting with mixed AND/OR/NOT.
+
+        Expression: ``(-((-(A , B) , C)))``
+        """
+        f = AdvancedFilter('-((-(#test , ^test-link) , #sibling-tag))')
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            links = getattr(entry, "links", frozenset())
+            inner_or = "test" in tags or "test-link" in links
+            inner_and = inner_or and "sibling-tag" in tags
+            assert not inner_and
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "#test",
+            "(#test)",
+            "((#test))",
+            "(((#test)))",
+            "((((#test))))",
+            "(((((#test)))))",
+        ],
+    )
+    def test_arbitrary_nesting_depth_equivalent(
+        self, example_ledger: FavaLedger, expr: str
+    ) -> None:
+        """Wrapping a tag in N layers of parens changes nothing."""
+        f = AdvancedFilter(expr)
+        filtered = f.apply(example_ledger.all_entries)
+        assert len(filtered) == 2
+        for entry in filtered:
+            tags = getattr(entry, "tags", frozenset())
+            assert "test" in tags
+
+    def test_nested_inside_all_quantifier(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """``all((account:X, account:Y))`` — parens inside all().
+
+        The posting-level expression inside ``all(...)`` can also use
+        parentheses for grouping.
+        """
+        f = AdvancedFilter(
+            'all((account:"Assets:US:BofA:.*", account:"Expenses:.*"))'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            postings = getattr(entry, "postings", [])
+            assert all(
+                p.account.startswith("Assets:US:BofA:")
+                or p.account.startswith("Expenses:")
+                for p in postings
+            )
+
+    def test_nested_inside_any_quantifier_with_negation(
+        self, example_ledger: FavaLedger
+    ) -> None:
+        """``any(-(account:X , account:Y))`` — NOT-of-OR inside any()."""
+        f = AdvancedFilter(
+            'any(-(account:"Assets:US:ETrade:.*", account:"Income:.*"))'
+        )
+        filtered = f.apply(example_ledger.all_entries)
+        for entry in filtered:
+            postings = getattr(entry, "postings", [])
+            assert any(
+                not p.account.startswith("Assets:US:ETrade:")
+                and not p.account.startswith("Income:")
+                for p in postings
+            )
