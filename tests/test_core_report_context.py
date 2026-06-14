@@ -483,6 +483,153 @@ class TestReportContextAccountMatching:
         assert len(bofa_filtered.entries) > 0
         assert len(vanguard_filtered.entries) > 0
 
+    def test_account_five_level_taxes_namespace(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(account="Expenses:Taxes:Y2014:US")
+        filtered = ctx.create_filtered_ledger(ledger)
+        assert len(filtered.entries) > 0
+
+        from fava.beans.account import get_entry_accounts
+
+        for entry in filtered.entries:
+            accounts = get_entry_accounts(entry)
+            has_tax_account = any(
+                a.startswith("Expenses:Taxes:Y2014:US:") for a in accounts
+            )
+            assert has_tax_account
+
+    def test_account_deep_leaf_vs_parent_count(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx_parent = ReportContext(account="Expenses:Taxes")
+        ctx_mid = ReportContext(account="Expenses:Taxes:Y2014")
+        ctx_deep = ReportContext(account="Expenses:Taxes:Y2014:US")
+        ctx_leaf = ReportContext(account="Expenses:Taxes:Y2014:US:Federal")
+
+        parent_count = len(
+            ctx_parent.create_filtered_ledger(ledger).entries
+        )
+        mid_count = len(ctx_mid.create_filtered_ledger(ledger).entries)
+        deep_count = len(ctx_deep.create_filtered_ledger(ledger).entries)
+        leaf_count = len(ctx_leaf.create_filtered_ledger(ledger).entries)
+
+        assert parent_count > 0
+        assert mid_count > 0
+        assert deep_count > 0
+        assert leaf_count > 0
+        assert parent_count >= mid_count >= deep_count >= leaf_count
+
+    def test_account_four_level_assets_vanguard(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx = ReportContext(account="Assets:US:Vanguard:VBMPX")
+        filtered = ctx.create_filtered_ledger(ledger)
+        assert len(filtered.entries) > 0
+
+        from fava.beans.account import get_entry_accounts
+
+        for entry in filtered.entries:
+            accounts = get_entry_accounts(entry)
+            assert any("VBMPX" in a for a in accounts)
+
+    def test_account_multiple_year_taxes_namespaces(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+
+        ctx_2014 = ReportContext(account="Expenses:Taxes:Y2014:US")
+        ctx_2015 = ReportContext(account="Expenses:Taxes:Y2015:US")
+        ctx_2016 = ReportContext(account="Expenses:Taxes:Y2016:US")
+
+        entries_2014 = len(
+            ctx_2014.create_filtered_ledger(ledger).entries
+        )
+        entries_2015 = len(
+            ctx_2015.create_filtered_ledger(ledger).entries
+        )
+        entries_2016 = len(
+            ctx_2016.create_filtered_ledger(ledger).entries
+        )
+
+        assert entries_2014 > 0
+        assert entries_2015 > 0
+        assert entries_2016 > 0
+
+    def test_account_five_level_independent_subcategories(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+
+        ctx_federal = ReportContext(
+            account="Expenses:Taxes:Y2014:US:Federal"
+        )
+        ctx_medicare = ReportContext(
+            account="Expenses:Taxes:Y2014:US:Medicare"
+        )
+        ctx_state = ReportContext(
+            account="Expenses:Taxes:Y2014:US:State"
+        )
+
+        federal_entries = ctx_federal.create_filtered_ledger(ledger).entries
+        medicare_entries = ctx_medicare.create_filtered_ledger(ledger).entries
+        state_entries = ctx_state.create_filtered_ledger(ledger).entries
+
+        assert len(federal_entries) > 0
+        assert len(medicare_entries) > 0
+        assert len(state_entries) > 0
+
+        from fava.beans.account import get_entry_accounts
+
+        for entry in federal_entries:
+            accounts = get_entry_accounts(entry)
+            assert any("Federal" in a for a in accounts)
+
+        for entry in medicare_entries:
+            accounts = get_entry_accounts(entry)
+            assert any("Medicare" in a for a in accounts)
+
+        for entry in state_entries:
+            accounts = get_entry_accounts(entry)
+            assert any("State" in a for a in accounts)
+
+    def test_account_top_level_expenses_contains_deep_taxes(
+        self, example_ledger: pytest.FixtureRequest
+    ) -> None:
+        from fava.core import FavaLedger
+
+        ledger: FavaLedger = example_ledger  # type: ignore[assignment]
+        ctx_expenses = ReportContext(account="Expenses")
+        ctx_deep = ReportContext(
+            account="Expenses:Taxes:Y2014:US:Federal"
+        )
+
+        expenses_entries = ctx_expenses.create_filtered_ledger(ledger).entries
+        deep_entries = ctx_deep.create_filtered_ledger(ledger).entries
+
+        assert len(expenses_entries) >= len(deep_entries)
+        assert len(deep_entries) > 0
+
+        from fava.beans.account import get_entry_accounts
+
+        deep_accounts = set()
+        for entry in deep_entries:
+            deep_accounts.update(get_entry_accounts(entry))
+        assert any("Federal" in a for a in deep_accounts)
+
 
 class TestReportContextRepr:
     def test_repr(self) -> None:

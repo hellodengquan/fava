@@ -296,3 +296,173 @@ test("localStorage-synced store set after unsubscribe does not trigger listener"
 
   equal(count, 1);
 });
+
+test("multi-instance: stores with different keys are isolated (namespace isolation)", () => {
+  const storeA = localStorageSyncedStore(
+    "multi-instance-a",
+    string,
+    () => "default-a",
+  );
+  const storeB = localStorageSyncedStore(
+    "multi-instance-b",
+    string,
+    () => "default-b",
+  );
+
+  equal(store_get(storeA), "default-a");
+  equal(store_get(storeB), "default-b");
+
+  storeA.set("value-for-a");
+  equal(store_get(storeA), "value-for-a");
+  equal(store_get(storeB), "default-b");
+
+  storeB.set("value-for-b");
+  equal(store_get(storeA), "value-for-a");
+  equal(store_get(storeB), "value-for-b");
+
+  localStorage.removeItem(storeA.key);
+  equal(store_get(storeB), "value-for-b");
+});
+
+test("multi-instance: storage event from different URL is handled (cross-page sync)", () => {
+  const store = localStorageSyncedStore(
+    "multi-instance-url",
+    string,
+    () => "initial",
+  );
+
+  const seen: string[] = [];
+  const unsubscribe = store.subscribe((v) => {
+    seen.push(v);
+  });
+
+  equal(store_get(store), "initial");
+
+  window.dispatchEvent(
+    new StorageEvent("storage", {
+      key: store.key,
+      newValue: JSON.stringify("from-other-tab"),
+      storageArea: localStorage,
+      url: "http://other.example.com/fava/",
+    }),
+  );
+
+  equal(store_get(store), "from-other-tab");
+  deepEqual(seen, ["initial", "from-other-tab"]);
+
+  unsubscribe();
+});
+
+test("multi-instance: multiple subscribers on same store all receive updates", () => {
+  const store = localStorageSyncedStore(
+    "multi-instance-subs",
+    string,
+    () => "start",
+  );
+
+  const seen1: string[] = [];
+  const seen2: string[] = [];
+
+  const unsub1 = store.subscribe((v) => {
+    seen1.push(v);
+  });
+  const unsub2 = store.subscribe((v) => {
+    seen2.push(v);
+  });
+
+  deepEqual(seen1, ["start"]);
+  deepEqual(seen2, ["start"]);
+
+  store.set("updated");
+
+  deepEqual(seen1, ["start", "updated"]);
+  deepEqual(seen2, ["start", "updated"]);
+
+  window.dispatchEvent(
+    new StorageEvent("storage", {
+      key: store.key,
+      newValue: JSON.stringify("from-storage"),
+      storageArea: localStorage,
+    }),
+  );
+
+  deepEqual(seen1, ["start", "updated", "from-storage"]);
+  deepEqual(seen2, ["start", "updated", "from-storage"]);
+
+  unsub1();
+  unsub2();
+});
+
+test("multi-instance: cross-origin storage event is ignored (security boundary)", () => {
+  const store = localStorageSyncedStore(
+    "multi-instance-xorigin",
+    string,
+    () => "safe",
+  );
+
+  const seen: string[] = [];
+  const unsubscribe = store.subscribe((v) => {
+    seen.push(v);
+  });
+
+  const fakeSessionStorage = {
+    getItem: () => null,
+    setItem: () => {},
+    removeItem: () => {},
+    clear: () => {},
+    length: 0,
+    key: () => null,
+  } as unknown as Storage;
+
+  window.dispatchEvent(
+    new StorageEvent("storage", {
+      key: store.key,
+      newValue: JSON.stringify("from-xorigin"),
+      storageArea: fakeSessionStorage,
+    }),
+  );
+
+  equal(store_get(store), "safe");
+  deepEqual(seen, ["safe"]);
+
+  unsubscribe();
+});
+
+test("multi-instance: unrelated fava instance key does not trigger update", () => {
+  const store1 = localStorageSyncedStore(
+    "instance-1-filter",
+    string,
+    () => "default",
+  );
+  const store2 = localStorageSyncedStore(
+    "instance-2-filter",
+    string,
+    () => "default",
+  );
+
+  const seen1: string[] = [];
+  const seen2: string[] = [];
+
+  const unsub1 = store1.subscribe((v) => {
+    seen1.push(v);
+  });
+  const unsub2 = store2.subscribe((v) => {
+    seen2.push(v);
+  });
+
+  window.dispatchEvent(
+    new StorageEvent("storage", {
+      key: store1.key,
+      newValue: JSON.stringify("only-for-1"),
+      storageArea: localStorage,
+    }),
+  );
+
+  deepEqual(seen1, ["default", "only-for-1"]);
+  deepEqual(seen2, ["default"]);
+  equal(store_get(store1), "only-for-1");
+  equal(store_get(store2), "default");
+
+  unsub1();
+  unsub2();
+});
