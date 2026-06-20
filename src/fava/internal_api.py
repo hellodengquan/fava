@@ -183,16 +183,27 @@ class ChartDataLoader:
     """
 
     _DEFAULT_CHART_CACHE_MAXSIZE: int = 32
+    _MIN_CHART_CACHE_MAXSIZE: int = 1
+    _MAX_CHART_CACHE_MAXSIZE: int = 8192
 
     @staticmethod
     def _chart_cache_maxsize() -> int:
-        """Get the chart cache maxsize from the ledger config."""
+        """Get the chart cache maxsize from the ledger config.
+
+        The value is clamped to a safe range [1, 8192] to prevent
+        misconfiguration from disabling the cache entirely or causing
+        excessive memory use.
+        """
         try:
             from fava.context import g
 
-            return max(
+            base = max(
                 g.ledger.fava_options.ledger_cache_maxsize * 2,
                 ChartDataLoader._DEFAULT_CHART_CACHE_MAXSIZE,
+            )
+            return max(
+                ChartDataLoader._MIN_CHART_CACHE_MAXSIZE,
+                min(base, ChartDataLoader._MAX_CHART_CACHE_MAXSIZE),
             )
         except RuntimeError:  # pragma: no cover
             return ChartDataLoader._DEFAULT_CHART_CACHE_MAXSIZE

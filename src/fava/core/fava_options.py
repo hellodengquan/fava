@@ -168,6 +168,32 @@ class FavaOptions:
         except UnknownLocaleError as err:
             raise UnknownLocaleOptionError(value) from err
 
+    def set_ledger_cache_maxsize(self, value: str) -> None:
+        """Set the ledger_cache_maxsize option.
+
+        Validates that the value is a positive integer within a reasonable
+        range (1 to 4096). Values outside this range would either disable
+        the cache entirely (0 or negative) or cause excessive memory use
+        (very large values).
+        """
+        try:
+            maxsize = int(value)
+        except ValueError as err:
+            raise ValueError(
+                f"ledger_cache_maxsize must be an integer, got {value!r}"
+            ) from err
+
+        if maxsize < 1:
+            raise ValueError(
+                f"ledger_cache_maxsize must be >= 1, got {maxsize}"
+            )
+        if maxsize > 4096:
+            raise ValueError(
+                f"ledger_cache_maxsize must be <= 4096, got {maxsize}"
+            )
+
+        self.ledger_cache_maxsize = maxsize
+
     def set_locale(self, value: str) -> None:
         """Set the locale option."""
         try:
@@ -211,6 +237,8 @@ def parse_option_custom_entry(  # noqa: PLR0912
         options.set_insert_entry(value, entry.date, filename, lineno)
     elif key == "language":
         options.set_language(value)
+    elif key == "ledger_cache_maxsize":
+        options.set_ledger_cache_maxsize(value)
     elif key == "locale":
         options.set_locale(value)
     elif key in STR_OPTS:

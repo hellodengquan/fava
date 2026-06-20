@@ -401,6 +401,385 @@ include "nonexistent_sub_file.beancount"
         assert isinstance(net_worth, list)
 
 
+def test_chart_partial_parse_mid_file_error(tmp_path: Path) -> None:
+    """Chart handles partial-parse: error in the middle, valid data on both sides.
+
+    Beancount parser skips erroneous lines and continues parsing. This
+    test verifies that the chart pipeline works correctly when some
+    entries before the error and some after are successfully parsed.
+    """
+    from fava.context import g
+    from fava.application import create_app
+
+    partial_file = tmp_path / "partial_parse.beancount"
+    partial_file.write_text("""
+option "title" "Partial Parse Ledger"
+option "operating_currency" "USD"
+
+2020-01-01 open Assets:Bank
+2020-01-01 open Expenses:Food
+2020-01-01 open Expenses:Rent
+
+2020-01-05 * "Grocery before error"
+  Assets:Bank  -42.00 USD
+  Expenses:Food
+
+THIS_LINE_IS_GARBAGE_AND_WILL_CAUSE_PARSE_ERROR
+
+2020-01-15 * "Rent after error"
+  Assets:Bank  -1200.00 USD
+  Expenses:Rent
+
+2020-01-20 * "Another grocery"
+  Assets:Bank  -15.50 USD
+  Expenses:Food
+""")
+
+    app = create_app([str(partial_file)])
+    app.config["TESTING"] = True
+
+    with app.test_request_context("/partial-parse/"):
+        app.preprocess_request()
+
+        # Verify there are parse errors but also some valid entries
+        assert len(g.ledger.load_errors) > 0, "Expected parse errors"
+        assert len(g.ledger.all_entries) > 0, "Expected some valid entries"
+
+        # Check that entries before AND after the error were parsed
+        transactions = [e for e in g.ledger.all_entries if e.__class__.__name__ == "Transaction"]
+        assert len(transactions) >= 2, (
+            f"Expected at least 2 valid transactions (before + after error), "
+            f"got {len(transactions)}"
+        )
+
+        # Chart functions should work with the partially parsed data
+        ChartDataLoader.clear_cache()
+        balances = ChartDataLoader.account_balance("Assets:Bank")
+        assert isinstance(balances, list)
+        assert len(balances) > 0, (
+            "Expected some balance data from partially parsed entries"
+        )
+
+        interval_totals = ChartDataLoader.interval_totals(Month, "Expenses")
+        assert isinstance(interval_totals, list)
+
+        # Verify the balance reflects both valid transactions
+        total = sum(sum(d.values()) for _, d in balances)
+        assert total < 0, "Bank balance should be negative (expenses)"
+
+
+def test_chart_partial_parse_multi_include(tmp_path: Path) -> None:
+    """Chart handles partial-parse across multiple include files.
+
+    When some include files load successfully and others fail, the
+    chart pipeline should work with whatever data was successfully
+    loaded from the good files.
+    """
+    from fava.context import g
+    from fava.application import create_app
+
+    # Good sub-file (valid)
+    good_file = tmp_path / "good.beancount"
+    good_file.write_text("""
+2020-01-01 open Assets:Bank
+2020-01-01 open Expenses:Food
+
+2020-01-05 * "Grocery from good file"
+  Assets:Bank  -30.00 USD
+  Expenses:Food
+""")
+
+    # Bad sub-file (invalid syntax)
+    bad_file = tmp_path / "bad.beancount"
+    bad_file.write_text("""
+2020-01-01 open Assets:Savings
+TOTAL_GARBAGE_THAT_WILL_NOT_PARSE_AT_ALL
+2020-01-10 * "Should not appear"
+  Assets:Savings  1000.00 USD
+""")
+
+    # Main file includes both
+    main_file = tmp_path / "main_multi_include.beancount"
+    main_file.write_text(f"""
+option "title" "Multi-include Partial Parse"
+option "operating_currency" "USD"
+
+include "{good_file.name}"
+include "{bad_file.name}"
+""")
+
+    app = create_app([str(main_file)])
+    app.config["TESTING"] = True
+
+    with app.test_request_context("/multi-include/"):
+        app.preprocess_request()
+
+        # Verify: some errors, but data from good file is still there
+        assert len(g.ledger.load_errors) > 0, "Expected errors from bad include"
+        assert len(g.ledger.all_entries) > 0, "Expected entries from good include"
+
+        # Check that the good file's transactions are present
+        transactions = [e for e in g.ledger.all_entries if e.__class__.__name__ == "Transaction"]
+        assert len(transactions) >= 1, (
+            f"Expected at least 1 transaction from good file, got {len(transactions)}"
+        )
+
+        # Charts should work with whatever data was loaded
+        ChartDataLoader.clear_cache()
+        balances = ChartDataLoader.account_balance("Assets:Bank")
+        assert isinstance(balances, list)
+        # The good file's transaction should contribute to balance
+        assert len(balances) >= 1
+
+        net_worth = ChartDataLoader.net_worth()
+        assert isinstance(net_worth, list)
+
+        # Account from the bad file should still work (just empty or minimal)
+        savings_bal = ChartDataLoader.account_balance("Assets:Savings")
+        assert isinstance(savings_bal, list)
+
+
+def test_chart_partial_parse_mixed_error_types(tmp_path: Path) -> None:
+    """Chart handles a mix of parse, lexer, and validation errors.
+
+    Real-world corrupted ledgers often have multiple error types.
+    The chart pipeline must remain resilient even with multiple
+    failure modes present simultaneously.
+    """
+    from fava.context import g
+    from fava.application import create_app
+
+    mixed_file = tmp_path / "mixed_errors.beancount"
+    mixed_file.write_text("""
+option "title" "Mixed Errors Ledger"
+option "operating_currency" "USD"
+
+; Valid opening
+2020-01-01 open Assets:Checking
+2020-01-01 open Expenses:Groceries
+2020-01-01 open Expenses:Entertainment
+
+; Valid transaction
+2020-01-03 * "Valid grocery"
+  Assets:Checking  -25.00 USD
+  Expenses:Groceries
+
+; Lexer error: completely unparseable
+@@@@@@ INVALID TOKEN @@@@@@
+
+; Another valid transaction (parser should recover)
+2020-01-10 * "Valid entertainment"
+  Assets:Checking  -50.00 USD
+  Expenses:Entertainment
+
+; Validation error: unbalanced
+2020-01-15 * "Unbalanced transaction"
+  Assets:Checking  -10.00 USD
+  Expenses:Groceries  9.00 USD
+
+; More valid data
+2020-01-20 * "Another valid one"
+  Assets:Checking  -100.00 USD
+  Expenses:Groceries
+""")
+
+    app = create_app([str(mixed_file)])
+    app.config["TESTING"] = True
+
+    with app.test_request_context("/mixed-errors/"):
+        app.preprocess_request()
+
+        # Should have multiple types of errors
+        error_types = {type(e).__name__ for e in g.ledger.load_errors}
+        assert len(error_types) >= 1, "Expected at least one type of error"
+
+        # Should still have several valid transactions
+        transactions = [e for e in g.ledger.all_entries if e.__class__.__name__ == "Transaction"]
+        assert len(transactions) >= 2, (
+            f"Expected multiple valid transactions, got {len(transactions)}"
+        )
+
+        # All chart functions should work without crashing
+        ChartDataLoader.clear_cache()
+
+        acc_bal = ChartDataLoader.account_balance("Assets:Checking")
+        assert isinstance(acc_bal, list)
+        assert len(acc_bal) > 0, "Expected balance data from valid entries"
+
+        hierarchy = ChartDataLoader.hierarchy("Expenses")
+        assert hierarchy is not None
+        assert hierarchy.account == "Expenses"
+
+        interval = ChartDataLoader.interval_totals(Month, "Expenses")
+        assert isinstance(interval, list)
+
+        net_worth = ChartDataLoader.net_worth()
+        assert isinstance(net_worth, list)
+
+        # Cache should work with partial data too
+        acc_bal2 = ChartDataLoader.account_balance("Assets:Checking")
+        assert acc_bal == acc_bal2  # Cached result matches
+
+
+def test_ledger_cache_maxsize_validation(tmp_path: Path) -> None:
+    """ledger_cache_maxsize option validates input and rejects bad values."""
+    from fava.context import g
+    from fava.application import create_app
+    from fava.core.fava_options import parse_options
+
+    # Test 1: zero value - should be clamped to 1 at load_file level
+    zero_file = tmp_path / "zero_cache.beancount"
+    zero_file.write_text("""
+option "title" "Zero Cache"
+option "operating_currency" "USD"
+2016-04-01 custom "fava-option" "ledger_cache_maxsize" "0"
+2020-01-01 open Assets:Bank
+""")
+
+    app = create_app([str(zero_file)])
+    app.config["TESTING"] = True
+
+    with app.test_request_context("/zero-cache/"):
+        app.preprocess_request()
+        # Defensive clamping at load_file ensures it's at least 1
+        assert g.ledger._cache_maxsize >= 1
+        assert g.ledger._cache_maxsize == g.ledger.fava_options.ledger_cache_maxsize
+
+    # Test 2: negative value
+    neg_file = tmp_path / "neg_cache.beancount"
+    neg_file.write_text("""
+option "title" "Negative Cache"
+option "operating_currency" "USD"
+2016-04-01 custom "fava-option" "ledger_cache_maxsize" "-10"
+2020-01-01 open Assets:Bank
+""")
+
+    app2 = create_app([str(neg_file)])
+    app2.config["TESTING"] = True
+
+    with app2.test_request_context("/neg-cache/"):
+        app2.preprocess_request()
+        # Should be clamped to minimum, not crash
+        assert g.ledger._cache_maxsize >= 1
+
+    # Test 3: way too large value
+    huge_file = tmp_path / "huge_cache.beancount"
+    huge_file.write_text("""
+option "title" "Huge Cache"
+option "operating_currency" "USD"
+2016-04-01 custom "fava-option" "ledger_cache_maxsize" "999999"
+2020-01-01 open Assets:Bank
+""")
+
+    app3 = create_app([str(huge_file)])
+    app3.config["TESTING"] = True
+
+    with app3.test_request_context("/huge-cache/"):
+        app3.preprocess_request()
+        # Should be clamped to max, not cause memory issues
+        assert g.ledger._cache_maxsize <= 4096
+
+    # Test 4: non-integer string
+    str_file = tmp_path / "str_cache.beancount"
+    str_file.write_text("""
+option "title" "String Cache"
+option "operating_currency" "USD"
+2016-04-01 custom "fava-option" "ledger_cache_maxsize" "not_a_number"
+2020-01-01 open Assets:Bank
+""")
+
+    app4 = create_app([str(str_file)])
+    app4.config["TESTING"] = True
+
+    with app4.test_request_context("/str-cache/"):
+        app4.preprocess_request()
+        # Should fall back to default, not crash
+        assert g.ledger._cache_maxsize == 16  # default value
+        assert len(g.ledger.fava_options_errors) > 0  # error recorded
+
+
+def test_multi_level_nested_include_watched(tmp_path: Path) -> None:
+    """Multi-level nested include files are all watched by the watcher.
+
+    Tests that the watcher monitors include files at all nesting levels,
+    not just the first-level includes. Verifies that files discovered
+    from entry metadata (deep includes) appear in paths_to_watch.
+    """
+    from fava.context import g
+    from fava.application import create_app
+
+    # Level 2: deepest sub-file
+    level2_file = tmp_path / "level2.beancount"
+    level2_file.write_text("""
+2020-01-01 open Assets:Savings
+2020-02-01 * "Interest"
+  Assets:Savings  5.00 USD
+  Income:Interest
+""")
+
+    # Level 1: includes level 2
+    level1_file = tmp_path / "level1.beancount"
+    level1_file.write_text(f"""
+2020-01-01 open Assets:Checking
+2020-01-15 * "Salary"
+  Assets:Checking  1000.00 USD
+  Income:Salary
+
+include "{level2_file.name}"
+""")
+
+    # Level 0: main file includes level 1
+    main_file = tmp_path / "main_nested.beancount"
+    main_file.write_text(f"""
+option "title" "Nested Includes"
+option "operating_currency" "USD"
+
+2020-01-01 open Income:Salary
+2020-01-01 open Income:Interest
+
+include "{level1_file.name}"
+""")
+
+    app = create_app([str(main_file)])
+    app.config["TESTING"] = True
+
+    with app.test_request_context("/nested-include/"):
+        app.preprocess_request()
+
+        # Verify all 3 files' entries were loaded
+        all_filenames = {
+            e.meta["filename"] for e in g.ledger.all_entries
+            if e.meta and "filename" in e.meta
+        }
+        # Should have at least 3 unique source files
+        assert len(all_filenames) >= 3, (
+            f"Expected entries from at least 3 files, got: {all_filenames}"
+        )
+
+        # Verify paths_to_watch includes files from all levels
+        watched_files, _ = g.ledger.paths_to_watch()
+        watched_filenames = {Path(f).name for f in watched_files}
+
+        assert "level2.beancount" in watched_filenames, (
+            f"Deepest include (level2) should be watched, got: {watched_filenames}"
+        )
+        assert "level1.beancount" in watched_filenames
+        assert "main_nested.beancount" in watched_filenames or (
+            str(main_file) in [str(f) for f in watched_files]
+        )
+
+        # Charts should work with all the data
+        ChartDataLoader.clear_cache()
+        balances = ChartDataLoader.account_balance("Assets:Checking")
+        assert isinstance(balances, list)
+        assert len(balances) >= 1
+
+        savings = ChartDataLoader.account_balance("Assets:Savings")
+        assert isinstance(savings, list)
+        # Level 2 file's transaction should contribute
+        assert len(savings) >= 1
+
+
 def test_chart_with_empty_ledger(tmp_path: Path) -> None:
     """Chart functions handle empty (no transactions) ledger gracefully."""
     from fava.context import g

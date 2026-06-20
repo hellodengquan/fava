@@ -426,7 +426,11 @@ class FavaLedger:
             self.all_entries_by_type.Custom,
         )
 
-        new_maxsize = self.fava_options.ledger_cache_maxsize
+        raw_maxsize = self.fava_options.ledger_cache_maxsize
+        new_maxsize = max(1, min(raw_maxsize, 4096))
+        if new_maxsize != raw_maxsize:
+            self.fava_options.ledger_cache_maxsize = new_maxsize
+
         if new_maxsize != self._cache_maxsize:
             self._cache_maxsize = new_maxsize
             self.get_filtered = lru_cache(maxsize=new_maxsize)(
@@ -509,17 +513,39 @@ class FavaLedger:
         """Path relative to the directory of the ledger."""
         return Path(self.beancount_file_path).parent.joinpath(*args).resolve()
 
+    def _source_files_from_entries(self) -> list[Path]:
+        """Collect all unique source file paths from entry metadata.
+
+        Scans all entries and returns every file referenced in their
+        ``meta["filename"]``. This catches all levels of nested includes
+        (not just the top-level ones from ``options["include"]``).
+        """
+        seen: set[str] = set()
+        files: list[Path] = []
+        for entry in self.all_entries:
+            if entry.meta and "filename" in entry.meta:
+                fname = entry.meta["filename"]
+                if fname not in seen:
+                    seen.add(fname)
+                    files.append(Path(fname))
+        return files
+
     def paths_to_watch(self) -> tuple[Sequence[Path], Sequence[Path]]:
         """Get paths to included files and document directories.
+
+        Combines include paths from options with all source files
+        discovered in entry metadata, so nested includes at any depth
+        are also monitored.
 
         Returns:
             A tuple (files, directories).
         """
-        files = [Path(i) for i in self.options["include"]]
+        files_set: set[Path] = {Path(i) for i in self.options["include"]}
+        files_set.update(self._source_files_from_entries())
         if self.ingest.module_path:
-            files.append(self.ingest.module_path)
+            files_set.add(self.ingest.module_path)
         return (
-            files,
+            list(files_set),
             [
                 self.join_path(path, account)
                 for account in self.root_accounts
