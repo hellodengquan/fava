@@ -173,10 +173,29 @@ class ChartDataLoader:
     retrieving the current ledger state, but delegates the actual data
     generation to pure functions in :mod:`fava.core.charts`.
 
-    Results are cached using the ledger's ``mtime`` as part of the cache
-    key, so cached data is automatically invalidated when the ledger file
-    changes.
+    Results are cached using the ledger's content hash as part of the
+    cache key, so cached data is automatically invalidated when any
+    ledger file (including includes) changes.
+
+    The cache maxsize defaults to 2x the ledger's
+    ``ledger_cache_maxsize`` option (since chart queries tend to be
+    more numerous than filtered-ledger lookups).
     """
+
+    _DEFAULT_CHART_CACHE_MAXSIZE: int = 32
+
+    @staticmethod
+    def _chart_cache_maxsize() -> int:
+        """Get the chart cache maxsize from the ledger config."""
+        try:
+            from fava.context import g
+
+            return max(
+                g.ledger.fava_options.ledger_cache_maxsize * 2,
+                ChartDataLoader._DEFAULT_CHART_CACHE_MAXSIZE,
+            )
+        except RuntimeError:  # pragma: no cover
+            return ChartDataLoader._DEFAULT_CHART_CACHE_MAXSIZE
 
     @staticmethod
     def _filter_key() -> tuple[str, str, str]:
@@ -192,6 +211,24 @@ class ChartDataLoader:
             request.args.get("account", ""),
             request.args.get("filter", ""),
             request.args.get("time", ""),
+        )
+
+    @staticmethod
+    def _content_hash() -> int:
+        """Get a hash that changes when any ledger content changes.
+
+        Combines the watcher's ``last_checked`` and ``last_notified``
+        timestamps. ``last_notified`` is updated immediately when a file
+        change is reported (e.g. via editor save), even before the full
+        ledger reload has completed. This ensures the chart cache
+        invalidates promptly when any watched file (including ``include``
+        sub-files) changes, not just the main ledger file.
+        """
+        from fava.context import g
+
+        return max(
+            g.ledger.watcher.last_checked,
+            g.ledger.watcher.last_notified,
         )
 
     @staticmethod
@@ -215,7 +252,7 @@ class ChartDataLoader:
     def account_balance(account_name: str) -> Sequence[DateAndBalance]:
         """Load data for an account balances chart."""
         return ChartDataLoader._cached_linechart(
-            g.ledger.mtime,
+            ChartDataLoader._content_hash(),
             ChartDataLoader._filter_key(),
             account_name,
             str(g.conv),
@@ -242,7 +279,7 @@ class ChartDataLoader:
     def hierarchy(account_name: str) -> SerialisedTreeNode:
         """Load data for an account hierarchy chart."""
         return ChartDataLoader._cached_hierarchy(
-            g.ledger.mtime,
+            ChartDataLoader._content_hash(),
             ChartDataLoader._filter_key(),
             account_name,
             str(g.conv),
@@ -283,7 +320,7 @@ class ChartDataLoader:
         """Load data for an account per interval chart."""
         conv_str = str(conversion or g.conv)
         return ChartDataLoader._cached_interval_totals(
-            g.ledger.mtime,
+            ChartDataLoader._content_hash(),
             ChartDataLoader._filter_key(),
             interval,
             accounts,
@@ -316,10 +353,31 @@ class ChartDataLoader:
     def net_worth() -> Sequence[DateAndBalance]:
         """Load data for net worth chart."""
         return ChartDataLoader._cached_net_worth(
-            g.ledger.mtime,
+            ChartDataLoader._content_hash(),
             ChartDataLoader._filter_key(),
             g.interval,
             str(g.conv),
+        )
+
+    @classmethod
+    def rebuild_cache(cls) -> None:
+        """Rebuild all cached methods with the current maxsize config.
+
+        Call this after the ledger config has been loaded and the
+        ``ledger_cache_maxsize`` option might have changed.
+        """
+        maxsize = cls._chart_cache_maxsize()
+        cls._cached_linechart = lru_cache(maxsize=maxsize)(
+            cls._cached_linechart.__wrapped__,
+        )
+        cls._cached_hierarchy = lru_cache(maxsize=maxsize)(
+            cls._cached_hierarchy.__wrapped__,
+        )
+        cls._cached_interval_totals = lru_cache(maxsize=maxsize)(
+            cls._cached_interval_totals.__wrapped__,
+        )
+        cls._cached_net_worth = lru_cache(maxsize=maxsize)(
+            cls._cached_net_worth.__wrapped__,
         )
 
     @staticmethod

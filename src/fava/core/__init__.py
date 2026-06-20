@@ -375,6 +375,9 @@ class FavaLedger:
     #: A :class:`.QueryShell` instance.
     query_shell: QueryShell
 
+    _DEFAULT_CACHE_MAXSIZE: int = 16
+    """Default cache maxsize, used before options are loaded."""
+
     def __init__(self, path: str, *, poll_watcher: bool = False) -> None:
         """Create an interface for a Beancount ledger.
 
@@ -385,8 +388,13 @@ class FavaLedger:
         #: The path to the main Beancount file.
         self.beancount_file_path = path
         self._is_encrypted = is_encrypted_file(path)
-        self.get_filtered = lru_cache(maxsize=16)(self._get_filtered)
-        self.get_entry = lru_cache(maxsize=16)(self._get_entry)
+        self._cache_maxsize = self._DEFAULT_CACHE_MAXSIZE
+        self.get_filtered = lru_cache(maxsize=self._cache_maxsize)(
+            self._get_filtered,
+        )
+        self.get_entry = lru_cache(maxsize=self._cache_maxsize)(
+            self._get_entry,
+        )
 
         self.accounts = AccountDict(self)
         self.attributes = AttributesModule(self)
@@ -410,8 +418,6 @@ class FavaLedger:
             self.beancount_file_path,
             is_encrypted=self._is_encrypted,
         )
-        self.get_filtered.cache_clear()
-        self.get_entry.cache_clear()
 
         self.all_entries_by_type = group_entries_by_type(self.all_entries)
         self.prices = FavaPriceMap(self.all_entries_by_type.Price)
@@ -419,6 +425,19 @@ class FavaLedger:
         self.fava_options, self.fava_options_errors = parse_options(
             self.all_entries_by_type.Custom,
         )
+
+        new_maxsize = self.fava_options.ledger_cache_maxsize
+        if new_maxsize != self._cache_maxsize:
+            self._cache_maxsize = new_maxsize
+            self.get_filtered = lru_cache(maxsize=new_maxsize)(
+                self._get_filtered,
+            )
+            self.get_entry = lru_cache(maxsize=new_maxsize)(
+                self._get_entry,
+            )
+        else:
+            self.get_filtered.cache_clear()
+            self.get_entry.cache_clear()
 
         if self._is_encrypted:  # pragma: no cover
             pass

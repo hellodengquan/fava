@@ -104,6 +104,7 @@ class FavaOptions:
     invert_gains_losses_colors: bool = False
     invert_income_liabilities_equity: bool = False
     language: str | None = None
+    ledger_cache_maxsize: int = 16
     locale: str | None = None
     show_accounts_with_zero_balance: bool = True
     show_accounts_with_zero_transactions: bool = True

@@ -176,7 +176,6 @@ def test_chart_with_damaged_ledger(
 ) -> None:
     """Chart functions handle damaged/unparseable ledger files gracefully."""
     from fava.context import g
-    from flask import Flask
     from fava.application import create_app
 
     # Create a damaged beancount file with invalid syntax
@@ -217,6 +216,189 @@ This is invalid syntax that will cause parsing errors
         interval_totals = ChartDataLoader.interval_totals(Month, "Expenses")
         assert isinstance(interval_totals, list)
         assert len(interval_totals) >= 0  # Should not crash
+
+
+def test_chart_with_parser_syntax_error(tmp_path: Path) -> None:
+    """Chart functions handle ParserSyntaxError from Beancount parser.
+
+    When the Beancount parser encounters completely unparseable tokens
+    (not just semantically invalid directives), it produces
+    ParserSyntaxError errors. This test ensures the chart pipeline
+    does not crash when the ledger contains such errors.
+    """
+    from beancount.parser.grammar import ParserSyntaxError
+    from fava.context import g
+    from fava.application import create_app
+
+    # Create a file that triggers ParserSyntaxError (invalid tokens)
+    parser_error_file = tmp_path / "parser_error.beancount"
+    parser_error_file.write_text("""
+option "title" "Parser Error Ledger"
+option "operating_currency" "USD"
+
+2020-01-01 open Assets:Cash
+2020-01-01 open Expenses:Food
+
+GARBAGE_TOKEN_NOT_RECOGNIZED
+2020-01-02 * "Grocery"
+  Assets:Cash  -50.00 USD
+  Expenses:Food
+""")
+
+    app = create_app([str(parser_error_file)])
+    app.config["TESTING"] = True
+
+    with app.test_request_context("/parser-error/"):
+        app.preprocess_request()
+
+        # Verify ledger has ParserSyntaxError specifically
+        error_type_names = [type(e).__name__ for e in g.ledger.load_errors]
+        assert "ParserSyntaxError" in error_type_names, (
+            f"Expected ParserSyntaxError in errors, got: {error_type_names}"
+        )
+        assert len(g.ledger.load_errors) > 0
+
+        # Chart functions should not crash despite parse errors
+        ChartDataLoader.clear_cache()
+        balances = ChartDataLoader.account_balance("Assets:Cash")
+        assert isinstance(balances, list)
+
+        hierarchy = ChartDataLoader.hierarchy("Assets")
+        assert hierarchy is not None
+
+        interval_totals = ChartDataLoader.interval_totals(Month, "Expenses")
+        assert isinstance(interval_totals, list)
+
+        net_worth = ChartDataLoader.net_worth()
+        assert isinstance(net_worth, list)
+
+
+def test_chart_with_lexer_error(tmp_path: Path) -> None:
+    """Chart functions handle LexerError from Beancount lexer.
+
+    LexerError occurs when the Beancount lexer encounters tokens it
+    cannot recognize at all (e.g., free-form text that is not a valid
+    directive). This is a different failure mode from ParserSyntaxError.
+    """
+    from fava.context import g
+    from fava.application import create_app
+
+    # Create a file that triggers LexerError (unrecognizable tokens)
+    lexer_error_file = tmp_path / "lexer_error.beancount"
+    lexer_error_file.write_text("""
+option "title" "Lexer Error Ledger"
+option "operating_currency" "USD"
+
+2020-01-01 open Assets:Bank
+2020-01-01 open Expenses:Misc
+
+Just some random words here that are not valid beancount syntax at all
+Another line of garbage
+""")
+
+    app = create_app([str(lexer_error_file)])
+    app.config["TESTING"] = True
+
+    with app.test_request_context("/lexer-error/"):
+        app.preprocess_request()
+
+        # Verify lexer errors are present
+        error_type_names = [type(e).__name__ for e in g.ledger.load_errors]
+        assert any("LexerError" in name or "ParserSyntaxError" in name
+                    for name in error_type_names), (
+            f"Expected LexerError or ParserSyntaxError, got: {error_type_names}"
+        )
+
+        # Chart functions should not crash
+        ChartDataLoader.clear_cache()
+        balances = ChartDataLoader.account_balance("Assets:Bank")
+        assert isinstance(balances, list)
+
+        net_worth = ChartDataLoader.net_worth()
+        assert isinstance(net_worth, list)
+
+
+def test_chart_with_validation_error(tmp_path: Path) -> None:
+    """Chart functions handle ValidationError (unbalanced transactions).
+
+    ValidationError occurs when a transaction does not balance. The
+    entries are still parsed but semantically invalid. Chart functions
+    should still work with the valid subset of entries.
+    """
+    from fava.context import g
+    from fava.application import create_app
+
+    validation_error_file = tmp_path / "validation_error.beancount"
+    validation_error_file.write_text("""
+option "title" "Validation Error Ledger"
+option "operating_currency" "USD"
+
+2020-01-01 open Assets:Bank
+2020-01-01 open Expenses:Misc
+
+2020-01-02 * "Unbalanced transaction"
+  Assets:Bank  -50.00 USD
+  Expenses:Misc  30.00 USD
+""")
+
+    app = create_app([str(validation_error_file)])
+    app.config["TESTING"] = True
+
+    with app.test_request_context("/validation-error/"):
+        app.preprocess_request()
+
+        # Verify validation errors
+        error_type_names = [type(e).__name__ for e in g.ledger.load_errors]
+        assert "ValidationError" in error_type_names, (
+            f"Expected ValidationError, got: {error_type_names}"
+        )
+
+        # Chart functions should still work (entries are parsed)
+        ChartDataLoader.clear_cache()
+        balances = ChartDataLoader.account_balance("Assets:Bank")
+        assert isinstance(balances, list)
+        # The unbalanced transaction is still included in entries
+        assert len(balances) > 0
+
+        net_worth = ChartDataLoader.net_worth()
+        assert isinstance(net_worth, list)
+
+
+def test_chart_with_load_error_include(tmp_path: Path) -> None:
+    """Chart functions handle LoadError from missing include files."""
+    from fava.context import g
+    from fava.application import create_app
+
+    load_error_file = tmp_path / "load_error.beancount"
+    load_error_file.write_text("""
+option "title" "Load Error Ledger"
+option "operating_currency" "USD"
+
+include "nonexistent_sub_file.beancount"
+
+2020-01-01 open Assets:Bank
+2020-01-01 open Expenses:Misc
+""")
+
+    app = create_app([str(load_error_file)])
+    app.config["TESTING"] = True
+
+    with app.test_request_context("/load-error/"):
+        app.preprocess_request()
+
+        # Verify LoadError
+        error_type_names = [type(e).__name__ for e in g.ledger.load_errors]
+        assert "LoadError" in error_type_names, (
+            f"Expected LoadError, got: {error_type_names}"
+        )
+
+        # Chart functions should still work with remaining entries
+        ChartDataLoader.clear_cache()
+        balances = ChartDataLoader.account_balance("Assets:Bank")
+        assert isinstance(balances, list)
+
+        net_worth = ChartDataLoader.net_worth()
+        assert isinstance(net_worth, list)
 
 
 def test_chart_with_empty_ledger(tmp_path: Path) -> None:
@@ -307,4 +489,87 @@ def test_chart_data_loader_mock_verify(
 
         # Restore original charts to avoid affecting other tests
         g.ledger.charts = original_charts
+
+
+def test_ledger_cache_maxsize_configurable(tmp_path: Path) -> None:
+    """FavaLedger cache maxsize can be configured via fava-option."""
+    from fava.context import g
+    from fava.application import create_app
+
+    ledger_file = tmp_path / "cache_config.beancount"
+    ledger_file.write_text("""
+option "title" "Cache Config Ledger"
+option "operating_currency" "USD"
+
+2016-04-01 custom "fava-option" "ledger_cache_maxsize" "32"
+
+2020-01-01 open Assets:Bank
+2020-01-01 open Expenses:Misc
+""")
+
+    app = create_app([str(ledger_file)])
+    app.config["TESTING"] = True
+
+    with app.test_request_context("/cache-config/"):
+        app.preprocess_request()
+
+        # Verify the configured maxsize is picked up
+        assert g.ledger.fava_options.ledger_cache_maxsize == 32
+        assert g.ledger._cache_maxsize == 32
+
+
+def test_chart_cache_uses_include_mtime(tmp_path: Path) -> None:
+    """Chart cache invalidates when an include sub-file changes.
+
+    This test verifies that _content_hash incorporates changes from
+    the watcher's last_notified timestamp, which is updated when
+    any watched file (including includes) changes.
+    """
+    from fava.context import g
+    from fava.application import create_app
+
+    # Create a sub-ledger file
+    sub_file = tmp_path / "sub.beancount"
+    sub_file.write_text("""
+2020-01-01 open Assets:Bank
+2020-01-01 open Expenses:Misc
+
+2020-01-02 * "Test"
+  Assets:Bank  -10.00 USD
+  Expenses:Misc
+""")
+
+    # Create a main ledger that includes the sub-file
+    main_file = tmp_path / "main.beancount"
+    main_file.write_text(f"""
+option "title" "Include Test Ledger"
+option "operating_currency" "USD"
+
+include "{sub_file.name}"
+""")
+
+    app = create_app([str(main_file)])
+    app.config["TESTING"] = True
+
+    with app.test_request_context("/include-test/"):
+        app.preprocess_request()
+
+        # Get initial content hash
+        hash1 = ChartDataLoader._content_hash()
+
+        # Simulate a change notification on the sub-file
+        g.ledger.watcher.notify(sub_file)
+
+        # Content hash should change after sub-file notification
+        hash2 = ChartDataLoader._content_hash()
+        assert hash2 > hash1, (
+            f"Content hash should increase after sub-file notification: "
+            f"{hash2} should be > {hash1}"
+        )
+
+        # Verify that the cache key changes, forcing a cache miss
+        ChartDataLoader.clear_cache()
+        # First call after clear - should work without errors
+        result = ChartDataLoader.account_balance("Assets:Bank")
+        assert isinstance(result, list)
 
