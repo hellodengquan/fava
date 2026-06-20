@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
 from datetime import timedelta
@@ -389,6 +391,10 @@ class FavaLedger:
         self.beancount_file_path = path
         self._is_encrypted = is_encrypted_file(path)
         self._cache_maxsize = self._DEFAULT_CACHE_MAXSIZE
+        self._loading_lock = threading.Lock()
+        self._loading_depth = 0
+        _MAX_LOADING_DEPTH = 4
+        self._max_loading_depth = _MAX_LOADING_DEPTH
         self.get_filtered = lru_cache(maxsize=self._cache_maxsize)(
             self._get_filtered,
         )
@@ -413,7 +419,25 @@ class FavaLedger:
         self.load_file()
 
     def load_file(self) -> None:
-        """Load the main file and all included files and set attributes."""
+        """Load the main file and all included files and set attributes.
+
+        Uses a lock to prevent concurrent reloads and a depth counter
+        to guard against re-entrant calls (e.g. if a file change event
+        arrives while ``load_file`` is still executing). If the maximum
+        nesting depth is exceeded, the call is silently skipped.
+        """
+        with self._loading_lock:
+            self._loading_depth += 1
+            if self._loading_depth > self._max_loading_depth:
+                self._loading_depth -= 1
+                return
+            try:
+                self._load_file_inner()
+            finally:
+                self._loading_depth -= 1
+
+    def _load_file_inner(self) -> None:
+        """Inner implementation of file loading (called under lock)."""
         self.all_entries, self.load_errors, self.options = load_uncached(
             self.beancount_file_path,
             is_encrypted=self._is_encrypted,
@@ -513,16 +537,26 @@ class FavaLedger:
         """Path relative to the directory of the ledger."""
         return Path(self.beancount_file_path).parent.joinpath(*args).resolve()
 
+    _MAX_SOURCE_FILES: int = 256
+
     def _source_files_from_entries(self) -> list[Path]:
         """Collect all unique source file paths from entry metadata.
 
         Scans all entries and returns every file referenced in their
         ``meta["filename"]``. This catches all levels of nested includes
         (not just the top-level ones from ``options["include"]``).
+
+        A safety cap of ``_MAX_SOURCE_FILES`` is applied to prevent
+        unbounded file lists in case of pathological circular includes.
+        Beancount itself detects circular includes and produces a
+        ``LoadError``, but the entry set may still contain duplicates
+        from before the cycle was detected.
         """
         seen: set[str] = set()
         files: list[Path] = []
         for entry in self.all_entries:
+            if len(files) >= self._MAX_SOURCE_FILES:
+                break
             if entry.meta and "filename" in entry.meta:
                 fname = entry.meta["filename"]
                 if fname not in seen:

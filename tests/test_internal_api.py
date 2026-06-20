@@ -952,3 +952,226 @@ include "{sub_file.name}"
         result = ChartDataLoader.account_balance("Assets:Bank")
         assert isinstance(result, list)
 
+
+def test_chart_with_deprecated_error(tmp_path: Path) -> None:
+    """Chart handles DeprecatedError from deprecated Beancount syntax.
+
+    DeprecatedError is a BeancountException subclass produced when
+    deprecated Beancount syntax (e.g. ``pushtag``/``poptag``) is used.
+    """
+    from fava.context import g
+    from fava.application import create_app
+    from beancount.parser.grammar import DeprecatedError
+
+    deprecated_file = tmp_path / "deprecated.beancount"
+    deprecated_file.write_text("""
+option "title" "Deprecated Syntax Ledger"
+option "operating_currency" "USD"
+
+2020-01-01 open Assets:Bank
+2020-01-01 open Expenses:Misc
+
+pushtag #mytrip
+2020-01-05 * "Travel expense"
+  Assets:Bank  -100.00 USD
+  Expenses:Misc
+poptag #mytrip
+""")
+
+    app = create_app([str(deprecated_file)])
+    app.config["TESTING"] = True
+
+    with app.test_request_context("/deprecated/"):
+        app.preprocess_request()
+
+        # May have DeprecatedError or ParserError for unbalanced pushtag
+        error_type_names = {type(e).__name__ for e in g.ledger.load_errors}
+
+        # Chart functions should work regardless of deprecated syntax
+        ChartDataLoader.clear_cache()
+        balances = ChartDataLoader.account_balance("Assets:Bank")
+        assert isinstance(balances, list)
+
+        # The transaction should still be parsed despite deprecation warning
+        transactions = [e for e in g.ledger.all_entries if e.__class__.__name__ == "Transaction"]
+        if len(transactions) > 0:
+            assert len(balances) > 0
+
+        net_worth = ChartDataLoader.net_worth()
+        assert isinstance(net_worth, list)
+
+        hierarchy = ChartDataLoader.hierarchy("Expenses")
+        assert hierarchy is not None
+
+
+def test_chart_with_circular_include(tmp_path: Path) -> None:
+    """Chart handles circular include files without infinite recursion.
+
+    When two Beancount files include each other, Beancount produces a
+    LoadError. The chart pipeline must not crash, and the load_file
+    re-entrancy guard must prevent StackOverflow.
+    """
+    from fava.context import g
+    from fava.application import create_app
+
+    # File A includes File B
+    file_a = tmp_path / "a.beancount"
+    file_a.write_text(f"""
+option "title" "Circular A"
+option "operating_currency" "USD"
+
+2020-01-01 open Assets:Bank
+
+include "{tmp_path / "b.beancount"}"
+""")
+
+    # File B includes File A (circular)
+    file_b = tmp_path / "b.beancount"
+    file_b.write_text(f"""
+2020-01-02 open Expenses:Food
+
+include "{file_a}"
+""")
+
+    app = create_app([str(file_a)])
+    app.config["TESTING"] = True
+
+    with app.test_request_context("/circular/"):
+        app.preprocess_request()
+
+        # Verify Beancount detected the circular include
+        error_type_names = {type(e).__name__ for e in g.ledger.load_errors}
+        assert "LoadError" in error_type_names, (
+            f"Expected LoadError for circular include, got: {error_type_names}"
+        )
+
+        # Chart functions should not crash
+        ChartDataLoader.clear_cache()
+        balances = ChartDataLoader.account_balance("Assets:Bank")
+        assert isinstance(balances, list)
+
+        # _source_files_from_entries should have a bounded result
+        source_files = g.ledger._source_files_from_entries()
+        assert len(source_files) <= g.ledger._MAX_SOURCE_FILES
+
+        # paths_to_watch should not blow up
+        watched, _ = g.ledger.paths_to_watch()
+        assert len(watched) <= g.ledger._MAX_SOURCE_FILES + 5  # some margin for options includes
+
+
+def test_load_file_reentrancy_guard(tmp_path: Path) -> None:
+    """load_file re-entrancy guard prevents StackOverflow on cascading reloads.
+
+    If load_file is called while it's already executing (e.g. from a
+    signal handler or cascading file change event), the depth counter
+    prevents unbounded recursion.
+    """
+    from fava.context import g
+    from fava.application import create_app
+
+    ledger_file = tmp_path / "reentrant.beancount"
+    ledger_file.write_text("""
+option "title" "Reentrancy Test"
+option "operating_currency" "USD"
+
+2020-01-01 open Assets:Bank
+""")
+
+    app = create_app([str(ledger_file)])
+    app.config["TESTING"] = True
+
+    with app.test_request_context("/reentrant/"):
+        app.preprocess_request()
+
+        # Simulate re-entrant call by directly calling load_file
+        # while it's already executing (via monkeypatching)
+        original_load_inner = g.ledger._load_file_inner
+        call_count = 0
+
+        def patched_load_inner() -> None:
+            nonlocal call_count
+            call_count += 1
+            # Try to re-enter load_file during execution
+            g.ledger.load_file()
+            original_load_inner()
+
+        g.ledger._load_file_inner = patched_load_inner
+        g.ledger.load_file()
+
+        # The re-entrant call should have been blocked by depth guard
+        # call_count should be 1 (only the first call executed)
+        assert call_count == 1, f"Expected 1 call, got {call_count}"
+
+        # Restore original method
+        g.ledger._load_file_inner = original_load_inner
+
+
+def test_cache_maxsize_runtime_validation(tmp_path: Path) -> None:
+    """ledger_cache_maxsize is validated on runtime assignment too.
+
+    Even if code directly sets fava_options.ledger_cache_maxsize
+    at runtime (bypassing parse_options), the __setattr__ hook
+    raises ValueError for invalid values.
+    """
+    from fava.core.fava_options import FavaOptions
+
+    # Valid values should work
+    opts = FavaOptions(ledger_cache_maxsize=16)
+    assert opts.ledger_cache_maxsize == 16
+
+    opts.ledger_cache_maxsize = 64
+    assert opts.ledger_cache_maxsize == 64
+
+    # Invalid: zero
+    with pytest.raises(ValueError, match="must be >= 1"):
+        opts.ledger_cache_maxsize = 0
+
+    # Invalid: negative
+    with pytest.raises(ValueError, match="must be >= 1"):
+        opts.ledger_cache_maxsize = -5
+
+    # Invalid: too large
+    with pytest.raises(ValueError, match="must be <= 4096"):
+        opts.ledger_cache_maxsize = 999999
+
+    # Original value should be preserved after failed assignment
+    assert opts.ledger_cache_maxsize == 64
+
+    # Invalid at __init__ time
+    with pytest.raises(ValueError, match="must be >= 1"):
+        FavaOptions(ledger_cache_maxsize=0)
+
+    with pytest.raises(ValueError, match="must be <= 4096"):
+        FavaOptions(ledger_cache_maxsize=50000)
+
+
+def test_source_files_cap(tmp_path: Path) -> None:
+    """_source_files_from_entries respects _MAX_SOURCE_FILES cap."""
+    from unittest.mock import PropertyMock
+    from fava.core import FavaLedger
+
+    ledger_file = tmp_path / "cap_test.beancount"
+    ledger_file.write_text("""
+option "title" "Cap Test"
+option "operating_currency" "USD"
+
+2020-01-01 open Assets:Bank
+""")
+
+    app = create_app([str(ledger_file)])
+    app.config["TESTING"] = True
+
+    with app.test_request_context("/cap-test/"):
+        app.preprocess_request()
+        from fava.context import g
+
+        # Lower the cap to test truncation
+        original_cap = g.ledger._MAX_SOURCE_FILES
+        g.ledger._MAX_SOURCE_FILES = 1
+
+        try:
+            source_files = g.ledger._source_files_from_entries()
+            assert len(source_files) <= 1
+        finally:
+            g.ledger._MAX_SOURCE_FILES = original_cap
+

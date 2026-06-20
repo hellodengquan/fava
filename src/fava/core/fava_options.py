@@ -114,6 +114,39 @@ class FavaOptions:
     uptodate_indicator_grey_lookback_days: int = 60
     use_external_editor: bool = False
 
+    _CACHE_MAXSIZE_MIN: int = 1
+    _CACHE_MAXSIZE_MAX: int = 4096
+
+    def __post_init__(self) -> None:
+        """Validate critical options after initialization."""
+        self._validate_cache_maxsize(self.ledger_cache_maxsize)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        """Intercept attribute assignment for runtime validation."""
+        if name == "ledger_cache_maxsize" and isinstance(value, int):
+            self._validate_cache_maxsize(value)
+        super().__setattr__(name, value)
+
+    @classmethod
+    def _validate_cache_maxsize(cls, value: int) -> None:
+        """Validate ledger_cache_maxsize is within acceptable range.
+
+        Raises ``ValueError`` if the value is outside [1, 4096].
+        This is called both at initialization and on any subsequent
+        attribute assignment, so runtime changes (e.g. during a ledger
+        reload) are also validated.
+        """
+        if value < cls._CACHE_MAXSIZE_MIN:
+            raise ValueError(
+                f"ledger_cache_maxsize must be >= {cls._CACHE_MAXSIZE_MIN}, "
+                f"got {value}"
+            )
+        if value > cls._CACHE_MAXSIZE_MAX:
+            raise ValueError(
+                f"ledger_cache_maxsize must be <= {cls._CACHE_MAXSIZE_MAX}, "
+                f"got {value}"
+            )
+
     def set_collapse_pattern(self, value: str) -> None:
         """Set the collapse_pattern option."""
         try:
@@ -169,12 +202,12 @@ class FavaOptions:
             raise UnknownLocaleOptionError(value) from err
 
     def set_ledger_cache_maxsize(self, value: str) -> None:
-        """Set the ledger_cache_maxsize option.
+        """Set the ledger_cache_maxsize option from a string value.
 
-        Validates that the value is a positive integer within a reasonable
-        range (1 to 4096). Values outside this range would either disable
-        the cache entirely (0 or negative) or cause excessive memory use
-        (very large values).
+        Parses the string as an integer and validates it falls within
+        the acceptable range [1, 4096]. The ``__setattr__`` hook will
+        also validate, but we check here first to provide a clearer
+        error message for non-integer inputs.
         """
         try:
             maxsize = int(value)
@@ -183,15 +216,7 @@ class FavaOptions:
                 f"ledger_cache_maxsize must be an integer, got {value!r}"
             ) from err
 
-        if maxsize < 1:
-            raise ValueError(
-                f"ledger_cache_maxsize must be >= 1, got {maxsize}"
-            )
-        if maxsize > 4096:
-            raise ValueError(
-                f"ledger_cache_maxsize must be <= 4096, got {maxsize}"
-            )
-
+        self._validate_cache_maxsize(maxsize)
         self.ledger_cache_maxsize = maxsize
 
     def set_locale(self, value: str) -> None:
