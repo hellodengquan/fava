@@ -25,6 +25,7 @@ import "@ungap/custom-elements";
 import { get as store_get } from "svelte/store";
 
 import { get_changed, get_errors, get_ledger_data } from "./api/index.ts";
+import type { LedgerData } from "./api/validators.ts";
 import { ledgerDataValidator } from "./api/validators.ts";
 import { CopyableText } from "./clipboard.ts";
 import { BeancountTextarea } from "./codemirror/dom.ts";
@@ -34,7 +35,7 @@ import { getScriptTagValue } from "./lib/dom.ts";
 import { log_error } from "./log.ts";
 import { notify, notify_err } from "./notifications.ts";
 import { frontend_routes } from "./reports/routes.ts";
-import { router } from "./router.ts";
+import { router, set_query_param } from "./router.ts";
 import { initSidebar } from "./sidebar/index.ts";
 import { has_changes } from "./sidebar/page-title.ts";
 import { SortableTable } from "./sort/sortable-table.ts";
@@ -43,6 +44,7 @@ import {
   auto_reload,
   invert_gains_losses_colors,
 } from "./stores/fava_options.ts";
+import { getStaleFilterParams } from "./stores/filters.ts";
 import { errors, ledgerData } from "./stores/index.ts";
 import { ledger_mtime, read_mtime } from "./stores/mtime.ts";
 import { SvelteCustomElement } from "./svelte-custom-elements.ts";
@@ -67,21 +69,42 @@ function defineCustomElements() {
 /**
  * Update the ledger data and errors; Reload if automatic reloading is configured.
  */
-function onChanges() {
-  get_ledger_data()
-    .then((v) => {
-      ledgerData.set(v);
-    })
-    .catch((e: unknown) => {
-      notify_err(e, (err) => `Error fetching ledger data: ${err.message}`);
-    });
+function cleanStaleFilters(data: LedgerData): boolean {
+  const stale = getStaleFilterParams(router.current, data);
+  if (stale.length === 0) return false;
+  const url = new URL(router.current);
+  for (const param of stale) {
+    set_query_param(
+      url,
+      param as "account" | "filter" | "time",
+      "",
+    );
+  }
+  router.navigate(url);
+  return true;
+}
+
+async function onChanges() {
+  let data: LedgerData | null = null;
+  try {
+    data = await get_ledger_data();
+    ledgerData.set(data);
+  } catch (e: unknown) {
+    notify_err(e, (err) => `Error fetching ledger data: ${err.message}`);
+  }
   if (store_get(auto_reload) && !router.has_interrupt_handler) {
+    if (data && cleanStaleFilters(data)) {
+      return;
+    }
     router.reload();
   } else {
     get_errors().then((v) => {
       errors.set(v);
     }, log_error);
     notify(_("File change detected. Click to reload."), "warning", () => {
+      if (data && cleanStaleFilters(data)) {
+        return;
+      }
       router.reload();
     });
   }

@@ -13,6 +13,7 @@ To start a simple server::
 from __future__ import annotations
 
 import logging
+import re
 import mimetypes
 from datetime import date
 from datetime import datetime
@@ -187,6 +188,41 @@ def static_url(filename: str) -> str:
 _cached_url_for = lru_cache(2048)(flask_url_for)
 
 
+def _is_valid_account_filter(value: str) -> bool:
+    if not value:
+        return True
+    ledger = getattr(g, "ledger", None)
+    if ledger is None:
+        return True
+    cache = getattr(g, "_account_filter_validity_cache", None)
+    if cache is None:
+        cache = {}
+        g._account_filter_validity_cache = cache  # type: ignore[attr-defined]
+    if value in cache:
+        return cache[value]
+    accounts = ledger.attributes.accounts
+    prefix = value + ":"
+    for account in accounts:
+        if account == value or account.startswith(prefix):
+            cache[value] = True
+            return True
+    for account in accounts:
+        if value in account.split(":"):
+            cache[value] = True
+            return True
+    try:
+        pattern = re.compile(value, re.IGNORECASE)
+        for account in accounts:
+            if pattern.search(account):
+                cache[value] = True
+                return True
+    except re.error:
+        cache[value] = False
+        return False
+    cache[value] = False
+    return False
+
+
 def _inject_filters(endpoint: str, values: dict[str, str]) -> None:
     if (
         "bfile" not in values
@@ -200,6 +236,8 @@ def _inject_filters(endpoint: str, values: dict[str, str]) -> None:
         if name not in values:
             val = request.args.get(name)
             if val is not None:
+                if name == "account" and not _is_valid_account_filter(val):
+                    continue
                 values[name] = val
 
 
