@@ -25,15 +25,20 @@ export interface AccountReportProps {
   budgets: Record<string, AccountBudget[]> | null;
 }
 
+interface AccountReportData {
+  charts: ParsedFavaChart[];
+  journal: string | null;
+  interval_balances: AccountTreeNode[] | null;
+  dates: { begin: Date; end: Date }[] | null;
+  budgets: Record<string, AccountBudget[]> | null;
+}
+
 class NotAnAccountUrlError extends Error {
   constructor(pathname: string) {
     super(`Path '${pathname}' is not a path for the account report.`);
   }
 }
 
-/**
- * Get the account from the given URL.
- */
 export function get_account_from_url(
   url: URL,
 ): Result<string, NonRelativeUrlPathError | NotAnAccountUrlError> {
@@ -46,28 +51,42 @@ export function get_account_from_url(
   });
 }
 
+async function loadAccountReport(
+  url: URL,
+  account: string,
+  report_type: AccountReportType,
+): Promise<AccountReportData> {
+  return get_account_report({
+    ...getURLFilters(url),
+    a: account,
+    r: report_type,
+  });
+}
+
+function transformAccountReportData(
+  data: AccountReportData,
+  account: string,
+  report_type: AccountReportType,
+): AccountReportProps {
+  return {
+    charts: data.charts,
+    journal: data.journal != null ? fragment_from_string(data.journal) : null,
+    interval_balances: data.interval_balances,
+    dates: data.dates,
+    budgets: data.budgets,
+    account,
+    report_type,
+  };
+}
+
 export const account_report = new Route<AccountReportProps>(
   "account",
   AccountReport,
   async (url) => {
     const account = get_account_from_url(url).unwrap();
     const report_type = to_report_type(url.searchParams.get("r"));
-    const { charts, journal, interval_balances, dates, budgets } =
-      await get_account_report({
-        ...getURLFilters(url),
-        a: account,
-        r: report_type,
-      });
-
-    return {
-      charts,
-      journal: journal != null ? fragment_from_string(journal) : null,
-      interval_balances,
-      dates,
-      budgets,
-      account,
-      report_type,
-    };
+    const data = await loadAccountReport(url, account, report_type);
+    return transformAccountReportData(data, account, report_type);
   },
   (url) => {
     const [, account] = getUrlPath(url).unwrap().split("/");

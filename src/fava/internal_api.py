@@ -26,6 +26,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from fava.core.accounts import AccountDict
     from fava.core.charts import DateAndBalance
     from fava.core.charts import DateAndBalanceWithBudget
+    from fava.core.conversion import Conversion
     from fava.core.extensions import ExtensionDetails
     from fava.core.fava_options import FavaOptions
     from fava.core.tree import SerialisedTreeNode
@@ -161,61 +162,86 @@ if TYPE_CHECKING:  # pragma: no cover
     ChartData = BalancesChart | BarChart | HierarchyChart
 
 
-class ChartApi:
-    """Functions to generate chart data."""
+class ChartDataLoader:
+    """Load raw chart data from the ledger.
+
+    This class is responsible for fetching data from the ledger's chart
+    module. It depends on the Flask request context (via ``g``).
+    """
 
     @staticmethod
-    def account_balance(account_name: str) -> ChartData:
-        """Generate data for an account balances chart."""
-        return BalancesChart(
-            gettext("Account Balance"),
-            g.ledger.charts.linechart(
-                g.filtered,
-                account_name,
-                g.conv,
-            ),
+    def account_balance(account_name: str) -> Sequence[DateAndBalance]:
+        """Load data for an account balances chart."""
+        return g.ledger.charts.linechart(
+            g.filtered,
+            account_name,
+            g.conv,
         )
 
     @staticmethod
-    def hierarchy(
-        account_name: str,
-        *,
-        label: str | None = None,
-    ) -> ChartData:
-        """Generate data for an account hierarchy chart."""
-        return HierarchyChart(
-            label or account_name,
-            g.ledger.charts.hierarchy(
-                g.filtered,
-                account_name,
-                g.conv,
-            ),
+    def hierarchy(account_name: str) -> SerialisedTreeNode:
+        """Load data for an account hierarchy chart."""
+        return g.ledger.charts.hierarchy(
+            g.filtered,
+            account_name,
+            g.conv,
         )
 
     @staticmethod
     def interval_totals(
         interval: Interval,
-        account_name: str | tuple[str, ...],
-        label: str | None = None,
+        accounts: str | tuple[str, ...],
+        conversion: str | Conversion | None = None,
         *,
         invert: bool = False,
-    ) -> ChartData:
-        """Generate data for an account per interval chart."""
-        return BarChart(
-            label or str(account_name),
-            g.ledger.charts.interval_totals(
-                g.filtered,
-                interval,
-                account_name,
-                g.conv,
-                invert=invert,
-            ),
+    ) -> Sequence[DateAndBalanceWithBudget]:
+        """Load data for an account per interval chart."""
+        return g.ledger.charts.interval_totals(
+            g.filtered,
+            interval,
+            accounts,
+            conversion or g.conv,
+            invert=invert,
         )
 
     @staticmethod
-    def net_worth() -> ChartData:
-        """Generate data for net worth chart."""
-        return BalancesChart(
-            gettext("Net Worth"),
-            g.ledger.charts.net_worth(g.filtered, g.interval, g.conv),
-        )
+    def net_worth() -> Sequence[DateAndBalance]:
+        """Load data for net worth chart."""
+        return g.ledger.charts.net_worth(g.filtered, g.interval, g.conv)
+
+
+class ChartApi:
+    """Build chart data structures from pre-loaded data.
+
+    This class only focuses on data structure construction and has no
+    dependency on the Flask request context.
+    """
+
+    @staticmethod
+    def account_balance(data: Sequence[DateAndBalance]) -> ChartData:
+        """Build a balances chart from pre-loaded data."""
+        return BalancesChart(gettext("Account Balance"), data)
+
+    @staticmethod
+    def hierarchy(
+        data: SerialisedTreeNode,
+        *,
+        label: str | None = None,
+    ) -> ChartData:
+        """Build a hierarchy chart from pre-loaded data."""
+        return HierarchyChart(label or data.account, data)
+
+    @staticmethod
+    def interval_totals(
+        data: Sequence[DateAndBalanceWithBudget],
+        *,
+        label: str | None = None,
+        account_name: str | tuple[str, ...] | None = None,
+    ) -> ChartData:
+        """Build a bar chart from pre-loaded data."""
+        return BarChart(label or str(account_name or ""), data)
+
+    @staticmethod
+    def net_worth(data: Sequence[DateAndBalance]) -> ChartData:
+        """Build a net worth chart from pre-loaded data."""
+        return BalancesChart(gettext("Net Worth"), data)

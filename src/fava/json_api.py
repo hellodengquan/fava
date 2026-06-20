@@ -41,6 +41,7 @@ from fava.core.ingest import filepath_in_primary_imports_folder
 from fava.core.misc import align
 from fava.helpers import FavaAPIError
 from fava.internal_api import ChartApi
+from fava.internal_api import ChartDataLoader
 from fava.internal_api import get_errors
 from fava.internal_api import get_ledger_data
 from fava.serialisation import deserialise
@@ -677,20 +678,26 @@ def get_income_statement() -> TreeReport:
 
     charts = [
         ChartApi.interval_totals(
-            g.interval,
-            (options["name_income"], options["name_expenses"]),
+            ChartDataLoader.interval_totals(
+                g.interval,
+                (options["name_income"], options["name_expenses"]),
+                invert=invert,
+            ),
             label=gettext("Net Profit"),
-            invert=invert,
         ),
         ChartApi.interval_totals(
-            g.interval,
-            options["name_income"],
+            ChartDataLoader.interval_totals(
+                g.interval,
+                options["name_income"],
+                invert=invert,
+            ),
             label=f"{gettext('Income')} ({g.interval.label})",
-            invert=invert,
         ),
         ChartApi.interval_totals(
-            g.interval,
-            options["name_expenses"],
+            ChartDataLoader.interval_totals(
+                g.interval,
+                options["name_expenses"],
+            ),
             label=f"{gettext('Expenses')} ({g.interval.label})",
         ),
     ]
@@ -714,7 +721,7 @@ def get_balance_sheet() -> TreeReport:
     g.ledger.changed()
     options = g.ledger.options
 
-    charts = [ChartApi.net_worth()]
+    charts = [ChartApi.net_worth(ChartDataLoader.net_worth())]
     root_tree_closed = g.filtered.root_tree_closed
     trees = [
         root_tree_closed.get(options["name_assets"]),
@@ -778,10 +785,14 @@ def get_account_report() -> AccountReportJournal | AccountReportTree:
     subreport = request.args.get("r")
 
     charts = [
-        ChartApi.account_balance(account_name),
+        ChartApi.account_balance(
+            ChartDataLoader.account_balance(account_name),
+        ),
         ChartApi.interval_totals(
-            g.interval,
-            account_name,
+            ChartDataLoader.interval_totals(
+                g.interval,
+                account_name,
+            ),
             label=gettext("Changes"),
         ),
     ]

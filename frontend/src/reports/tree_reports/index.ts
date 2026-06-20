@@ -21,43 +21,91 @@ export interface TreeReportProps {
   date_range: { begin: Date; end: Date } | null;
 }
 
-export const income_statement = new Route(
+interface TreeReportData {
+  charts: ParsedFavaChart[];
+  trees: AccountTreeNode[];
+  date_range: { begin: Date; end: Date } | null;
+}
+
+function buildIncomeStatementCharts(
+  trees: AccountTreeNode[],
+): ParsedFavaChart[] {
+  const [income, _profit, expenses] = trees;
+  const charts: ParsedFavaChart[] = [];
+  if (income && expenses) {
+    charts.push(
+      ParsedHierarchyChart.from_node(income),
+      ParsedHierarchyChart.from_node(expenses),
+    );
+  }
+  return charts;
+}
+
+function buildBalanceSheetCharts(
+  trees: AccountTreeNode[],
+): ParsedFavaChart[] {
+  return trees.map(ParsedHierarchyChart.from_node);
+}
+
+function buildTrialBalanceCharts(
+  trees: AccountTreeNode[],
+): ParsedFavaChart[] {
+  const root = trees[0];
+  if (root) {
+    return root.children.map(ParsedHierarchyChart.from_node);
+  }
+  return [];
+}
+
+async function loadIncomeStatement(
+  url: URL,
+): Promise<TreeReportData> {
+  const report = await get_income_statement(getURLFilters(url));
+  return report;
+}
+
+async function loadBalanceSheet(
+  url: URL,
+): Promise<TreeReportData> {
+  const report = await get_balance_sheet(getURLFilters(url));
+  return report;
+}
+
+async function loadTrialBalance(
+  url: URL,
+): Promise<TreeReportData> {
+  const report = await get_trial_balance(getURLFilters(url));
+  return report;
+}
+
+export const income_statement = new Route<TreeReportProps>(
   "income_statement",
   IncomeStatement,
   async (url) => {
-    const report = await get_income_statement(getURLFilters(url));
-    const [income, _profit, expenses] = report.trees;
-    if (income && expenses) {
-      report.charts.push(
-        ParsedHierarchyChart.from_node(income),
-        ParsedHierarchyChart.from_node(expenses),
-      );
-    }
+    const report = await loadIncomeStatement(url);
+    report.charts.push(...buildIncomeStatementCharts(report.trees));
     return report;
   },
   () => _("Income Statement"),
 );
 
-export const balance_sheet = new Route(
+export const balance_sheet = new Route<TreeReportProps>(
   "balance_sheet",
   BalanceSheet,
   async (url) => {
-    const report = await get_balance_sheet(getURLFilters(url));
-    report.charts.push(...report.trees.map(ParsedHierarchyChart.from_node));
+    const report = await loadBalanceSheet(url);
+    report.charts.push(...buildBalanceSheetCharts(report.trees));
     return report;
   },
   () => _("Balance Sheet"),
 );
 
-export const trial_balance = new Route(
+export const trial_balance = new Route<TreeReportProps>(
   "trial_balance",
   TrialBalance,
   async (url) => {
-    const report = await get_trial_balance(getURLFilters(url));
-    const root = report.trees[0];
-    if (root) {
-      report.charts.push(...root.children.map(ParsedHierarchyChart.from_node));
-    }
+    const report = await loadTrialBalance(url);
+    report.charts.push(...buildTrialBalanceCharts(report.trees));
     return report;
   },
   () => _("Trial Balance"),
