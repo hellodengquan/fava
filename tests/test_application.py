@@ -421,3 +421,125 @@ def test_ledger_switch_no_param_pollution(
     assert response.status_code == HTTPStatus.OK.value
     second_content = assert_success(response)
     assert filter_param not in second_content
+
+
+def test_closed_account_filter_is_valid(app: Flask, test_client: FlaskClient) -> None:
+    """A closed account (with a close directive) still exists in the ledger's
+    account list, so the account filter should be considered valid and injected
+    into URLs.
+    """
+    closed_account = "Assets:Account1"
+
+    with app.test_request_context(f"/example/income_statement/?account={closed_account}"):
+        app.preprocess_request()
+        from fava.application import _inject_filters, _is_valid_account_filter
+
+        assert _is_valid_account_filter(closed_account)
+        values: dict[str, str] = {"report_name": "income_statement"}
+        _inject_filters("report", values)
+        assert values.get("account") == closed_account
+
+    response = test_client.get(
+        "/example/income_statement/",
+        query_string={"account": closed_account},
+    )
+    assert response.status_code == HTTPStatus.OK.value
+
+
+def test_deleted_account_filter_is_invalid(app: Flask, test_client: FlaskClient) -> None:
+    """A deleted account (not in the ledger at all) should not be injected
+    into URLs by _inject_filters.
+    """
+    deleted_account = "Assets:CompletelyDeletedAccount"
+
+    with app.test_request_context(f"/long-example/income_statement/?account={deleted_account}"):
+        app.preprocess_request()
+        from fava.application import _inject_filters, _is_valid_account_filter
+
+        assert not _is_valid_account_filter(deleted_account)
+        values: dict[str, str] = {"report_name": "income_statement"}
+        _inject_filters("report", values)
+        assert "account" not in values
+
+
+def test_hidden_account_filter_is_valid(app: Flask, test_client: FlaskClient) -> None:
+    """An account that exists but is hidden (zero balance, no transactions,
+    or filtered by show_closed_accounts=False) is still in the accounts list,
+    so the filter should be valid.
+    """
+    with app.test_request_context("/long-example/income_statement/"):
+        app.preprocess_request()
+        from fava.application import _is_valid_account_filter
+        from fava.context import g
+
+        all_accounts = g.ledger.attributes.accounts
+        assert len(all_accounts) > 0
+
+        for account in all_accounts:
+            assert _is_valid_account_filter(account), (
+                f"Account '{account}' exists in ledger but was marked invalid"
+            )
+
+
+def test_account_filter_validity_cache_cleared_between_requests(
+    app: Flask,
+    test_client: FlaskClient,
+) -> None:
+    """The per-request cache for account filter validity should not persist
+    across requests, preventing stale cached results from one request leaking
+    into the next.
+    """
+    deleted_account = "Assets:NonExistent"
+
+    with app.test_request_context(f"/long-example/income_statement/?account={deleted_account}"):
+        app.preprocess_request()
+        from fava.application import _inject_filters
+        from flask import g as flask_g
+
+        values: dict[str, str] = {"report_name": "income_statement"}
+        _inject_filters("report", values)
+        assert "account" not in values
+        assert hasattr(flask_g, "_account_filter_validity_cache")
+        cache_from_first = getattr(flask_g, "_account_filter_validity_cache", {})
+        assert deleted_account in cache_from_first
+        assert cache_from_first[deleted_account] is False
+
+    with app.test_request_context("/long-example/income_statement/"):
+        app.preprocess_request()
+        from flask import g as flask_g
+
+        assert not hasattr(flask_g, "_account_filter_validity_cache"), (
+            "Cache from previous request should not persist into a new request"
+        )
+
+
+def test_account_filter_validity_cache_bounded_per_request(
+    app: Flask,
+    test_client: FlaskClient,
+) -> None:
+    """The per-request cache should not grow unboundedly. Validate that
+    different account values are cached independently within a single request
+    and that the cache only contains entries for accounts checked in that
+    specific request.
+    """
+    accounts_to_check = [
+        "Assets:US:BofA",
+        "Assets:NonExistent1",
+        "Assets:US:BofA:Checking",
+        "Assets:NonExistent2",
+    ]
+
+    with app.test_request_context("/long-example/income_statement/"):
+        app.preprocess_request()
+        from fava.application import _is_valid_account_filter
+        from flask import g as flask_g
+
+        for account in accounts_to_check:
+            _is_valid_account_filter(account)
+
+        cache = getattr(flask_g, "_account_filter_validity_cache", {})
+        assert len(cache) == len(accounts_to_check)
+        assert cache["Assets:US:BofA"] is True
+        assert cache["Assets:NonExistent1"] is False
+        assert cache["Assets:US:BofA:Checking"] is True
+        assert cache["Assets:NonExistent2"] is False

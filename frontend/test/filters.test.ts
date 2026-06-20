@@ -1,13 +1,15 @@
-import { deepEqual, equal } from "node:assert/strict";
+import { deepEqual, equal, ok } from "node:assert/strict";
 import { test } from "node:test";
 
 import { get as store_get } from "svelte/store";
 
 import {
+  account_filter,
   getStaleFilterParams,
   getURLFilters,
+  time_filter,
 } from "../src/stores/filters.ts";
-import { current_url } from "../src/stores/url.ts";
+import { current_url, searchParams, syncedSearchParams } from "../src/stores/url.ts";
 import { initialiseLedgerData } from "./helpers.ts";
 import { setup_jsdom } from "./dom.ts";
 
@@ -143,4 +145,236 @@ test("current_url store syncs with URL searchParams", () => {
   const url = store_get(current_url);
   equal(url.searchParams.get("account"), "Assets:US:BofA");
   equal(url.searchParams.get("time"), "2015");
+});
+
+test("filter stores react to current_url page switch within same ledger", () => {
+  current_url.set(
+    new URL(
+      "http://localhost:5000/long-example/income_statement/?account=Assets:US:BofA&time=2015",
+    ),
+  );
+  equal(store_get(account_filter), "Assets:US:BofA");
+  equal(store_get(time_filter), "2015");
+
+  current_url.set(
+    new URL(
+      "http://localhost:5000/long-example/balance_sheet/?account=Assets:US:BofA&time=2015",
+    ),
+  );
+  equal(store_get(account_filter), "Assets:US:BofA");
+  equal(store_get(time_filter), "2015");
+});
+
+test("filter stores clear when switching to URL without filter params", () => {
+  current_url.set(
+    new URL(
+      "http://localhost:5000/long-example/income_statement/?account=Assets:US:BofA&time=2015",
+    ),
+  );
+  equal(store_get(account_filter), "Assets:US:BofA");
+  equal(store_get(time_filter), "2015");
+
+  current_url.set(
+    new URL(
+      "http://localhost:5000/long-example/balance_sheet/",
+    ),
+  );
+  equal(store_get(account_filter), "");
+  equal(store_get(time_filter), "");
+});
+
+test("filter stores update when switching ledgers with different params", () => {
+  current_url.set(
+    new URL(
+      "http://localhost:5000/long-example/income_statement/?account=Assets:US:BofA&time=2015",
+    ),
+  );
+  equal(store_get(account_filter), "Assets:US:BofA");
+  equal(store_get(time_filter), "2015");
+
+  current_url.set(
+    new URL(
+      "http://localhost:5000/example/income_statement/?time=2012",
+    ),
+  );
+  equal(store_get(account_filter), "");
+  equal(store_get(time_filter), "2012");
+});
+
+test("syncedSearchParams only includes non-empty filter params", () => {
+  current_url.set(
+    new URL(
+      "http://localhost:5000/long-example/income_statement/?account=Assets:US:BofA",
+    ),
+  );
+  const params = store_get(syncedSearchParams);
+  equal(params.get("account"), "Assets:US:BofA");
+  equal(params.get("time"), null);
+  equal(params.get("filter"), null);
+});
+
+test("syncedSearchParams clears all filters when navigating to clean URL", () => {
+  current_url.set(
+    new URL(
+      "http://localhost:5000/long-example/income_statement/?account=Assets:US:BofA&time=2015&filter=%23test",
+    ),
+  );
+  let params = store_get(syncedSearchParams);
+  equal(params.get("account"), "Assets:US:BofA");
+  equal(params.get("time"), "2015");
+
+  current_url.set(
+    new URL(
+      "http://localhost:5000/long-example/balance_sheet/",
+    ),
+  );
+  params = store_get(syncedSearchParams);
+  equal(params.get("account"), null);
+  equal(params.get("time"), null);
+  equal(params.get("filter"), null);
+});
+
+test("searchParams derived store produces fresh instance per URL change", () => {
+  current_url.set(
+    new URL("http://localhost:5000/long-example/income_statement/?account=A"),
+  );
+  const sp1 = store_get(searchParams);
+  equal(sp1.get("account"), "A");
+
+  current_url.set(
+    new URL("http://localhost:5000/long-example/income_statement/?account=B"),
+  );
+  const sp2 = store_get(searchParams);
+  equal(sp2.get("account"), "B");
+  equal(sp1.get("account"), "A");
+});
+
+test("closed account still in accounts list is valid for filter", () => {
+  const closedAccountData = {
+    accounts: ["Assets:Account1", "Expenses:Food"],
+    years: ["2012", "2013", "2014"],
+    tags: [],
+    links: [],
+    payees: [],
+  };
+  const url = new URL(
+    "http://localhost:5000/example/income_statement/?account=Assets:Account1",
+  );
+  const stale = getStaleFilterParams(url, closedAccountData);
+  deepEqual(stale, []);
+});
+
+test("deleted account not in accounts list is stale for filter", () => {
+  const dataAfterDelete = {
+    accounts: ["Expenses:Food"],
+    years: ["2012", "2013", "2014"],
+    tags: [],
+    links: [],
+    payees: [],
+  };
+  const url = new URL(
+    "http://localhost:5000/example/income_statement/?account=Assets:DeletedAccount",
+  );
+  const stale = getStaleFilterParams(url, dataAfterDelete);
+  deepEqual(stale, ["account"]);
+});
+
+test("hidden (zero-balance, no-transaction) account still in accounts list is valid", () => {
+  const dataWithHidden = {
+    accounts: ["Assets:Dormant", "Expenses:Food", "Income:Salary"],
+    years: ["2014"],
+    tags: [],
+    links: [],
+    payees: [],
+  };
+  const url = new URL(
+    "http://localhost:5000/example/income_statement/?account=Assets:Dormant",
+  );
+  const stale = getStaleFilterParams(url, dataWithHidden);
+  deepEqual(stale, []);
+});
+
+test("getStaleFilterParams returns only stale params without retaining references", () => {
+  const data = {
+    accounts: ["Assets:Active"],
+    years: ["2020"],
+    tags: ["active-tag"],
+    links: ["active-link"],
+    payees: ["ActivePayee"],
+  };
+  const url = new URL(
+    "http://localhost:5000/ledger/report/?account=Assets:Active",
+  );
+
+  const results: string[][] = [];
+  for (let i = 0; i < 1000; i++) {
+    results.push(getStaleFilterParams(url, data));
+  }
+
+  for (const result of results) {
+    deepEqual(result, []);
+  }
+
+  const firstResult = results[0];
+  const lastResult = results[results.length - 1];
+  ok(firstResult !== lastResult, "Each call should return a new array");
+});
+
+test("getStaleFilterParams does not accumulate internal regex state across calls", () => {
+  const data = {
+    accounts: ["Assets:Active"],
+    years: ["2020"],
+    tags: ["tag1"],
+    links: ["link1"],
+    payees: ["Payee1"],
+  };
+
+  const staleUrl = new URL(
+    "http://localhost:5000/ledger/report/?filter=%23nonexistent",
+  );
+  getStaleFilterParams(staleUrl, data);
+
+  const validUrl = new URL(
+    "http://localhost:5000/ledger/report/?filter=%23tag1",
+  );
+  const stale = getStaleFilterParams(validUrl, data);
+  deepEqual(stale, []);
+
+  getStaleFilterParams(staleUrl, data);
+
+  const stale2 = getStaleFilterParams(validUrl, data);
+  deepEqual(stale2, []);
+});
+
+test("getStaleFilterParams handles concurrent validation objects without cross-contamination", () => {
+  const dataA = {
+    accounts: ["Assets:A"],
+    years: ["2020"],
+    tags: ["tagA"],
+    links: ["linkA"],
+    payees: ["PayeeA"],
+  };
+  const dataB = {
+    accounts: ["Assets:B"],
+    years: ["2021"],
+    tags: ["tagB"],
+    links: ["linkB"],
+    payees: ["PayeeB"],
+  };
+
+  const urlA = new URL(
+    "http://localhost:5000/ledger-a/report/?account=Assets:A&filter=%23tagA",
+  );
+  const urlB = new URL(
+    "http://localhost:5000/ledger-b/report/?account=Assets:A&filter=%23tagA",
+  );
+
+  const staleA = getStaleFilterParams(urlA, dataA);
+  deepEqual(staleA, []);
+
+  const staleB = getStaleFilterParams(urlB, dataB);
+  deepEqual(staleB, ["account", "filter"]);
+
+  const staleA2 = getStaleFilterParams(urlA, dataA);
+  deepEqual(staleA2, []);
 });
