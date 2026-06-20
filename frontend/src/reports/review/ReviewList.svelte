@@ -181,7 +181,19 @@
   }
 
   onMount(() => {
-    const ctx = review_context_stack.pop();
+    review_context_stack.markHistoryList();
+    let ctx:
+      | {
+          highlightId: string | null;
+          scrollTop: number;
+          filterStatus: string;
+          filterType: string;
+          searchText: string;
+        }
+      | undefined = review_context_stack.takePendingRestore();
+    if (!ctx) {
+      ctx = review_context_stack.pop();
+    }
     if (ctx) {
       if (ctx.filterStatus && ctx.filterStatus !== "all") {
         filterStatus = ctx.filterStatus as FilterStatus;
@@ -198,7 +210,7 @@
       if (ctx.scrollTop > 0 && tableContainer) {
         requestAnimationFrame(() => {
           if (tableContainer) {
-            tableContainer.scrollTop = ctx.scrollTop;
+            tableContainer.scrollTop = ctx!.scrollTop;
           }
         });
       }

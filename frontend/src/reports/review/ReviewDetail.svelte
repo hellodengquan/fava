@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+
   import { urlForAccount, urlForSource } from "../../helpers.ts";
   import { _, format } from "../../i18n.ts";
   import { router } from "../../router.ts";
@@ -135,6 +137,10 @@
       router.navigate($base_url + urlForReviewDetail(nextItem.id));
     }
   }
+
+  onMount(() => {
+    review_context_stack.markHistoryDetail();
+  });
 
   function handleSkip(): void {
     if (currentItem) {

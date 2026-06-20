@@ -1,9 +1,8 @@
 import { derived, get, writable } from "svelte/store";
 
 import type { BeancountError, ReviewItemState, ReviewStatus } from "../api/validators.ts";
-import { get_review_state, put_review_state } from "../api/index.ts";
-import { notify, notify_err } from "../notifications.ts";
 import { errors, ledgerData } from "./index.ts";
+import { notify, notify_err } from "../notifications.ts";
 
 const STORAGE_KEY_PREFIX = "fava:review:";
 
@@ -21,6 +20,20 @@ function getErrorId(error: BeancountError): string {
 interface LocalSnapshot {
   version: number;
   data: Record<string, ReviewItemState>;
+}
+
+interface ConflictBody {
+  error?: string;
+  expected_version?: number;
+  got_version?: number;
+  latest_data?: { version: number; data: Record<string, ReviewItemState> };
+}
+
+interface PutResult {
+  version: number;
+  count: number;
+  applied?: number;
+  message: string;
 }
 
 function loadFromStorage(baseUrl: string): LocalSnapshot {
@@ -71,30 +84,92 @@ interface PendingPatch {
   value: ReviewItemState | null;
 }
 
+async function fetchReviewState(): Promise<LocalSnapshot> {
+  try {
+    const base = (get(ledgerData)?.base_url ?? "") || "";
+    const res = await fetch(`${base}review_state/`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+    if (!res.ok) {
+      throw new Error(`GET review_state failed (${res.status})`);
+    }
+    const payload = await res.json();
+    const { data, mtime: _mtime } = payload;
+    if (
+      data &&
+      typeof data === "object" &&
+      typeof data.version === "number" &&
+      data.data &&
+      typeof data.data === "object"
+    ) {
+      return { version: data.version, data: data.data as Record<string, ReviewItemState> };
+    }
+    return { version: 0, data: {} };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    notify_err(msg);
+    return { version: 0, data: {} };
+  }
+}
+
+async function putReviewState(
+  baseUrl: string,
+  version: number,
+  stateArray: Array<[string, unknown]>,
+  etag: string | null,
+): Promise<{ result: PutResult; etag: string | null; conflict: ConflictBody | null }> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+  if (etag) {
+    headers["If-Match"] = etag;
+  }
+  const res = await fetch(`${baseUrl}review_state/`, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ version, state: stateArray }),
+  });
+  const json = await res.json().catch(() => ({}));
+
+  if (res.status === 409) {
+    return {
+      result: undefined as never,
+      etag: null,
+      conflict: json as ConflictBody,
+    };
+  }
+
+  if (!res.ok) {
+    const err = json?.error || json?.data?.error || res.statusText;
+    throw new Error(`PUT review_state failed (${res.status}): ${err}`);
+  }
+
+  const resultData = json.data || json;
+  const resultEtag = res.headers.get("ETag");
+  return {
+    result: resultData as PutResult,
+    etag: resultEtag,
+    conflict: null,
+  };
+}
+
 function createReviewStore() {
   const initial: ReviewStoreValue = {};
   const store = writable<ReviewStoreValue>(initial);
   let initialized = false;
   let lastBaseUrl = "";
   let currentVersion = 0;
+  let currentEtag: string | null = null;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let saveInFlight = false;
   let pendingPatches: PendingPatch[] = [];
   let retryCount = 0;
 
-  async function loadFromBackend(): Promise<LocalSnapshot> {
-    try {
-      const envelope = await get_review_state();
-      return { version: envelope.version ?? 0, data: envelope.data ?? {} };
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      notify_err(msg);
-      return { version: 0, data: {} };
-    }
-  }
-
-  function applySnapshot(snap: LocalSnapshot): void {
+  function applySnapshot(snap: LocalSnapshot, etag: string | null = null): void {
     currentVersion = snap.version;
+    currentEtag = etag;
     store.set(snap.data);
     if (lastBaseUrl) {
       saveToStorage(lastBaseUrl, snap);
@@ -111,7 +186,7 @@ function createReviewStore() {
       currentVersion = localSnap.version;
       store.set(localSnap.data);
       initialized = true;
-      const backendSnap = await loadFromBackend();
+      const backendSnap = await fetchReviewState();
       applySnapshot(backendSnap);
     }
   }
@@ -124,7 +199,7 @@ function createReviewStore() {
       const localSnap = loadFromStorage(baseUrl);
       currentVersion = localSnap.version;
       store.set(localSnap.data);
-      loadFromBackend().then((backendSnap) => applySnapshot(backendSnap));
+      fetchReviewState().then((backendSnap) => applySnapshot(backendSnap));
     }
   });
 
@@ -142,7 +217,6 @@ function createReviewStore() {
       saveTimer = null;
     }
     if (saveInFlight) {
-      // will be picked up by the in-flight flush's retry chain
       return;
     }
     if (pendingPatches.length === 0) {
@@ -153,7 +227,6 @@ function createReviewStore() {
     const patches = pendingPatches;
     pendingPatches = [];
 
-    // Apply server-side merge semantics: dedupe by id, keep last patch for each id.
     const byId = new Map<string, ReviewItemState | null>();
     for (const p of patches) {
       byId.set(p.id, p.value);
@@ -163,79 +236,103 @@ function createReviewStore() {
     );
 
     try {
-      const resp = await put_review_state({
-        version: currentVersion,
-        state: stateArray,
-      });
-      currentVersion = resp.version;
+      const { result, etag, conflict } = await putReviewState(
+        lastBaseUrl,
+        currentVersion,
+        stateArray,
+        currentEtag,
+      );
+      if (conflict) {
+        saveInFlight = false;
+        retryCount += 1;
+        const limit = 3;
+        if (retryCount >= limit) {
+          pendingPatches = [...patches, ...pendingPatches];
+          notify_err(`复核数据保存冲突，已达到最大重试次数 (${limit})，请刷新页面重试`);
+          retryCount = 0;
+          return;
+        }
+        // Merge: apply server latest_data as base, then re-apply client-side patches
+        const latest = conflict.latest_data;
+        const baseData: Record<string, ReviewItemState> =
+          latest && latest.data && typeof latest.data === "object"
+            ? (latest.data as Record<string, ReviewItemState>)
+            : get(store);
+        const baseVersion: number =
+          latest && typeof latest.version === "number" ? latest.version : currentVersion;
+        const merged: Record<string, ReviewItemState> = { ...baseData };
+        const localState = get(store);
+        const mergedPatches: PendingPatch[] = [];
+        for (const [patchId, patchValue] of byId) {
+          if (patchValue === null) {
+            delete merged[patchId];
+            mergedPatches.push({ id: patchId, value: null });
+          } else {
+            const prior = localState[patchId] ?? defaultState();
+            const server = baseData[patchId];
+            // Three-way merge (partial): take server as base, but prefer
+            // client fields that are "different from what the client saw".
+            // Simple heuristic: write the whole patchValue, but for any
+            // field where server is already different from local prior,
+            // keep the server's version of that specific field.
+            const out: ReviewItemState = server ? { ...server } : { ...defaultState() };
+            let changed = false;
+            for (const key of ["status", "note", "explanation"] as const) {
+              const priorVal = prior[key];
+              const patchVal = (patchValue as ReviewItemState)[key];
+              const serverVal = out[key];
+              if (patchVal !== priorVal && patchVal !== serverVal) {
+                // Client made a real change vs the version it had:
+                // apply client change (unless server has a diverging note
+                // or explanation, in which case we concatenate).
+                if ((key === "note" || key === "explanation") && typeof serverVal === "string" && typeof patchVal === "string") {
+                  out[key] = serverVal ? `${serverVal}\n\n${patchVal}` : patchVal;
+                } else {
+                  out[key] = patchVal;
+                }
+                changed = true;
+              } else if (patchVal !== priorVal && patchVal === serverVal) {
+                // No actual divergence
+                changed = true;
+              }
+            }
+            if (!changed) {
+              const defaultVal = defaultState();
+              const isDefault =
+                out.status === defaultVal.status &&
+                out.note === defaultVal.note &&
+                out.explanation === defaultVal.explanation;
+              if (isDefault) {
+                continue;
+              }
+            }
+            out.updated_at = new Date().toISOString();
+            merged[patchId] = out;
+            mergedPatches.push({ id: patchId, value: out });
+          }
+        }
+        store.set(merged);
+        currentVersion = baseVersion;
+        currentEtag = etag;
+        persistLocal(merged);
+        pendingPatches = [...mergedPatches, ...pendingPatches];
+        notify(`复核数据出现并发冲突，已自动合并 (第 ${retryCount} 次重试)`);
+        saveTimer = setTimeout(() => {
+          void flushPatches();
+        }, 800);
+        return;
+      }
+      currentVersion = result.version;
+      currentEtag = etag;
       persistLocal(get(store));
       retryCount = 0;
       saveInFlight = false;
-      // If more patches accumulated during the request, flush them now.
       if (pendingPatches.length > 0) {
         void flushPatches();
       }
     } catch (e: unknown) {
       saveInFlight = false;
       const msg = e instanceof Error ? e.message : String(e);
-
-      // Detect version mismatch: re-read server state, merge client patches,
-      // then retry once automatically.
-      const isVersionMismatch =
-        msg.includes("version mismatch") ||
-        msg.includes("Version mismatch") ||
-        msg.includes("409");
-
-      if (isVersionMismatch && retryCount < 2) {
-        retryCount++;
-        notify(
-          `版本冲突，正在自动合并并重试 (${retryCount}/2)...`,
-          "info",
-        );
-        // Re-add these patches to the front of pending queue so they are retried.
-        pendingPatches = [...patches, ...pendingPatches];
-        const fresh = await loadFromBackend();
-        // Merge in-memory state against fresh server state using updated_at precedence.
-        const serverData = fresh.data;
-        const clientData = get(store);
-        const merged: Record<string, ReviewItemState> = { ...serverData };
-        for (const p of patches) {
-          const serverValue = serverData[p.id];
-          const clientValue = clientData[p.id] ?? defaultState();
-          if (p.value === null) {
-            // Client requested deletion; keep deletion unless server has newer data
-            if (
-              !serverValue ||
-              new Date(clientValue.updated_at) >= new Date(serverValue.updated_at)
-            ) {
-              delete merged[p.id];
-            } else {
-              merged[p.id] = serverValue;
-            }
-          } else {
-            if (
-              !serverValue ||
-              new Date(clientValue.updated_at) >= new Date(serverValue.updated_at)
-            ) {
-              merged[p.id] = clientValue;
-            } else {
-              merged[p.id] = serverValue;
-            }
-          }
-        }
-        // Also include any server-only entries that were not touched in patches
-        for (const [k, v] of Object.entries(serverData)) {
-          if (!(k in merged) && !byId.has(k)) {
-            merged[k] = v;
-          }
-        }
-        applySnapshot({ version: fresh.version, data: merged });
-        void flushPatches();
-        return;
-      }
-
-      // Hard failure: restore patches to the front of the queue and
-      // schedule a retry after a few seconds.
       pendingPatches = [...patches, ...pendingPatches];
       notify_err(`复核数据保存失败：${msg}`);
       retryCount = 0;
@@ -385,7 +482,7 @@ function createReviewStore() {
       await ensureInit();
       return;
     }
-    const snap = await loadFromBackend();
+    const snap = await fetchReviewState();
     applySnapshot(snap);
   }
 
@@ -478,17 +575,42 @@ function defaultContext(): ReviewContextSnapshot {
 }
 
 const CONTEXT_KEY_PREFIX = "fava:review-ctx:";
+const HISTORY_PAGE_TYPE_KEY = "fava:review-page-type";
 
 function contextStorageKey(baseUrl: string): string {
   return `${CONTEXT_KEY_PREFIX}${baseUrl.replace(/[^a-zA-Z0-9]/g, "_")}`;
 }
 
-function createReviewContext() {
+interface HistoryStackBridge {
+  push(snap: ReviewContextSnapshot): void;
+  pop(): ReviewContextSnapshot | undefined;
+  peek(): ReviewContextSnapshot | undefined;
+  top(): ReviewContextSnapshot;
+  replaceTop(snap: ReviewContextSnapshot): void;
+  clear(): void;
+  takePendingRestore(): ReviewContextSnapshot | undefined;
+  markHistoryList(): void;
+  markHistoryDetail(): void;
+  navigateToList(url: string, listCtx: ReviewContextSnapshot): void;
+  navigateToDetail(url: string, detailId: string, listCtx: ReviewContextSnapshot): void;
+  updateDetailHighlight(id: string, replaceUrl: string): void;
+  onPopStateBackToList(handler: (snap: ReviewContextSnapshot) => void): () => void;
+  backOrNavigateToList(goListDirect: () => void): void;
+  get subscribe(): (
+    run: (value: ReviewContextSnapshot[]) => void,
+    invalidate?: (value?: ReviewContextSnapshot[]) => void,
+  ) => () => void;
+  update(updater: (stack: ReviewContextSnapshot[]) => ReviewContextSnapshot[]): void;
+}
+
+function createReviewContext(): HistoryStackBridge {
   type Stack = ReviewContextSnapshot[];
   const initial: Stack = [];
   const store = writable<Stack>(initial);
 
   let lastBaseUrl = "";
+  let pendingRestore: ReviewContextSnapshot | undefined = undefined;
+  const backToListHandlers: Array<(snap: ReviewContextSnapshot) => void> = [];
 
   function persistLocal(stack: Stack) {
     if (lastBaseUrl) {
@@ -520,11 +642,41 @@ function createReviewContext() {
     return [];
   }
 
+  function currentPageType(): "list" | "detail" | undefined {
+    try {
+      const raw = history.state?.[HISTORY_PAGE_TYPE_KEY];
+      if (raw === "review-list") return "list";
+      if (raw === "review-detail") return "detail";
+    } catch {
+      // ignore
+    }
+    return undefined;
+  }
+
+  function writePageType(
+    type: "review-list" | "review-detail",
+    replace: boolean,
+    url?: string,
+  ) {
+    try {
+      const existing = (history.state as Record<string, unknown> | null) ?? {};
+      const next = { ...existing, [HISTORY_PAGE_TYPE_KEY]: type };
+      if (replace) {
+        history.replaceState(next, "", url);
+      } else {
+        history.pushState(next, "", url);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   ledgerData.subscribe(($ledgerData) => {
     const baseUrl = $ledgerData?.base_url ?? "";
     if (baseUrl && baseUrl !== lastBaseUrl) {
       lastBaseUrl = baseUrl;
-      store.set(loadLocal(baseUrl));
+      const loaded = loadLocal(baseUrl);
+      store.set(loaded);
     }
   });
 
@@ -533,9 +685,8 @@ function createReviewContext() {
   function push(snap: ReviewContextSnapshot): void {
     update((stack) => {
       const next = [...stack, snap];
-      // Cap stack depth to prevent unbounded growth
-      if (next.length > 50) {
-        next.splice(0, next.length - 50);
+      if (next.length > 200) {
+        next.splice(0, next.length - 200);
       }
       persistLocal(next);
       return next;
@@ -546,7 +697,6 @@ function createReviewContext() {
     let result: ReviewContextSnapshot | undefined;
     update((stack) => {
       if (stack.length === 0) {
-        result = undefined;
         return stack;
       }
       const next = [...stack];
@@ -584,6 +734,92 @@ function createReviewContext() {
     const next: Stack = [];
     persistLocal(next);
     set(next);
+    pendingRestore = undefined;
+  }
+
+  function takePendingRestore(): ReviewContextSnapshot | undefined {
+    const value = pendingRestore;
+    pendingRestore = undefined;
+    return value;
+  }
+
+  function markHistoryList(): void {
+    writePageType("review-list", true);
+  }
+
+  function markHistoryDetail(): void {
+    writePageType("review-detail", true);
+  }
+
+  function navigateToList(
+    url: string,
+    _listCtx: ReviewContextSnapshot,
+  ): void {
+    location.assign(url);
+  }
+
+  function navigateToDetail(
+    url: string,
+    _detailId: string,
+    listCtx: ReviewContextSnapshot,
+  ): void {
+    writePageType("review-detail", false, url);
+    push(listCtx);
+  }
+
+  function updateDetailHighlight(
+    _id: string,
+    replaceUrl: string,
+  ): void {
+    writePageType("review-detail", true, replaceUrl);
+  }
+
+  function onPopStateBackToList(
+    handler: (snap: ReviewContextSnapshot) => void,
+  ): () => void {
+    backToListHandlers.push(handler);
+    return () => {
+      const idx = backToListHandlers.indexOf(handler);
+      if (idx >= 0) backToListHandlers.splice(idx, 1);
+    };
+  }
+
+  function handleBrowserPop(_evt: PopStateEvent) {
+    const nowType = currentPageType();
+    const stack = get(store);
+
+    if (nowType === "list") {
+      // Pop one frame (this is the frame we saved when going into the
+      // detail page we just came back from) and make it available for
+      // the list component to consume on mount.
+      const popped = stack.length > 0 ? [...stack].pop() : undefined;
+      if (popped) {
+        pendingRestore = popped;
+        const trimmed = stack.slice(0, -1);
+        persistLocal(trimmed);
+        set(trimmed);
+        for (const h of backToListHandlers) {
+          try {
+            h(popped);
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
+  }
+
+  if (typeof window !== "undefined") {
+    window.addEventListener("popstate", handleBrowserPop);
+  }
+
+  function backOrNavigateToList(goListDirect: () => void): void {
+    const stack = get(store);
+    if (stack.length > 0 && typeof window !== "undefined") {
+      history.back();
+      return;
+    }
+    goListDirect();
   }
 
   return {
@@ -594,17 +830,22 @@ function createReviewContext() {
     top,
     replaceTop,
     clear,
+    takePendingRestore,
+    markHistoryList,
+    markHistoryDetail,
+    navigateToList,
+    navigateToDetail,
+    updateDetailHighlight,
+    onPopStateBackToList,
+    backOrNavigateToList,
+    update,
   };
 }
 
 export const review_context_stack = createReviewContext();
 
-/**
- * @deprecated Use `review_context_stack` instead (push/pop/top pattern).
- * This is kept for backward compatibility with existing consumers.
- */
 export const review_context = {
-  subscribe: review_context_stack.subscribe as unknown as typeof review_context_stack.subscribe,
+  subscribe: review_context_stack.subscribe,
   set(value: ReviewContextSnapshot) {
     review_context_stack.replaceTop(value);
   },

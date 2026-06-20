@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
+import tempfile
+import threading
 from abc import abstractmethod
 from dataclasses import dataclass
 from dataclasses import fields
@@ -183,6 +186,21 @@ class NotAFileError(FavaJSONAPIError):
         super().__init__(f"Not a file: '{filename}'")
 
 
+class ReviewVersionConflictError(FavaJSONAPIError):
+    """Review state version conflict."""
+
+    status = HTTPStatus.CONFLICT
+
+    def __init__(self, expected: int, got: int, latest: dict[str, Any]) -> None:
+        super().__init__(
+            f"Review state version mismatch: expected v{expected}, got v{got}. "
+            "Another user may have updated it.",
+        )
+        self.expected_version = expected
+        self.got_version = got
+        self.latest_data = latest
+
+
 @json_api.errorhandler(FavaAPIError)
 def _(error: FavaAPIError) -> Response:
     log.error("Encountered FavaAPIError.", exc_info=error)
@@ -192,6 +210,19 @@ def _(error: FavaAPIError) -> Response:
 @json_api.errorhandler(FavaJSONAPIError)
 def _(error: FavaJSONAPIError) -> Response:
     return json_err(error.message, error.status)
+
+
+@json_api.errorhandler(ReviewVersionConflictError)
+def _(error: ReviewVersionConflictError) -> Response:
+    payload = {
+        "error": error.message,
+        "expected_version": error.expected_version,
+        "got_version": error.got_version,
+        "latest_data": error.latest_data,
+    }
+    res = jsonify(payload)
+    res.status = HTTPStatus.CONFLICT
+    return res
 
 
 @json_api.errorhandler(FilterError)
@@ -891,6 +922,7 @@ def get_statistics() -> Statistics:
 
 
 _REVIEW_STATE_FILENAME = ".fava-review-state.json"
+_REVIEW_LOCK = threading.RLock()
 
 
 def _review_state_path() -> Path:
@@ -931,45 +963,131 @@ def _review_state_version_and_data() -> tuple[int, dict[str, Any]]:
     return (1, legacy_data)
 
 
-@api_endpoint
-def get_review_state() -> dict[str, Any]:
-    version, data = _review_state_version_and_data()
-    return {"version": version, "data": data}
-
-
-@api_endpoint
-def put_review_state(version: int, state: list[Any]) -> dict[str, Any]:
-    review_path = _review_state_path()
-    current_version, current_data = _review_state_version_and_data()
-
-    if version != current_version:
-        msg = (
-            f"Review state version mismatch: expected v{current_version}, "
-            f"got v{version}. Another user may have updated it."
-        )
-        raise FavaAPIError(msg)
-
-    merged: dict[str, Any] = dict(current_data)
-    for item in state:
-        key, value = item[0], item[1]
-        if value is None:
-            merged.pop(key, None)
-        else:
-            merged[key] = value
-
-    new_version = current_version + 1
-    envelope = {"version": new_version, "data": merged}
+def _atomic_write_envelope(review_path: Path, version: int, data: dict[str, Any]) -> None:
+    """Atomically write the envelope to disk using tempfile + os.replace()."""
+    parent_dir = review_path.parent
+    envelope = {"version": version, "data": data}
+    # 1. Write to a temp file in the same directory (so rename is atomic)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=_REVIEW_STATE_FILENAME + ".",
+        suffix=".tmp",
+        dir=str(parent_dir),
+    )
     try:
-        review_path.write_text(
-            json.dumps(envelope, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        msg = f"Failed to save review state: {exc}"
-        raise FavaAPIError(msg) from exc
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(envelope, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, review_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
-    return {
-        "version": new_version,
-        "count": len(merged),
-        "message": f"Saved review state ({len(merged)} items) at v{new_version}.",
-    }
+
+@json_api.route("/review_state", methods=["GET"])
+def _get_review_state() -> Response:
+    with _REVIEW_LOCK:
+        version, data = _review_state_version_and_data()
+    res = json_success({"version": version, "data": data})
+    res.headers["ETag"] = f'"review-v{version}"'
+    return res
+
+
+@json_api.route("/review_state", methods=["PUT"])
+def _put_review_state() -> Response:
+    request_json = request.get_json(silent=True)
+    if request_json is None or not isinstance(request_json, dict):
+        raise InvalidJsonRequestError
+
+    raw_version = request_json.get("version")
+    raw_state = request_json.get("state")
+
+    if raw_version is None:
+        raise MissingParameterValidationError("version")
+    if raw_state is None:
+        raise MissingParameterValidationError("state")
+    if not isinstance(raw_state, list):
+        raise IncorrectTypeValidationError("state", list)
+
+    try:
+        requested_version = int(raw_version)
+    except (TypeError, ValueError) as exc:
+        raise IncorrectTypeValidationError("version", int) from exc
+
+    # Support If-Match header as an alternative to body version.
+    if_match = request.headers.get("If-Match", "").strip()
+    header_version: int | None = None
+    if if_match and if_match.startswith('"review-v') and if_match.endswith('"'):
+        try:
+            header_version = int(if_match[len('"review-v') : -1])
+        except (ValueError, TypeError):
+            header_version = None
+    expected_version = (
+        header_version if header_version is not None else requested_version
+    )
+
+    with _REVIEW_LOCK:
+        review_path = _review_state_path()
+        current_version, current_data = _review_state_version_and_data()
+
+        if expected_version != current_version:
+            latest_envelope = {"version": current_version, "data": current_data}
+            raise ReviewVersionConflictError(
+                expected=current_version,
+                got=expected_version,
+                latest=latest_envelope,
+            )
+
+        # Validate patch entries upfront; log and reject malformed items.
+        merged: dict[str, Any] = dict(current_data)
+        applied = 0
+        for idx, item in enumerate(raw_state):
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                log.warning(
+                    "Skipping malformed review patch at index %d: %r",
+                    idx,
+                    item,
+                )
+                continue
+            key, value = item[0], item[1]
+            if not isinstance(key, str):
+                log.warning(
+                    "Skipping review patch at index %d: non-string key %r",
+                    idx,
+                    key,
+                )
+                continue
+            if value is None:
+                merged.pop(key, None)
+            else:
+                merged[key] = value
+            applied += 1
+
+        new_version = current_version + 1
+        try:
+            _atomic_write_envelope(review_path, new_version, merged)
+        except OSError as exc:
+            msg = f"Failed to save review state: {exc}"
+            raise FavaAPIError(msg) from exc
+
+        log.info(
+            "Saved review state: %d patches applied, %d entries total at v%d",
+            applied,
+            len(merged),
+            new_version,
+        )
+        result = {
+            "version": new_version,
+            "count": len(merged),
+            "applied": applied,
+            "message": (
+                f"Saved review state ({applied} patches, {len(merged)} items) "
+                f"at v{new_version}."
+            ),
+        }
+        res = json_success(result)
+        res.headers["ETag"] = f'"review-v{new_version}"'
+        return res
