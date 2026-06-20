@@ -5,6 +5,7 @@ import { get as store_get } from "svelte/store";
 
 import {
   account_filter,
+  fql_filter,
   getStaleFilterParams,
   getURLFilters,
   time_filter,
@@ -377,4 +378,153 @@ test("getStaleFilterParams handles concurrent validation objects without cross-c
 
   const staleA2 = getStaleFilterParams(urlA, dataA);
   deepEqual(staleA2, []);
+});
+
+test("account_filter subscriber pattern simulating component mount/unmount", () => {
+  current_url.set(
+    new URL(
+      "http://localhost:5000/long-example/income_statement/?account=Assets:US:BofA",
+    ),
+  );
+
+  let account_callback_calls = 0;
+  let last_account_value = "";
+  const unsubscribe = account_filter.subscribe((v) => {
+    account_callback_calls++;
+    last_account_value = v;
+  });
+
+  equal(account_callback_calls, 1, "First sync call during subscribe");
+  equal(last_account_value, "Assets:US:BofA");
+
+  current_url.set(
+    new URL(
+      "http://localhost:5000/long-example/income_statement/?account=Expenses:Rent",
+    ),
+  );
+  equal(account_callback_calls, 2, "Callback invoked on URL change");
+  equal(last_account_value, "Expenses:Rent");
+
+  unsubscribe();
+
+  const calls_after_unsubscribe = account_callback_calls;
+  current_url.set(
+    new URL(
+      "http://localhost:5000/long-example/balance_sheet/?account=Income:Salary",
+    ),
+  );
+  equal(
+    account_callback_calls,
+    calls_after_unsubscribe,
+    "Unsubscribed listener must not be called after unsubscribe()",
+  );
+  equal(last_account_value, "Expenses:Rent", "Value must not change after unsubscribe");
+});
+
+test("fql_filter subscriber pattern simulating component mount/unmount", () => {
+  current_url.set(
+    new URL(
+      "http://localhost:5000/long-example/income_statement/?filter=%23test",
+    ),
+  );
+
+  let fql_callback_calls = 0;
+  let last_fql_value = "";
+  const unsubscribe = fql_filter.subscribe((v) => {
+    fql_callback_calls++;
+    last_fql_value = v;
+  });
+  equal(fql_callback_calls, 1);
+  equal(last_fql_value, "#test");
+
+  current_url.set(
+    new URL(
+      "http://localhost:5000/long-example/income_statement/?filter=%23home",
+    ),
+  );
+  equal(fql_callback_calls, 2);
+  equal(last_fql_value, "#home");
+
+  unsubscribe();
+
+  const calls_after_unsubscribe = fql_callback_calls;
+  const value_after_unsubscribe = last_fql_value;
+  current_url.set(
+    new URL(
+      "http://localhost:5000/long-example/balance_sheet/?filter=%23work",
+    ),
+  );
+  equal(fql_callback_calls, calls_after_unsubscribe);
+  equal(last_fql_value, value_after_unsubscribe);
+});
+
+test("time_filter subscriber pattern simulating component mount/unmount", () => {
+  current_url.set(
+    new URL(
+      "http://localhost:5000/long-example/income_statement/?time=2015",
+    ),
+  );
+
+  let time_callback_calls = 0;
+  let last_time_value = "";
+  const unsubscribe = time_filter.subscribe((v) => {
+    time_callback_calls++;
+    last_time_value = v;
+  });
+  equal(time_callback_calls, 1);
+  equal(last_time_value, "2015");
+
+  current_url.set(
+    new URL(
+      "http://localhost:5000/long-example/income_statement/?time=2016",
+    ),
+  );
+  equal(time_callback_calls, 2);
+  equal(last_time_value, "2016");
+
+  unsubscribe();
+
+  const calls_after_unsubscribe = time_callback_calls;
+  const value_after_unsubscribe = last_time_value;
+  current_url.set(
+    new URL(
+      "http://localhost:5000/long-example/balance_sheet/?time=2014",
+    ),
+  );
+  equal(time_callback_calls, calls_after_unsubscribe);
+  equal(last_time_value, value_after_unsubscribe);
+});
+
+test("simulated ledger change (full URL reset) triggers listener cleanup", () => {
+  current_url.set(
+    new URL(
+      "http://localhost:5000/long-example/income_statement/?account=Assets:US:BofA&time=2015&filter=%23test",
+    ),
+  );
+
+  let account_cb_count = 0;
+  let fql_cb_count = 0;
+  let time_cb_count = 0;
+
+  const unsub_account = account_filter.subscribe(() => account_cb_count++);
+  const unsub_fql = fql_filter.subscribe(() => fql_cb_count++);
+  const unsub_time = time_filter.subscribe(() => time_cb_count++);
+
+  equal(account_cb_count, 1);
+  equal(fql_cb_count, 1);
+  equal(time_cb_count, 1);
+
+  unsub_account();
+  unsub_fql();
+  unsub_time();
+
+  current_url.set(
+    new URL(
+      "http://localhost:5000/example/income_statement/",
+    ),
+  );
+
+  equal(account_cb_count, 1, "account listener must be silent after unsub");
+  equal(fql_cb_count, 1, "fql listener must be silent after unsub");
+  equal(time_cb_count, 1, "time listener must be silent after unsub");
 });

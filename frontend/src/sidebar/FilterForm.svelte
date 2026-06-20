@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import AutocompleteInput from "../AutocompleteInput.svelte";
   import { _ } from "../i18n.ts";
   import { escape_for_regex } from "../lib/regex.ts";
@@ -37,14 +38,19 @@
   let account_filter_value = $state("");
   let fql_filter_value = $state("");
   let time_filter_value = $state("");
-  account_filter.subscribe((v) => {
+  const unsubscribe_account = account_filter.subscribe((v) => {
     account_filter_value = v;
   });
-  fql_filter.subscribe((v) => {
+  const unsubscribe_fql = fql_filter.subscribe((v) => {
     fql_filter_value = v;
   });
-  time_filter.subscribe((v) => {
+  const unsubscribe_time = time_filter.subscribe((v) => {
     time_filter_value = v;
+  });
+  onDestroy(() => {
+    unsubscribe_account();
+    unsubscribe_fql();
+    unsubscribe_time();
   });
 
   /** Set the target we want to navigate to to avoid duplicate navigation. */

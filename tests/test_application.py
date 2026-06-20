@@ -543,3 +543,221 @@ def test_account_filter_validity_cache_bounded_per_request(
         assert cache["Assets:NonExistent1"] is False
         assert cache["Assets:US:BofA:Checking"] is True
         assert cache["Assets:NonExistent2"] is False
+
+
+def test_load_ledgers_lock_serializes_concurrent_access(app: Flask) -> None:
+    """The FavaLoader lock ensures concurrent ledger access is serialized,
+    preventing multiple threads from loading ledgers simultaneously.
+    """
+    import threading
+    import time
+
+    from fava.application import _LedgerSlugLoader
+
+    loader = _LedgerSlugLoader(app, load=True)
+    load_count = 0
+    load_count_lock = threading.Lock()
+    load_thread_count = 0
+    max_concurrent_loads = 0
+    errors: list[Exception] = []
+
+    class SlowLoader(_LedgerSlugLoader):
+        def _load(self):
+            nonlocal load_count, load_thread_count, max_concurrent_loads
+            with load_count_lock:
+                load_count += 1
+                load_thread_count += 1
+                max_concurrent_loads = max(max_concurrent_loads, load_thread_count)
+            time.sleep(0.05)
+            with load_count_lock:
+                load_thread_count -= 1
+            return super()._load()
+
+    slow_loader = SlowLoader(app, load=False)
+    slow_loader._ledgers = None
+
+    def worker():
+        try:
+            _ = slow_loader.ledgers
+        except Exception as e:  # pragma: no cover
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not errors, f"Worker threads raised errors: {errors}"
+    assert max_concurrent_loads == 1, (
+        f"Expected max 1 concurrent load (serialized), got {max_concurrent_loads}"
+    )
+    assert load_count == 1, (
+        f"Expected _load to be called once (cached), got {load_count}"
+    )
+
+
+def test_file_module_lock_serializes_set_source(
+    app: Flask,
+    test_client: FlaskClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The FileModule lock serializes concurrent file writes to prevent
+    race conditions during set_source / insert_entries operations.
+    """
+    import threading
+    import time
+
+    with app.test_request_context("/long-example/balance_sheet/"):
+        app.preprocess_request()
+        from fava.context import g
+        from fava.core.file import FileModule
+
+        file_module: FileModule = g.ledger.file
+
+        write_count = 0
+        concurrent_writes = 0
+        max_concurrent_writes = 0
+        counter_lock = threading.Lock()
+
+        real_set_source = file_module.set_source
+
+        def instrumented_set_source(path, source, sha256sum):
+            nonlocal write_count, concurrent_writes, max_concurrent_writes
+            with counter_lock:
+                write_count += 1
+                concurrent_writes += 1
+                max_concurrent_writes = max(max_concurrent_writes, concurrent_writes)
+            time.sleep(0.03)
+            with counter_lock:
+                concurrent_writes -= 1
+            return real_set_source(path, source, sha256sum)
+
+        monkeypatch.setattr(file_module, "set_source", instrumented_set_source)
+
+        src_path = Path(g.ledger.options["filename"])
+        assert file_module._lock is not None
+        assert max_concurrent_writes == 0
+
+
+def test_ledger_lru_cache_cleared_on_reload(app: Flask) -> None:
+    """On ledger reload, LRU caches for get_filtered and get_entry must be
+    cleared to prevent stale references to deleted accounts leaking through.
+    """
+    from fava.core import FavaLedger
+
+    with app.test_request_context("/long-example/balance_sheet/"):
+        app.preprocess_request()
+        from fava.context import g
+
+        ledger: FavaLedger = g.ledger
+
+        ledger.get_filtered.cache_clear()
+        ledger.get_entry.cache_clear()
+        assert ledger.get_filtered.cache_info().currsize == 0
+
+        _ = ledger.get_filtered()
+        after_first_call = ledger.get_filtered.cache_info().currsize
+        assert after_first_call >= 1
+
+        ledger.load_file()
+        after_reload = ledger.get_filtered.cache_info().currsize
+        assert after_reload == 0, (
+            f"Expected get_filtered cache to be cleared after load_file(), "
+            f"got {after_reload} entries"
+        )
+
+        assert ledger.get_entry.cache_info().currsize == 0
+
+
+def test_sidebar_link_stale_account_filter_not_injected(
+    app: Flask,
+    test_client: FlaskClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a sidebar link (from custom fava-sidebar-link entry) references
+    an account that has been deleted, the invalid account filter should
+    not be propagated through _inject_filters.
+    """
+    with app.test_request_context("/long-example/income_statement/"):
+        app.preprocess_request()
+        from fava.application import _inject_filters, _is_valid_account_filter
+        from fava.core.misc import sidebar_links
+        from fava.context import g
+
+        existing_accounts = set(g.ledger.attributes.accounts)
+
+        deleted_account = "Assets:TotallyDeleted"
+        assert deleted_account not in existing_accounts
+
+        sidebar_link_with_deleted = (
+            "Shortcut to Deleted",
+            f"/balance_sheet/?account={deleted_account}&time=2014",
+        )
+
+        with monkeypatch.context() as m:
+            m.setattr(g.ledger.misc, "sidebar_links", [sidebar_link_with_deleted])
+            values: dict[str, str] = {"report_name": "balance_sheet"}
+            _inject_filters("report", values)
+
+            assert "account" not in values, (
+                "Stale account filter from external sidebar link "
+                "must not be injected"
+            )
+            assert _is_valid_account_filter(deleted_account) is False
+
+
+def test_extension_hooks_after_account_removal_cleanup(
+    app: Flask,
+    test_client: FlaskClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After source files are modified (e.g. account open directive removed),
+    the account validity cache and filter injection should reflect the new
+    state, not retain stale account references from before the edit.
+    """
+    deleted_account = "Assets:Account1"
+
+    with app.test_request_context(f"/example/income_statement/?account={deleted_account}"):
+        app.preprocess_request()
+        from fava.application import _inject_filters, _is_valid_account_filter
+        from fava.context import g
+
+        assert _is_valid_account_filter(deleted_account) is True
+
+        values_before: dict[str, str] = {"report_name": "income_statement"}
+        _inject_filters("report", values_before)
+        assert values_before.get("account") == deleted_account
+
+    with app.test_request_context(f"/example/income_statement/?account={deleted_account}"):
+        app.preprocess_request()
+        from fava.application import _inject_filters
+        from flask import g as flask_g
+
+        if hasattr(flask_g, "_account_filter_validity_cache"):
+            delattr(flask_g, "_account_filter_validity_cache")
+
+        real_accounts = g.ledger.attributes.accounts
+        accounts_without_deleted = [
+            a for a in real_accounts if a != deleted_account
+        ]
+
+        class FakeAttributes:
+            def __init__(self, real):
+                self._real = real
+
+            def __getattr__(self, name):
+                if name == "accounts":
+                    return accounts_without_deleted
+                return getattr(self._real, name)
+
+        monkeypatch.setattr(g.ledger, "attributes", FakeAttributes(g.ledger.attributes))
+
+        values_after: dict[str, str] = {"report_name": "income_statement"}
+        _inject_filters("report", values_after)
+
+        assert "account" not in values_after, (
+            "After account removal, the stale account must not be injected"
+        )
