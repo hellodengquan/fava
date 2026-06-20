@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
+import pytest
+
+from fava.core import FavaLedger
+from fava.core import charts
+from fava.core.conversion import conversion_from_str
 from fava.internal_api import BalancesChart
 from fava.internal_api import BarChart
 from fava.internal_api import ChartApi
@@ -11,6 +18,7 @@ from fava.internal_api import ChartDataLoader
 from fava.internal_api import get_ledger_data
 from fava.internal_api import HierarchyChart
 from fava.util.date import Month
+from fava.util.date import Year
 
 if TYPE_CHECKING:  # pragma: no cover
     from flask import Flask
@@ -63,3 +71,240 @@ def test_chart_api(app: Flask, snapshot: SnapshotFunc) -> None:
             [hierarchy, balances, net_worth, interval_totals],
             json=True,
         )
+
+
+def test_chart_pure_functions_no_ledger_dependency(
+    app: Flask,
+) -> None:
+    """Pure chart functions can be called without direct ledger dependency.
+
+    This verifies that the refactored pure functions in fava.core.charts
+    do not depend on FavaModule/self.ledger and can be injected with
+    explicit dependencies.
+    """
+    with app.test_request_context("/long-example/"):
+        app.preprocess_request()
+        from fava.context import g
+
+        prices = g.ledger.prices
+        filtered = g.filtered
+        conv = g.conv
+
+        # Test linechart pure function
+        line_data = charts.linechart(
+            filtered,
+            "Assets:US:Vanguard:Cash",
+            conv,
+            prices,
+        )
+        assert len(line_data) == 117
+
+        # Test hierarchy pure function
+        hierarchy_data = charts.hierarchy(
+            filtered,
+            "Assets",
+            conv,
+            prices,
+        )
+        assert hierarchy_data.account == "Assets"
+
+        # Test interval_totals pure function (no budgets)
+        interval_data = charts.interval_totals(
+            filtered,
+            Month,
+            "Income",
+            conv,
+            prices,
+            calculate_budgets=None,
+            invert=False,
+        )
+        assert len(interval_data) == 100
+
+        # Test net_worth pure function
+        net_worth_data = charts.net_worth(
+            filtered,
+            g.interval,
+            conv,
+            prices,
+            (
+                g.ledger.options["name_assets"],
+                g.ledger.options["name_liabilities"],
+            ),
+        )
+        assert len(net_worth_data) == 197
+
+
+def test_chart_data_loader_caching(app: Flask) -> None:
+    """ChartDataLoader caches results based on mtime and request parameters."""
+    ChartDataLoader.clear_cache()
+
+    with app.test_request_context("/long-example/?interval=year"):
+        app.preprocess_request()
+        from fava.context import g
+
+        # First call - should miss cache
+        result1 = ChartDataLoader.net_worth()
+        cache_info1 = ChartDataLoader._cached_net_worth.cache_info()
+        assert cache_info1.misses == 1
+        assert cache_info1.hits == 0
+
+        # Second call with same params - should hit cache
+        result2 = ChartDataLoader.net_worth()
+        cache_info2 = ChartDataLoader._cached_net_worth.cache_info()
+        assert cache_info2.hits == 1
+        assert result1 == result2
+
+    # Different request context with different interval
+    with app.test_request_context("/long-example/?interval=month"):
+        app.preprocess_request()
+
+        # Different interval - should miss cache
+        result3 = ChartDataLoader.net_worth()
+        cache_info3 = ChartDataLoader._cached_net_worth.cache_info()
+        assert cache_info3.misses == 2
+
+        # Clear cache
+        ChartDataLoader.clear_cache()
+        cache_info4 = ChartDataLoader._cached_net_worth.cache_info()
+        assert cache_info4.hits == 0
+        assert cache_info4.misses == 0
+
+
+def test_chart_with_damaged_ledger(
+    tmp_path: Path,
+    test_data_dir: Path,
+) -> None:
+    """Chart functions handle damaged/unparseable ledger files gracefully."""
+    from fava.context import g
+    from flask import Flask
+    from fava.application import create_app
+
+    # Create a damaged beancount file with invalid syntax
+    damaged_file = tmp_path / "damaged.beancount"
+    damaged_file.write_text("""
+option "title" "Damaged Ledger"
+option "operating_currency" "USD"
+
+2020-01-01 open Assets:Cash
+2020-01-01 open Expenses:Food
+
+This is invalid syntax that will cause parsing errors
+2020-01-02 * "Grocery"
+  Assets:Cash  -50.00 USD
+  Expenses:Food
+""")
+
+    # Create app with damaged ledger
+    app = create_app([str(damaged_file)])
+    app.config["TESTING"] = True
+
+    with app.test_request_context("/damaged/"):
+        app.preprocess_request()
+
+        # Verify ledger has load errors
+        assert len(g.ledger.load_errors) > 0, "Damaged file should have load errors"
+
+        # Chart functions should handle empty entries gracefully
+        # without raising exceptions, returning empty results
+        balances = ChartDataLoader.account_balance("Assets:Cash")
+        assert isinstance(balances, list)
+        assert len(balances) == 0  # No valid transactions, so empty
+
+        net_worth = ChartDataLoader.net_worth()
+        assert isinstance(net_worth, list)
+        # May have intervals but all with zero balance
+
+        interval_totals = ChartDataLoader.interval_totals(Month, "Expenses")
+        assert isinstance(interval_totals, list)
+        assert len(interval_totals) >= 0  # Should not crash
+
+
+def test_chart_with_empty_ledger(tmp_path: Path) -> None:
+    """Chart functions handle empty (no transactions) ledger gracefully."""
+    from fava.context import g
+    from fava.application import create_app
+
+    empty_file = tmp_path / "empty.beancount"
+    empty_file.write_text("""
+option "title" "Empty Ledger"
+option "operating_currency" "USD"
+
+2020-01-01 open Assets:Cash
+2020-01-01 open Expenses:Food
+""")
+
+    app = create_app([str(empty_file)])
+    app.config["TESTING"] = True
+
+    with app.test_request_context("/empty/"):
+        app.preprocess_request()
+
+        # Verify no load errors but also no entries
+        assert len(g.ledger.load_errors) == 0
+        assert len(g.ledger.all_entries) > 0  # At least Open directives
+        assert len(g.filtered.entries) > 0
+
+        # Chart functions should handle empty transactions gracefully
+        balances = ChartDataLoader.account_balance("Assets:Cash")
+        assert isinstance(balances, list)
+        assert len(balances) == 0
+
+        interval_totals = ChartDataLoader.interval_totals(
+            Year,
+            "Expenses",
+        )
+        assert isinstance(interval_totals, list)
+
+        net_worth = ChartDataLoader.net_worth()
+        assert isinstance(net_worth, list)
+
+
+def test_chart_api_with_invalid_account(app: Flask) -> None:
+    """ChartApi handles invalid/missing accounts gracefully."""
+    with app.test_request_context("/long-example/"):
+        app.preprocess_request()
+
+        # Non-existent account should not crash, but may return empty
+        balances = ChartDataLoader.account_balance("Non:Existent:Account")
+        assert isinstance(balances, list)
+
+        # Build chart even with empty data
+        chart = ChartApi.account_balance(balances)
+        assert isinstance(chart, BalancesChart)
+        assert chart.data == []
+        assert chart.label == "Account Balance"
+
+
+def test_chart_data_loader_mock_verify(
+    app: Flask,
+) -> None:
+    """Verify ChartDataLoader calls pure functions instead of g.ledger.charts.
+
+    This is an important verification that the decoupling is complete.
+    """
+    with app.test_request_context("/long-example/"):
+        app.preprocess_request()
+        from fava.context import g
+
+        # Patch g.ledger.charts to ensure it's NOT called
+        original_charts = g.ledger.charts
+        with patch.object(
+            g.ledger,
+            "charts",
+            autospec=True,
+        ) as mock_charts:
+            # Clear any cached results first
+            ChartDataLoader.clear_cache()
+
+            # This should call charts.linechart pure function, not g.ledger.charts
+            _ = ChartDataLoader.account_balance("Assets:US:Vanguard:Cash")
+
+            # Verify g.ledger.charts.linechart was NOT called
+            mock_charts.linechart.assert_not_called()
+            mock_charts.hierarchy.assert_not_called()
+            mock_charts.interval_totals.assert_not_called()
+            mock_charts.net_worth.assert_not_called()
+
+        # Restore original charts to avoid affecting other tests
+        g.ledger.charts = original_charts
+

@@ -10,6 +10,7 @@ from datetime import date
 from decimal import Decimal
 from re import Pattern
 from typing import Any
+from typing import Callable
 from typing import TYPE_CHECKING
 
 from beancount.core.amount import Amount
@@ -33,6 +34,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Iterable
     from collections.abc import Mapping
 
+    from fava.beans.prices import FavaPriceMap
     from fava.core import FilteredLedger
     from fava.core.conversion import Conversion
     from fava.core.inventory import SimpleCounterInventory
@@ -41,6 +43,209 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 ZERO = Decimal()
+
+
+def hierarchy(
+    filtered: FilteredLedger,
+    account_name: str,
+    conversion: Conversion,
+    prices: FavaPriceMap,
+) -> SerialisedTreeNode:
+    """Render an account tree."""
+    tree = filtered.root_tree
+    return tree.get(account_name).serialise(
+        conversion, prices, filtered.end_date
+    )
+
+
+@listify
+def interval_totals(
+    filtered: FilteredLedger,
+    interval: Interval,
+    accounts: str | tuple[str, ...],
+    conversion: str | Conversion,
+    prices: FavaPriceMap,
+    calculate_budgets: (
+        Callable[[str, date, date], Mapping[str, Decimal]] | None
+    ) = None,
+    *,
+    invert: bool = False,
+) -> Iterable[DateAndBalanceWithBudget]:
+    """Render totals for account (or accounts) in the intervals.
+
+    Args:
+        filtered: The filtered ledger.
+        interval: An interval.
+        accounts: A single account (str) or a tuple of accounts.
+        conversion: The conversion to use.
+        prices: The price map to use for conversion.
+        calculate_budgets: Optional callable to calculate budgets
+            for a given account and date range. Only used if accounts
+            is a single string.
+        invert: invert all numbers.
+
+    Yields:
+        The balances and budgets for the intervals.
+    """
+    conv = conversion_from_str(conversion)
+
+    # limit the bar charts to 100 intervals
+    intervals = filtered.interval_ranges(interval)[-100:]
+
+    for date_range in intervals:
+        inventory = CounterInventory()
+        entries = slice_entry_dates(
+            filtered.entries, date_range.begin, date_range.end
+        )
+        account_inventories: dict[str, CounterInventory] = defaultdict(
+            CounterInventory,
+        )
+        for entry in entries:
+            for posting in getattr(entry, "postings", []):
+                if posting.account.startswith(accounts):
+                    account_inventories[posting.account].add_position(
+                        posting,
+                    )
+                    inventory.add_position(posting)
+        balance = conv.apply(
+            inventory,
+            prices,
+            date_range.end_inclusive,
+        )
+        account_balances = {
+            account: conv.apply(
+                acct_value,
+                prices,
+                date_range.end_inclusive,
+            )
+            for account, acct_value in account_inventories.items()
+        }
+        budgets = (
+            calculate_budgets(
+                accounts,  # type: ignore[arg-type]
+                date_range.begin,
+                date_range.end,
+            )
+            if isinstance(accounts, str) and calculate_budgets is not None
+            else {}
+        )
+
+        if invert:
+            balance = -balance
+            budgets = {k: -v for k, v in budgets.items()}
+            account_balances = {k: -v for k, v in account_balances.items()}
+
+        yield DateAndBalanceWithBudget(
+            date_range.end_inclusive,
+            balance,
+            account_balances,
+            budgets,
+        )
+
+
+@listify
+def linechart(
+    filtered: FilteredLedger,
+    account_name: str,
+    conversion: str | Conversion,
+    prices: FavaPriceMap,
+) -> Iterable[DateAndBalance]:
+    """Get the balance of an account as a line chart.
+
+    Args:
+        filtered: The filtered ledger.
+        account_name: A string.
+        conversion: The conversion to use.
+        prices: The price map to use for conversion.
+
+    Yields:
+        Dicts for all dates on which the balance of the given
+        account has changed containing the balance (in units) of the
+        account at that date.
+    """
+    conv = conversion_from_str(conversion)
+
+    def _balances() -> Iterable[tuple[date, CounterInventory]]:
+        last_date = None
+        running_balance = CounterInventory()
+        is_child_account = account_tester(account_name, with_children=True)
+
+        for entry in filtered.entries:
+            for posting in getattr(entry, "postings", []):
+                if is_child_account(posting.account):
+                    new_date = entry.date
+                    if last_date is not None and new_date > last_date:
+                        yield (last_date, running_balance)
+                    running_balance.add_position(posting)
+                    last_date = new_date
+
+        if last_date is not None:
+            yield (last_date, running_balance)
+
+    # When the balance for a commodity just went to zero, it will be
+    # missing from the 'balance' so keep track of currencies that last had
+    # a balance.
+    last_currencies = None
+
+    for d, running_bal in _balances():
+        balance = conv.apply(running_bal, prices, d)
+        currencies = set(balance.keys())
+        if last_currencies:
+            for currency in last_currencies - currencies:
+                balance[currency] = ZERO
+        last_currencies = currencies
+        yield DateAndBalance(d, balance)
+
+
+@listify
+def net_worth(
+    filtered: FilteredLedger,
+    interval: Interval,
+    conversion: str | Conversion,
+    prices: FavaPriceMap,
+    root_accounts: tuple[str, str],
+) -> Iterable[DateAndBalance]:
+    """Compute net worth.
+
+    Args:
+        filtered: The filtered ledger.
+        interval: A string for the interval.
+        conversion: The conversion to use.
+        prices: The price map to use for conversion.
+        root_accounts: The root account names (assets, liabilities) to include.
+
+    Yields:
+        Dicts for all ends of the given interval containing the
+        net worth (Assets + Liabilities) separately converted to all
+        operating currencies.
+    """
+    conv = conversion_from_str(conversion)
+    transactions = (
+        entry
+        for entry in filtered.entries
+        if (
+            isinstance(entry, Transaction)
+            and entry.flag != FLAG_UNREALIZED
+        )
+    )
+
+    txn = next(transactions, None)
+    inventory = CounterInventory()
+
+    for date_range in filtered.interval_ranges(interval):
+        while txn and txn.date < date_range.end:
+            for posting in txn.postings:
+                if posting.account.startswith(root_accounts):
+                    inventory.add_position(posting)
+            txn = next(transactions, None)
+        yield DateAndBalance(
+            date_range.end_inclusive,
+            conv.apply(
+                inventory,
+                prices,
+                date_range.end_inclusive,
+            ),
+        )
 
 
 def _json_default(o: Any) -> Any:
@@ -110,9 +315,11 @@ class ChartModule(FavaModule):
         conversion: Conversion,
     ) -> SerialisedTreeNode:
         """Render an account tree."""
-        tree = filtered.root_tree
-        return tree.get(account_name).serialise(
-            conversion, self.ledger.prices, filtered.end_date
+        return hierarchy(
+            filtered,
+            account_name,
+            conversion,
+            self.ledger.prices,
         )
 
     @listify
@@ -125,73 +332,18 @@ class ChartModule(FavaModule):
         *,
         invert: bool = False,
     ) -> Iterable[DateAndBalanceWithBudget]:
-        """Render totals for account (or accounts) in the intervals.
-
-        Args:
-            filtered: The filtered ledger.
-            interval: An interval.
-            accounts: A single account (str) or a tuple of accounts.
-            conversion: The conversion to use.
-            invert: invert all numbers.
-
-        Yields:
-            The balances and budgets for the intervals.
-        """
-        conv = conversion_from_str(conversion)
-        prices = self.ledger.prices
-
-        # limit the bar charts to 100 intervals
-        intervals = filtered.interval_ranges(interval)[-100:]
-
-        for date_range in intervals:
-            inventory = CounterInventory()
-            entries = slice_entry_dates(
-                filtered.entries, date_range.begin, date_range.end
-            )
-            account_inventories: dict[str, CounterInventory] = defaultdict(
-                CounterInventory,
-            )
-            for entry in entries:
-                for posting in getattr(entry, "postings", []):
-                    if posting.account.startswith(accounts):
-                        account_inventories[posting.account].add_position(
-                            posting,
-                        )
-                        inventory.add_position(posting)
-            balance = conv.apply(
-                inventory,
-                prices,
-                date_range.end_inclusive,
-            )
-            account_balances = {
-                account: conv.apply(
-                    acct_value,
-                    prices,
-                    date_range.end_inclusive,
-                )
-                for account, acct_value in account_inventories.items()
-            }
-            budgets = (
-                self.ledger.budgets.calculate_children(
-                    accounts,
-                    date_range.begin,
-                    date_range.end,
-                )
-                if isinstance(accounts, str)
-                else {}
-            )
-
-            if invert:
-                balance = -balance
-                budgets = {k: -v for k, v in budgets.items()}
-                account_balances = {k: -v for k, v in account_balances.items()}
-
-            yield DateAndBalanceWithBudget(
-                date_range.end_inclusive,
-                balance,
-                account_balances,
-                budgets,
-            )
+        """Render totals for account (or accounts) in the intervals."""
+        return interval_totals(
+            filtered,
+            interval,
+            accounts,
+            conversion,
+            self.ledger.prices,
+            self.ledger.budgets.calculate_children
+            if isinstance(accounts, str)
+            else None,
+            invert=invert,
+        )
 
     @listify
     def linechart(
@@ -200,51 +352,13 @@ class ChartModule(FavaModule):
         account_name: str,
         conversion: str | Conversion,
     ) -> Iterable[DateAndBalance]:
-        """Get the balance of an account as a line chart.
-
-        Args:
-            filtered: The filtered ledger.
-            account_name: A string.
-            conversion: The conversion to use.
-
-        Yields:
-            Dicts for all dates on which the balance of the given
-            account has changed containing the balance (in units) of the
-            account at that date.
-        """
-        conv = conversion_from_str(conversion)
-
-        def _balances() -> Iterable[tuple[date, CounterInventory]]:
-            last_date = None
-            running_balance = CounterInventory()
-            is_child_account = account_tester(account_name, with_children=True)
-
-            for entry in filtered.entries:
-                for posting in getattr(entry, "postings", []):
-                    if is_child_account(posting.account):
-                        new_date = entry.date
-                        if last_date is not None and new_date > last_date:
-                            yield (last_date, running_balance)
-                        running_balance.add_position(posting)
-                        last_date = new_date
-
-            if last_date is not None:
-                yield (last_date, running_balance)
-
-        # When the balance for a commodity just went to zero, it will be
-        # missing from the 'balance' so keep track of currencies that last had
-        # a balance.
-        last_currencies = None
-        prices = self.ledger.prices
-
-        for d, running_bal in _balances():
-            balance = conv.apply(running_bal, prices, d)
-            currencies = set(balance.keys())
-            if last_currencies:
-                for currency in last_currencies - currencies:
-                    balance[currency] = ZERO
-            last_currencies = currencies
-            yield DateAndBalance(d, balance)
+        """Get the balance of an account as a line chart."""
+        return linechart(
+            filtered,
+            account_name,
+            conversion,
+            self.ledger.prices,
+        )
 
     @listify
     def net_worth(
@@ -253,48 +367,14 @@ class ChartModule(FavaModule):
         interval: Interval,
         conversion: str | Conversion,
     ) -> Iterable[DateAndBalance]:
-        """Compute net worth.
-
-        Args:
-            filtered: The filtered ledger.
-            interval: A string for the interval.
-            conversion: The conversion to use.
-
-        Yields:
-            Dicts for all ends of the given interval containing the
-            net worth (Assets + Liabilities) separately converted to all
-            operating currencies.
-        """
-        conv = conversion_from_str(conversion)
-        transactions = (
-            entry
-            for entry in filtered.entries
-            if (
-                isinstance(entry, Transaction)
-                and entry.flag != FLAG_UNREALIZED
-            )
+        """Compute net worth."""
+        return net_worth(
+            filtered,
+            interval,
+            conversion,
+            self.ledger.prices,
+            (
+                self.ledger.options["name_assets"],
+                self.ledger.options["name_liabilities"],
+            ),
         )
-
-        types = (
-            self.ledger.options["name_assets"],
-            self.ledger.options["name_liabilities"],
-        )
-
-        txn = next(transactions, None)
-        inventory = CounterInventory()
-
-        prices = self.ledger.prices
-        for date_range in filtered.interval_ranges(interval):
-            while txn and txn.date < date_range.end:
-                for posting in txn.postings:
-                    if posting.account.startswith(types):
-                        inventory.add_position(posting)
-                txn = next(transactions, None)
-            yield DateAndBalance(
-                date_range.end_inclusive,
-                conv.apply(
-                    inventory,
-                    prices,
-                    date_range.end_inclusive,
-                ),
-            )

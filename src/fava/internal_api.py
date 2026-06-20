@@ -8,6 +8,7 @@ for the frontend data validation.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from flask import current_app
@@ -15,6 +16,8 @@ from flask import url_for
 from flask_babel import gettext
 
 from fava.context import g
+from fava.core import charts
+from fava.core.conversion import conversion_from_str
 from fava.util.excel import HAVE_EXCEL
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -163,28 +166,110 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 class ChartDataLoader:
-    """Load raw chart data from the ledger.
+    """Load raw chart data from the ledger with caching.
 
     This class is responsible for fetching data from the ledger's chart
-    module. It depends on the Flask request context (via ``g``).
+    functions. It depends on the Flask request context (via ``g``) for
+    retrieving the current ledger state, but delegates the actual data
+    generation to pure functions in :mod:`fava.core.charts`.
+
+    Results are cached using the ledger's ``mtime`` as part of the cache
+    key, so cached data is automatically invalidated when the ledger file
+    changes.
     """
+
+    @staticmethod
+    def _filter_key() -> tuple[str, str, str]:
+        """Get a hashable key for the current filtered ledger.
+
+        Directly reads filter parameters from the Flask request args,
+        which is the authoritative source for how the current filtered
+        ledger was constructed.
+        """
+        from flask import request
+
+        return (
+            request.args.get("account", ""),
+            request.args.get("filter", ""),
+            request.args.get("time", ""),
+        )
+
+    @staticmethod
+    @lru_cache(maxsize=32)
+    def _cached_linechart(
+        mtime: int,
+        filter_key: tuple[str, str, str],
+        account_name: str,
+        conversion_str: str,
+    ) -> Sequence[DateAndBalance]:
+        """Cached linechart data generation."""
+        _ = filter_key  # passed for cache invalidation
+        return charts.linechart(
+            g.filtered,
+            account_name,
+            conversion_str,
+            g.ledger.prices,
+        )
 
     @staticmethod
     def account_balance(account_name: str) -> Sequence[DateAndBalance]:
         """Load data for an account balances chart."""
-        return g.ledger.charts.linechart(
+        return ChartDataLoader._cached_linechart(
+            g.ledger.mtime,
+            ChartDataLoader._filter_key(),
+            account_name,
+            str(g.conv),
+        )
+
+    @staticmethod
+    @lru_cache(maxsize=32)
+    def _cached_hierarchy(
+        mtime: int,
+        filter_key: tuple[str, str, str],
+        account_name: str,
+        conversion_str: str,
+    ) -> SerialisedTreeNode:
+        """Cached hierarchy data generation."""
+        _ = filter_key  # passed for cache invalidation
+        return charts.hierarchy(
             g.filtered,
             account_name,
-            g.conv,
+            conversion_from_str(conversion_str),
+            g.ledger.prices,
         )
 
     @staticmethod
     def hierarchy(account_name: str) -> SerialisedTreeNode:
         """Load data for an account hierarchy chart."""
-        return g.ledger.charts.hierarchy(
-            g.filtered,
+        return ChartDataLoader._cached_hierarchy(
+            g.ledger.mtime,
+            ChartDataLoader._filter_key(),
             account_name,
-            g.conv,
+            str(g.conv),
+        )
+
+    @staticmethod
+    @lru_cache(maxsize=32)
+    def _cached_interval_totals(
+        mtime: int,
+        filter_key: tuple[str, str, str],
+        interval: Interval,
+        accounts: str | tuple[str, ...],
+        conversion_str: str,
+        invert: bool,
+    ) -> Sequence[DateAndBalanceWithBudget]:
+        """Cached interval totals data generation."""
+        _ = filter_key  # passed for cache invalidation
+        return charts.interval_totals(
+            g.filtered,
+            interval,
+            accounts,
+            conversion_str,
+            g.ledger.prices,
+            g.ledger.budgets.calculate_children
+            if isinstance(accounts, str)
+            else None,
+            invert=invert,
         )
 
     @staticmethod
@@ -196,18 +281,54 @@ class ChartDataLoader:
         invert: bool = False,
     ) -> Sequence[DateAndBalanceWithBudget]:
         """Load data for an account per interval chart."""
-        return g.ledger.charts.interval_totals(
-            g.filtered,
+        conv_str = str(conversion or g.conv)
+        return ChartDataLoader._cached_interval_totals(
+            g.ledger.mtime,
+            ChartDataLoader._filter_key(),
             interval,
             accounts,
-            conversion or g.conv,
-            invert=invert,
+            conv_str,
+            invert,
+        )
+
+    @staticmethod
+    @lru_cache(maxsize=32)
+    def _cached_net_worth(
+        mtime: int,
+        filter_key: tuple[str, str, str],
+        interval: Interval,
+        conversion_str: str,
+    ) -> Sequence[DateAndBalance]:
+        """Cached net worth data generation."""
+        _ = filter_key  # passed for cache invalidation
+        return charts.net_worth(
+            g.filtered,
+            interval,
+            conversion_str,
+            g.ledger.prices,
+            (
+                g.ledger.options["name_assets"],
+                g.ledger.options["name_liabilities"],
+            ),
         )
 
     @staticmethod
     def net_worth() -> Sequence[DateAndBalance]:
         """Load data for net worth chart."""
-        return g.ledger.charts.net_worth(g.filtered, g.interval, g.conv)
+        return ChartDataLoader._cached_net_worth(
+            g.ledger.mtime,
+            ChartDataLoader._filter_key(),
+            g.interval,
+            str(g.conv),
+        )
+
+    @staticmethod
+    def clear_cache() -> None:
+        """Clear all cached chart data."""
+        ChartDataLoader._cached_linechart.cache_clear()
+        ChartDataLoader._cached_hierarchy.cache_clear()
+        ChartDataLoader._cached_interval_totals.cache_clear()
+        ChartDataLoader._cached_net_worth.cache_clear()
 
 
 class ChartApi:
