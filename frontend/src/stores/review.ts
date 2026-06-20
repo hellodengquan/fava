@@ -5,6 +5,19 @@ import { errors, ledgerData } from "./index.ts";
 import { notify, notify_err } from "../notifications.ts";
 
 const STORAGE_KEY_PREFIX = "fava:review:";
+const REVIEW_BROADCAST_CHANNEL = "fava-review-state-sync";
+const DEFAULT_BATCH_LIMIT = 500;
+const ETAG_RE = /^"review-v(\d+)"$/;
+
+function etagForVersion(version: number): string {
+  return `"review-v${version}"`;
+}
+
+function parseEtagVersion(etag: string | null): number | null {
+  if (!etag) return null;
+  const m = etag.match(ETAG_RE);
+  return m ? Number(m[1]) : null;
+}
 
 function storageKey(baseUrl: string): string {
   return `${STORAGE_KEY_PREFIX}${baseUrl.replace(/[^a-zA-Z0-9]/g, "_")}`;
@@ -33,7 +46,46 @@ interface PutResult {
   version: number;
   count: number;
   applied?: number;
+  limit?: number;
   message: string;
+}
+
+class ReviewPutError extends Error {
+  readonly status: number;
+  readonly body: any;
+  constructor(status: number, message: string, body: any) {
+    super(message);
+    this.status = status;
+    this.body = body;
+    this.name = "ReviewPutError";
+  }
+}
+
+class ReviewPreconditionError extends ReviewPutError {
+  constructor(message: string, body: any) {
+    super(428, message, body);
+    this.name = "ReviewPreconditionError";
+  }
+}
+
+class ReviewBatchTooLargeError extends ReviewPutError {
+  readonly size: number;
+  readonly limit: number;
+  constructor(message: string, body: any) {
+    super(413, message, body);
+    this.name = "ReviewBatchTooLargeError";
+    this.size = Number(body?.size) || 0;
+    this.limit = Number(body?.limit) || DEFAULT_BATCH_LIMIT;
+  }
+}
+
+class ReviewConflictError extends ReviewPutError {
+  readonly conflictBody: ConflictBody;
+  constructor(message: string, body: ConflictBody) {
+    super(409, message, body);
+    this.name = "ReviewConflictError";
+    this.conflictBody = body;
+  }
 }
 
 function loadFromStorage(baseUrl: string): LocalSnapshot {
@@ -84,7 +136,7 @@ interface PendingPatch {
   value: ReviewItemState | null;
 }
 
-async function fetchReviewState(): Promise<LocalSnapshot> {
+async function fetchReviewState(): Promise<{ snapshot: LocalSnapshot; etag: string | null }> {
   try {
     const base = (get(ledgerData)?.base_url ?? "") || "";
     const res = await fetch(`${base}review_state/`, {
@@ -96,6 +148,7 @@ async function fetchReviewState(): Promise<LocalSnapshot> {
     }
     const payload = await res.json();
     const { data, mtime: _mtime } = payload;
+    const etag = res.headers.get("ETag");
     if (
       data &&
       typeof data === "object" &&
@@ -103,13 +156,16 @@ async function fetchReviewState(): Promise<LocalSnapshot> {
       data.data &&
       typeof data.data === "object"
     ) {
-      return { version: data.version, data: data.data as Record<string, ReviewItemState> };
+      return {
+        snapshot: { version: data.version, data: data.data as Record<string, ReviewItemState> },
+        etag,
+      };
     }
-    return { version: 0, data: {} };
+    return { snapshot: { version: 0, data: {} }, etag };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     notify_err(msg);
-    return { version: 0, data: {} };
+    return { snapshot: { version: 0, data: {} }, etag: null };
   }
 }
 
@@ -118,32 +174,47 @@ async function putReviewState(
   version: number,
   stateArray: Array<[string, unknown]>,
   etag: string | null,
-): Promise<{ result: PutResult; etag: string | null; conflict: ConflictBody | null }> {
+): Promise<{ result: PutResult; etag: string | null }> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Accept: "application/json",
   };
-  if (etag) {
-    headers["If-Match"] = etag;
-  }
+  // Always send If-Match: derive from version if ETag missing.
+  const effectiveEtag = etag ?? etagForVersion(version);
+  headers["If-Match"] = effectiveEtag;
   const res = await fetch(`${baseUrl}review_state/`, {
     method: "PUT",
     headers,
     body: JSON.stringify({ version, state: stateArray }),
   });
   const json = await res.json().catch(() => ({}));
+  const errMsg = json?.error || json?.data?.error || res.statusText;
 
   if (res.status === 409) {
-    return {
-      result: undefined as never,
-      etag: null,
-      conflict: json as ConflictBody,
-    };
+    throw new ReviewConflictError(
+      `版本冲突：${errMsg || "concurrent update"}`,
+      json as ConflictBody,
+    );
+  }
+  if (res.status === 428) {
+    throw new ReviewPreconditionError(
+      errMsg || "缺少 If-Match 头，需要先获取最新版本",
+      json,
+    );
+  }
+  if (res.status === 413) {
+    throw new ReviewBatchTooLargeError(
+      errMsg || "批量过大，需要拆分",
+      json,
+    );
   }
 
   if (!res.ok) {
-    const err = json?.error || json?.data?.error || res.statusText;
-    throw new Error(`PUT review_state failed (${res.status}): ${err}`);
+    throw new ReviewPutError(
+      res.status,
+      `PUT review_state failed (${res.status}): ${errMsg}`,
+      json,
+    );
   }
 
   const resultData = json.data || json;
@@ -151,7 +222,6 @@ async function putReviewState(
   return {
     result: resultData as PutResult,
     etag: resultEtag,
-    conflict: null,
   };
 }
 
@@ -166,6 +236,130 @@ function createReviewStore() {
   let saveInFlight = false;
   let pendingPatches: PendingPatch[] = [];
   let retryCount = 0;
+  let currentServerLimit: number = DEFAULT_BATCH_LIMIT;
+
+  let channel: BroadcastChannel | null = null;
+  let syncAttached = false;
+
+  function attachMultiTabSync(): void {
+    if (syncAttached || typeof window === "undefined") return;
+    syncAttached = true;
+
+    if (typeof BroadcastChannel !== "undefined") {
+      try {
+        channel = new BroadcastChannel(REVIEW_BROADCAST_CHANNEL);
+        channel.addEventListener("message", (ev) => {
+          const msg = ev.data as
+            | { type: "review_saved"; version: number; from: string }
+            | undefined;
+          if (msg?.type === "review_saved" && msg.from !== syncSourceId) {
+            // Non-authoritative: fetch latest snapshot without clobbering
+            // local pending patches (they will be merged on next flush).
+            void pullRemoteSnapshot(msg.version);
+          }
+        });
+      } catch {
+        channel = null;
+      }
+    }
+
+    window.addEventListener("storage", (ev) => {
+      if (!ev.key || !lastBaseUrl) return;
+      const myStorageKeys = [storageKey(lastBaseUrl), contextStorageKey(lastBaseUrl)];
+      if (ev.key === storageKey(lastBaseUrl) || myStorageKeys.includes(ev.key)) {
+        void pullRemoteSnapshot();
+      }
+    });
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        void pullRemoteSnapshot();
+      }
+    });
+  }
+
+  const syncSourceId =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random()}`;
+
+  function broadcastSaved(version: number): void {
+    try {
+      if (channel && typeof channel.postMessage === "function") {
+        channel.postMessage({
+          type: "review_saved",
+          version,
+          from: syncSourceId,
+        });
+      }
+    } catch {
+      // ignore broadcast failures
+    }
+  }
+
+  async function pullRemoteSnapshot(
+    expectedMinimumVersion?: number,
+  ): Promise<void> {
+    if (saveInFlight) return;
+    const priorVersion = currentVersion;
+    const { snapshot, etag } = await fetchReviewState();
+    if (
+      typeof expectedMinimumVersion === "number" &&
+      snapshot.version < expectedMinimumVersion
+    ) {
+      return;
+    }
+    if (snapshot.version <= priorVersion) {
+      return;
+    }
+    const serverVersion = snapshot.version;
+    const serverData = snapshot.data;
+    // Re-apply any pending local patches on top of the fresh server
+    // snapshot, so locally-edited dirty fields are not lost.
+    const byId = new Map<string, ReviewItemState | null>();
+    for (const p of pendingPatches) {
+      byId.set(p.id, p.value);
+    }
+    const localData = get(store);
+    const merged: Record<string, ReviewItemState> = { ...serverData };
+    const newPending: PendingPatch[] = [];
+    for (const [patchId, patchValue] of byId) {
+      if (patchValue === null) {
+        delete merged[patchId];
+        newPending.push({ id: patchId, value: null });
+      } else {
+        const prior = localData[patchId] ?? defaultState();
+        const server = serverData[patchId];
+        const out: ReviewItemState = server ? { ...server } : { ...defaultState() };
+        let changed = false;
+        for (const key of ["status", "note", "explanation"] as const) {
+          const priorVal = prior[key];
+          const patchVal = (patchValue as ReviewItemState)[key];
+          const serverVal = out[key];
+          if (patchVal !== priorVal && patchVal !== serverVal) {
+            if ((key === "note" || key === "explanation") && typeof serverVal === "string" && typeof patchVal === "string") {
+              out[key] = serverVal ? `${serverVal}\n\n${patchVal}` : patchVal;
+            } else {
+              out[key] = patchVal;
+            }
+            changed = true;
+          } else if (patchVal !== priorVal && patchVal === serverVal) {
+            changed = true;
+          }
+        }
+        if (!changed) continue;
+        out.updated_at = new Date().toISOString();
+        merged[patchId] = out;
+        newPending.push({ id: patchId, value: out });
+      }
+    }
+    currentVersion = serverVersion;
+    currentEtag = etag;
+    store.set(merged);
+    pendingPatches = newPending;
+    persistLocal(merged);
+    notify(`已从其他标签页同步复核状态（v${serverVersion}）`);
+  }
 
   function applySnapshot(snap: LocalSnapshot, etag: string | null = null): void {
     currentVersion = snap.version;
@@ -186,8 +380,9 @@ function createReviewStore() {
       currentVersion = localSnap.version;
       store.set(localSnap.data);
       initialized = true;
-      const backendSnap = await fetchReviewState();
-      applySnapshot(backendSnap);
+      attachMultiTabSync();
+      const { snapshot, etag } = await fetchReviewState();
+      applySnapshot(snapshot, etag);
     }
   }
 
@@ -199,7 +394,8 @@ function createReviewStore() {
       const localSnap = loadFromStorage(baseUrl);
       currentVersion = localSnap.version;
       store.set(localSnap.data);
-      fetchReviewState().then((backendSnap) => applySnapshot(backendSnap));
+      attachMultiTabSync();
+      fetchReviewState().then(({ snapshot, etag }) => applySnapshot(snapshot, etag));
     }
   });
 
@@ -209,6 +405,87 @@ function createReviewStore() {
     if (lastBaseUrl) {
       saveToStorage(lastBaseUrl, { version: currentVersion, data: value });
     }
+  }
+
+  function mergeConflictOnTop(
+    serverBase: Record<string, ReviewItemState>,
+    baseVersion: number,
+    baseEtag: string | null,
+    patchesById: Map<string, ReviewItemState | null>,
+    originalPatches: PendingPatch[],
+  ): PendingPatch[] {
+    const merged: Record<string, ReviewItemState> = { ...serverBase };
+    const localState = get(store);
+    const mergedPatches: PendingPatch[] = [];
+    for (const [patchId, patchValue] of patchesById) {
+      if (patchValue === null) {
+        delete merged[patchId];
+        mergedPatches.push({ id: patchId, value: null });
+      } else {
+        const prior = localState[patchId] ?? defaultState();
+        const server = serverBase[patchId];
+        const out: ReviewItemState = server ? { ...server } : { ...defaultState() };
+        let changed = false;
+        for (const key of ["status", "note", "explanation"] as const) {
+          const priorVal = prior[key];
+          const patchVal = (patchValue as ReviewItemState)[key];
+          const serverVal = out[key];
+          if (patchVal !== priorVal && patchVal !== serverVal) {
+            if ((key === "note" || key === "explanation") && typeof serverVal === "string" && typeof patchVal === "string") {
+              out[key] = serverVal ? `${serverVal}\n\n${patchVal}` : patchVal;
+            } else {
+              out[key] = patchVal;
+            }
+            changed = true;
+          } else if (patchVal !== priorVal && patchVal === serverVal) {
+            changed = true;
+          }
+        }
+        if (!changed) {
+          const defaultVal = defaultState();
+          const isDefault =
+            out.status === defaultVal.status &&
+            out.note === defaultVal.note &&
+            out.explanation === defaultVal.explanation;
+          if (isDefault) {
+            continue;
+          }
+        }
+        out.updated_at = new Date().toISOString();
+        merged[patchId] = out;
+        mergedPatches.push({ id: patchId, value: out });
+      }
+    }
+    store.set(merged);
+    currentVersion = baseVersion;
+    currentEtag = baseEtag;
+    persistLocal(merged);
+    void originalPatches;
+    return mergedPatches;
+  }
+
+  async function sendOneBatch(
+    stateArray: Array<[string, unknown]>,
+    byId: Map<string, ReviewItemState | null>,
+    originalPatches: PendingPatch[],
+  ): Promise<"ok" | "conflict" | "precondition" | "split"> {
+    const { result, etag } = await putReviewState(
+      lastBaseUrl,
+      currentVersion,
+      stateArray,
+      currentEtag,
+    );
+    currentVersion = result.version;
+    currentEtag = etag;
+    if (typeof result.limit === "number") {
+      currentServerLimit = result.limit;
+    }
+    persistLocal(get(store));
+    broadcastSaved(result.version);
+    retryCount = 0;
+    void byId;
+    void originalPatches;
+    return "ok";
   }
 
   async function flushPatches(): Promise<void> {
@@ -231,101 +508,101 @@ function createReviewStore() {
     for (const p of patches) {
       byId.set(p.id, p.value);
     }
-    const stateArray: Array<[string, unknown]> = [...byId.entries()].map(
-      ([k, v]) => [k, v],
-    );
 
     try {
-      const { result, etag, conflict } = await putReviewState(
-        lastBaseUrl,
-        currentVersion,
-        stateArray,
-        currentEtag,
-      );
-      if (conflict) {
-        saveInFlight = false;
-        retryCount += 1;
-        const limit = 3;
-        if (retryCount >= limit) {
-          pendingPatches = [...patches, ...pendingPatches];
-          notify_err(`复核数据保存冲突，已达到最大重试次数 (${limit})，请刷新页面重试`);
-          retryCount = 0;
-          return;
-        }
-        // Merge: apply server latest_data as base, then re-apply client-side patches
-        const latest = conflict.latest_data;
-        const baseData: Record<string, ReviewItemState> =
-          latest && latest.data && typeof latest.data === "object"
-            ? (latest.data as Record<string, ReviewItemState>)
-            : get(store);
-        const baseVersion: number =
-          latest && typeof latest.version === "number" ? latest.version : currentVersion;
-        const merged: Record<string, ReviewItemState> = { ...baseData };
-        const localState = get(store);
-        const mergedPatches: PendingPatch[] = [];
-        for (const [patchId, patchValue] of byId) {
-          if (patchValue === null) {
-            delete merged[patchId];
-            mergedPatches.push({ id: patchId, value: null });
-          } else {
-            const prior = localState[patchId] ?? defaultState();
-            const server = baseData[patchId];
-            // Three-way merge (partial): take server as base, but prefer
-            // client fields that are "different from what the client saw".
-            // Simple heuristic: write the whole patchValue, but for any
-            // field where server is already different from local prior,
-            // keep the server's version of that specific field.
-            const out: ReviewItemState = server ? { ...server } : { ...defaultState() };
-            let changed = false;
-            for (const key of ["status", "note", "explanation"] as const) {
-              const priorVal = prior[key];
-              const patchVal = (patchValue as ReviewItemState)[key];
-              const serverVal = out[key];
-              if (patchVal !== priorVal && patchVal !== serverVal) {
-                // Client made a real change vs the version it had:
-                // apply client change (unless server has a diverging note
-                // or explanation, in which case we concatenate).
-                if ((key === "note" || key === "explanation") && typeof serverVal === "string" && typeof patchVal === "string") {
-                  out[key] = serverVal ? `${serverVal}\n\n${patchVal}` : patchVal;
-                } else {
-                  out[key] = patchVal;
-                }
-                changed = true;
-              } else if (patchVal !== priorVal && patchVal === serverVal) {
-                // No actual divergence
-                changed = true;
-              }
-            }
-            if (!changed) {
-              const defaultVal = defaultState();
-              const isDefault =
-                out.status === defaultVal.status &&
-                out.note === defaultVal.note &&
-                out.explanation === defaultVal.explanation;
-              if (isDefault) {
-                continue;
-              }
-            }
-            out.updated_at = new Date().toISOString();
-            merged[patchId] = out;
-            mergedPatches.push({ id: patchId, value: out });
-          }
-        }
-        store.set(merged);
-        currentVersion = baseVersion;
-        currentEtag = etag;
-        persistLocal(merged);
-        pendingPatches = [...mergedPatches, ...pendingPatches];
-        notify(`复核数据出现并发冲突，已自动合并 (第 ${retryCount} 次重试)`);
-        saveTimer = setTimeout(() => {
-          void flushPatches();
-        }, 800);
-        return;
+      const entries = [...byId.entries()];
+      const batches: Array<[string, unknown][]> = [];
+      const effectiveLimit = Math.max(1, currentServerLimit);
+      for (let i = 0; i < entries.length; i += effectiveLimit) {
+        batches.push(entries.slice(i, i + effectiveLimit).map(([k, v]) => [k, v]));
       }
-      currentVersion = result.version;
-      currentEtag = etag;
-      persistLocal(get(store));
-      retryCount = 0;
+
+      for (let bi = 0; bi < batches.length; bi++) {
+        const stateArray = batches[bi];
+        try {
+          await sendOneBatch(stateArray, byId, patches);
+        } catch (e: unknown) {
+          if (e instanceof ReviewBatchTooLargeError) {
+            // Server has a smaller limit than we thought; re-split this
+            // batch and retry exactly this shard (earlier shards already ok).
+            currentServerLimit = Math.max(1, Math.min(e.limit, currentServerLimit));
+            const subBatches: Array<[string, unknown][]> = [];
+            for (let i = 0; i < stateArray.length; i += currentServerLimit) {
+              subBatches.push(stateArray.slice(i, i + currentServerLimit));
+            }
+            batches.splice(bi, 1, ...subBatches);
+            bi -= 1;
+            notify_err(
+              `复核批次过大，已按 ${currentServerLimit} 条/批拆分后重试`,
+            );
+            continue;
+          }
+          if (e instanceof ReviewPreconditionError) {
+            // If-Match mismatch due to stale local ETag/version;
+            // pull a fresh snapshot, merge patches back in, then
+            // retry the whole remaining queue once.
+            retryCount += 1;
+            if (retryCount >= 3) {
+              throw new Error("Precondition 重试次数过多，请刷新页面重试");
+            }
+            const { snapshot, etag } = await fetchReviewState();
+            const rePending = mergeConflictOnTop(
+              snapshot.data,
+              snapshot.version,
+              etag,
+              byId,
+              patches,
+            );
+            pendingPatches = [...rePending, ...pendingPatches, ...batches.slice(bi + 1).flatMap((b) => b.map(([k, v]) => ({ id: k, value: v as ReviewItemState | null })))];
+            notify(`重新获取最新复核版本（v${snapshot.version}）后重试保存`);
+            saveInFlight = false;
+            saveTimer = setTimeout(() => {
+              void flushPatches();
+            }, 800);
+            return;
+          }
+          if (e instanceof ReviewConflictError) {
+            retryCount += 1;
+            const limit = 3;
+            if (retryCount >= limit) {
+              throw new Error(`冲突重试次数达到 ${limit}，请刷新页面重试`);
+            }
+            const conflict = e.conflictBody;
+            const latest = conflict.latest_data;
+            const baseData: Record<string, ReviewItemState> =
+              latest && latest.data && typeof latest.data === "object"
+                ? (latest.data as Record<string, ReviewItemState>)
+                : get(store);
+            const baseVersion: number =
+              latest && typeof latest.version === "number" ? latest.version : currentVersion;
+            // Re-compose: re-push the current failing batch + any later
+            // batches in this flush + anything queued while we were running
+            // into the front of pendingPatches after they are merged on top.
+            const remaining = new Map<string, ReviewItemState | null>(byId);
+            for (const later of batches.slice(bi + 1)) {
+              for (const [k, v] of later) {
+                remaining.set(k, v as ReviewItemState | null);
+              }
+            }
+            const rePending = mergeConflictOnTop(
+              baseData,
+              baseVersion,
+              null,
+              remaining,
+              patches,
+            );
+            pendingPatches = [...rePending, ...pendingPatches];
+            notify(`复核数据出现并发冲突，已自动合并（第 ${retryCount} 次重试）`);
+            saveInFlight = false;
+            saveTimer = setTimeout(() => {
+              void flushPatches();
+            }, 800);
+            return;
+          }
+          throw e;
+        }
+      }
+
       saveInFlight = false;
       if (pendingPatches.length > 0) {
         void flushPatches();

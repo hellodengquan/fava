@@ -923,6 +923,50 @@ def get_statistics() -> Statistics:
 
 _REVIEW_STATE_FILENAME = ".fava-review-state.json"
 _REVIEW_LOCK = threading.RLock()
+_MAX_BATCH_SIZE = 500
+
+
+class ReviewPreconditionRequiredError(FavaJSONAPIError):
+    """Raised when an If-Match header is required but missing."""
+
+    status = HTTPStatus.PRECONDITION_REQUIRED
+
+    def __init__(self) -> None:
+        super().__init__(
+            "If-Match header is required for writing review state. "
+            "Please first GET /review_state to obtain the current ETag."
+        )
+
+
+class ReviewBatchTooLargeError(FavaJSONAPIError):
+    """Raised when the patch batch exceeds the allowed size."""
+
+    status = HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+
+    def __init__(self, *, size: int, limit: int) -> None:
+        super().__init__(
+            f"Review batch size {size} exceeds limit of {limit}."
+        )
+        self.size = size
+        self.limit = limit
+
+
+@json_api.errorhandler(ReviewBatchTooLargeError)
+def _(error: ReviewBatchTooLargeError) -> Response:
+    payload = {
+        "error": error.message,
+        "size": error.size,
+        "limit": error.limit,
+    }
+    res = jsonify(payload)
+    res.status = HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+    return res
+
+
+@json_api.errorhandler(ReviewPreconditionRequiredError)
+def _(error: ReviewPreconditionRequiredError) -> Response:
+    res = json_err(error.message, HTTPStatus.PRECONDITION_REQUIRED)
+    return res
 
 
 def _review_state_path() -> Path:
@@ -1012,22 +1056,41 @@ def _put_review_state() -> Response:
     if not isinstance(raw_state, list):
         raise IncorrectTypeValidationError("state", list)
 
+    if len(raw_state) > _MAX_BATCH_SIZE:
+        raise ReviewBatchTooLargeError(
+            size=len(raw_state), limit=_MAX_BATCH_SIZE
+        )
+
     try:
         requested_version = int(raw_version)
     except (TypeError, ValueError) as exc:
         raise IncorrectTypeValidationError("version", int) from exc
 
-    # Support If-Match header as an alternative to body version.
+    # Require If-Match header; old clients must upgrade.
     if_match = request.headers.get("If-Match", "").strip()
+    if not if_match:
+        raise ReviewPreconditionRequiredError
+
     header_version: int | None = None
-    if if_match and if_match.startswith('"review-v') and if_match.endswith('"'):
+    if if_match.startswith('"review-v') and if_match.endswith('"'):
         try:
             header_version = int(if_match[len('"review-v') : -1])
         except (ValueError, TypeError):
             header_version = None
-    expected_version = (
-        header_version if header_version is not None else requested_version
-    )
+    if header_version is None:
+        raise ReviewPreconditionRequiredError
+
+    expected_version = header_version
+    # Sanity-check body version against If-Match; they must agree.
+    if expected_version != requested_version:
+        with _REVIEW_LOCK:
+            current_version, current_data = _review_state_version_and_data()
+        latest_envelope = {"version": current_version, "data": current_data}
+        raise ReviewVersionConflictError(
+            expected=current_version,
+            got=requested_version,
+            latest=latest_envelope,
+        )
 
     with _REVIEW_LOCK:
         review_path = _review_state_path()
@@ -1083,6 +1146,7 @@ def _put_review_state() -> Response:
             "version": new_version,
             "count": len(merged),
             "applied": applied,
+            "limit": _MAX_BATCH_SIZE,
             "message": (
                 f"Saved review state ({applied} patches, {len(merged)} items) "
                 f"at v{new_version}."
