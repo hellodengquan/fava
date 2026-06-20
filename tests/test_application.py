@@ -347,3 +347,77 @@ def test_load_extension_endpoint(test_client: FlaskClient) -> None:
     response = test_client.get(url)
     assert assert_success(response)
     assert response.json == ["some data"]
+
+
+def test_invalid_account_filter_not_injected(
+    app: Flask, test_client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When visiting a link with a deleted/invalid account filter, the invalid
+    account parameter should not be injected into sidebar links and should not
+    cause errors.
+    """
+    invalid_account = "Assets:NonExistent:AccountThatWasDeleted"
+
+    with app.test_request_context(f"/long-example/income_statement/?account={invalid_account}"):
+        app.preprocess_request()
+        from fava.application import _inject_filters
+
+        values: dict[str, str] = {"report_name": "income_statement"}
+        _inject_filters("report", values)
+
+        assert "account" not in values, (
+            "Invalid account filter should not be injected into URL values"
+        )
+
+    response = test_client.get(
+        "/long-example/income_statement/",
+        query_string={"account": invalid_account},
+    )
+    assert response.status_code == HTTPStatus.OK.value
+    content = assert_success(response)
+    assert "Assets:NonExistent" not in content
+
+
+@pytest.mark.parametrize(
+    ("first_ledger", "second_ledger", "filter_param"),
+    [
+        ("long-example", "example", "account=Assets:US:BofA:Checking"),
+        ("example", "long-example", "time=2015"),
+        ("long-example", "edit-example", "filter=#some-tag"),
+    ],
+)
+def test_ledger_switch_no_param_pollution(
+    app: Flask,
+    test_client: FlaskClient,
+    first_ledger: str,
+    second_ledger: str,
+    filter_param: str,
+) -> None:
+    """When switching between ledgers, query parameters from the first ledger
+    should not pollute the second ledger's URLs.
+    """
+    first_url = f"/{first_ledger}/income_statement/?{filter_param}"
+    response = test_client.get(first_url)
+    assert response.status_code == HTTPStatus.OK.value
+
+    with app.test_request_context(f"/{second_ledger}/income_statement/"):
+        app.preprocess_request()
+        from fava.application import _inject_filters
+        from fava.context import g
+
+        assert g.beancount_file_slug == second_ledger
+
+        values: dict[str, str] = {"report_name": "income_statement"}
+        _inject_filters("report", values)
+
+        param_name = filter_param.split("=")[0]
+        assert param_name not in values, (
+            f"Parameter '{param_name}' from ledger '{first_ledger}' "
+            f"should not pollute ledger '{second_ledger}'"
+        )
+
+    second_url = f"/{second_ledger}/income_statement/"
+    response = test_client.get(second_url)
+    assert response.status_code == HTTPStatus.OK.value
+    second_content = assert_success(response)
+    assert filter_param not in second_content
