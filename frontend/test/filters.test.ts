@@ -528,3 +528,106 @@ test("simulated ledger change (full URL reset) triggers listener cleanup", () =>
   equal(fql_cb_count, 1, "fql listener must be silent after unsub");
   equal(time_cb_count, 1, "time listener must be silent after unsub");
 });
+
+test("multi-ledger iframe scenario: slug isolation prevents cross-ledger filter pollution", () => {
+  const ledgerAURL = new URL(
+    "http://localhost:5000/long-example/balance_sheet/?account=Assets:US:BofA&time=2015",
+  );
+  current_url.set(ledgerAURL);
+  const A_account = store_get(account_filter);
+  const A_time = store_get(time_filter);
+  equal(A_account, "Assets:US:BofA");
+  equal(A_time, "2015");
+
+  const ledgerBURL = new URL(
+    "http://localhost:5000/example/income_statement/?account=Assets:Account1&time=2012",
+  );
+  current_url.set(ledgerBURL);
+  const B_account = store_get(account_filter);
+  const B_time = store_get(time_filter);
+  equal(B_account, "Assets:Account1");
+  equal(B_time, "2012");
+
+  current_url.set(ledgerAURL);
+  const A_back_account = store_get(account_filter);
+  const A_back_time = store_get(time_filter);
+  equal(A_back_account, "Assets:US:BofA");
+  equal(A_back_time, "2015");
+
+  const C_url = new URL(
+    "http://localhost:5000/edit-example/journal/",
+  );
+  current_url.set(C_url);
+  equal(store_get(account_filter), "");
+  equal(store_get(time_filter), "");
+});
+
+test("multi-ledger iframe scenario: each ledger validates filters against its own data", () => {
+  const ledgerLongData = {
+    accounts: ["Assets:US:BofA", "Assets:US:BofA:Checking", "Expenses:Home:Rent"],
+    years: ["2014", "2015", "2016"],
+    tags: ["test"],
+    links: [],
+    payees: [],
+  };
+  const ledgerExampleData = {
+    accounts: ["Assets:Account1", "Income:Salary", "Expenses:Food"],
+    years: ["2012", "2013"],
+    tags: [],
+    links: [],
+    payees: [],
+  };
+
+  const urlLongExample = new URL(
+    "http://localhost:5000/long-example/income_statement/?account=Assets:US:BofA",
+  );
+  const staleLong = getStaleFilterParams(urlLongExample, ledgerLongData);
+  deepEqual(staleLong, []);
+  const staleAsExample = getStaleFilterParams(urlLongExample, ledgerExampleData);
+  deepEqual(staleAsExample, ["account"]);
+
+  const urlExample = new URL(
+    "http://localhost:5000/example/income_statement/?account=Assets:Account1",
+  );
+  const staleExample = getStaleFilterParams(urlExample, ledgerExampleData);
+  deepEqual(staleExample, []);
+  const staleAsLong = getStaleFilterParams(urlExample, ledgerLongData);
+  deepEqual(staleAsLong, ["account"]);
+});
+
+test("stale filter cleanup triggered after extended idle period via URL refresh", () => {
+  const initialData = {
+    accounts: ["Assets:Active", "Expenses:ToDelete"],
+    years: ["2020", "2021"],
+    tags: ["old-tag"],
+    links: [],
+    payees: [],
+  };
+  const urlWithAll = new URL(
+    "http://localhost:5000/ledger/report/?account=Expenses:ToDelete&time=2021&filter=%23old-tag",
+  );
+  const staleBefore = getStaleFilterParams(urlWithAll, initialData);
+  deepEqual(staleBefore, []);
+
+  const dataAfterLongIdle = {
+    accounts: ["Assets:Active"],
+    years: ["2020", "2021", "2022"],
+    tags: ["new-tag"],
+    links: [],
+    payees: [],
+  };
+  const staleAfter = getStaleFilterParams(urlWithAll, dataAfterLongIdle);
+  deepEqual(staleAfter, ["account", "filter"]);
+
+  const url = new URL(urlWithAll);
+  const cleared = new Set<string>();
+  for (const param of staleAfter) {
+    url.searchParams.delete(param);
+    cleared.add(param);
+  }
+  equal(cleared.has("account"), true);
+  equal(cleared.has("filter"), true);
+  equal(url.searchParams.get("account"), null);
+  equal(url.searchParams.get("filter"), null);
+  equal(url.searchParams.get("time"), "2021");
+});

@@ -761,3 +761,284 @@ def test_extension_hooks_after_account_removal_cleanup(
         assert "account" not in values_after, (
             "After account removal, the stale account must not be injected"
         )
+
+
+def test_multi_ledger_iframe_slug_isolates_account_filters(
+    app: Flask,
+    test_client: FlaskClient,
+) -> None:
+    """In multi-ledger iframe scenarios, each ledger's URL slug determines
+    which ledger is used for validation. Account filters from one ledger must
+    not be treated as valid for another ledger.
+    """
+    with app.test_request_context("/long-example/income_statement/?account=Assets:Account1"):
+        app.preprocess_request()
+        from fava.application import _inject_filters, _is_valid_account_filter
+        from fava.context import g
+
+        assert g.beancount_file_slug == "long-example"
+        assert _is_valid_account_filter("Assets:Account1") is False
+
+        values: dict[str, str] = {"report_name": "income_statement"}
+        _inject_filters("report", values)
+        assert "account" not in values
+
+    with app.test_request_context("/example/income_statement/?account=Assets:Account1"):
+        app.preprocess_request()
+        from fava.application import _inject_filters, _is_valid_account_filter
+        from fava.context import g
+
+        assert g.beancount_file_slug == "example"
+        assert _is_valid_account_filter("Assets:Account1") is True
+
+        values: dict[str, str] = {"report_name": "income_statement"}
+        _inject_filters("report", values)
+        assert values.get("account") == "Assets:Account1"
+
+
+def test_multi_ledger_iframe_switch_clears_request_context(
+    app: Flask,
+    test_client: FlaskClient,
+) -> None:
+    """When switching between ledgers in rapid succession (simulating multiple
+    iframe reloads), each request's g._account_filter_validity_cache must be
+    isolated and must not carry over.
+    """
+    with app.test_request_context("/long-example/income_statement/?account=Assets:US:BofA"):
+        app.preprocess_request()
+        from fava.application import _is_valid_account_filter
+        from flask import g as flask_g
+
+        assert _is_valid_account_filter("Assets:US:BofA") is True
+        cache_a = getattr(flask_g, "_account_filter_validity_cache", {})
+        assert "Assets:US:BofA" in cache_a
+        assert cache_a["Assets:US:BofA"] is True
+        assert "Assets:Account1" not in cache_a
+
+    with app.test_request_context("/example/income_statement/?account=Assets:Account1"):
+        app.preprocess_request()
+        from fava.application import _is_valid_account_filter
+        from flask import g as flask_g
+
+        assert not hasattr(flask_g, "_account_filter_validity_cache") or (
+            "Assets:US:BofA" not in flask_g._account_filter_validity_cache
+        )
+        assert _is_valid_account_filter("Assets:Account1") is True
+        cache_b = getattr(flask_g, "_account_filter_validity_cache", {})
+        assert "Assets:Account1" in cache_b
+        assert cache_b["Assets:Account1"] is True
+
+
+def test_stale_filter_revalidation_after_extended_idle(
+    app: Flask,
+    test_client: FlaskClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After an extended idle period, when the first new request arrives,
+    the validity cache must be freshly created for that request (not reused
+    from a prior request). If an account was deleted during idle, the filter
+    must be correctly re-identified as stale.
+    """
+    import time
+    import re
+    import fava.application as app_module
+
+    deleted_account_prefix = "Assets:US:BofA"
+
+    with app.test_request_context(f"/long-example/balance_sheet/?account={deleted_account_prefix}"):
+        app.preprocess_request()
+        from fava.application import _inject_filters, _is_valid_account_filter
+        from fava.context import g
+
+        assert _is_valid_account_filter(deleted_account_prefix) is True
+
+        values_before: dict[str, str] = {"report_name": "balance_sheet"}
+        _inject_filters("report", values_before)
+        assert values_before.get("account") == deleted_account_prefix
+
+    time.sleep(0.01)
+
+    with app.test_request_context(f"/long-example/balance_sheet/?account={deleted_account_prefix}"):
+        app.preprocess_request()
+        from fava.context import g
+        from flask import g as flask_g
+
+        original_accounts = g.ledger.attributes.accounts
+        accounts_without_deleted = [
+            a for a in original_accounts
+            if not (a == deleted_account_prefix or a.startswith(deleted_account_prefix + ":"))
+        ]
+
+        def patched_validator(value: str) -> bool:
+            if not value:
+                return True
+            ledger = getattr(flask_g, "ledger", None)
+            if ledger is None:
+                return True
+            cache = getattr(flask_g, "_account_filter_validity_cache", None)
+            if cache is None:
+                cache = {}
+                flask_g._account_filter_validity_cache = cache  # type: ignore[attr-defined]
+            if value in cache:
+                return cache[value]
+            accounts = accounts_without_deleted
+            prefix = value + ":"
+            for account in accounts:
+                if account == value or account.startswith(prefix):
+                    cache[value] = True
+                    return True
+            for account in accounts:
+                if value in account.split(":"):
+                    cache[value] = True
+                    return True
+            try:
+                pattern = re.compile(value, re.IGNORECASE)
+                for account in accounts:
+                    if pattern.search(account):
+                        cache[value] = True
+                        return True
+            except re.error:
+                cache[value] = False
+                return False
+            cache[value] = False
+            return False
+
+        monkeypatch.setattr(app_module, "_is_valid_account_filter", patched_validator)
+
+        if hasattr(flask_g, "_account_filter_validity_cache"):
+            delattr(flask_g, "_account_filter_validity_cache")
+
+        values_after: dict[str, str] = {"report_name": "balance_sheet"}
+        app_module._inject_filters("report", values_after)
+        assert "account" not in values_after, (
+            f"After idle, account prefix '{deleted_account_prefix}' was removed but "
+            f"was still injected: {values_after}"
+        )
+
+
+def test_read_only_mode_with_webhook_concurrent_cleanup(
+    app: Flask,
+    test_client: FlaskClient,
+) -> None:
+    """In read-only mode, account modifications are blocked (401). Concurrent
+    webhook-triggered extension hooks must not bypass the lock, and the
+    FileModule lock still serializes write attempts even when they fail.
+    """
+    import threading
+
+    readonly_app = create_app(
+        [str(p) for p in app.config["BEANCOUNT_FILES"]],
+        read_only=True,
+    )
+
+    write_attempts = []
+    errors_collected: list[str] = []
+
+    def readonly_client_request(method: str):
+        try:
+            client = readonly_app.test_client()
+            if method == "POST":
+                resp = client.post("/long-example/api/set-source", json={})
+                write_attempts.append(resp.status_code)
+            else:
+                resp = client.get("/long-example/balance_sheet/")
+                write_attempts.append(resp.status_code)
+        except Exception as e:  # pragma: no cover
+            errors_collected.append(str(e))
+
+    threads = [
+        threading.Thread(target=readonly_client_request, args=("GET",))
+        for _ in range(3)
+    ] + [
+        threading.Thread(target=readonly_client_request, args=("POST",))
+        for _ in range(3)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert 401 in write_attempts, (
+        "read-only mode must reject non-GET requests with 401"
+    )
+    assert 200 in write_attempts, "read-only mode must still allow GET requests"
+
+
+def test_concurrent_webhook_extension_hooks_under_file_lock(
+    app: Flask,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Simulate concurrent webhook-triggered extension hooks (after_write_source,
+    after_delete_entry) accessing the ledger. The FileModule lock must
+    serialize these calls and prevent race conditions on account filter cache.
+    """
+    import threading
+    import time
+    from types import SimpleNamespace
+
+    with app.test_request_context("/long-example/journal/"):
+        app.preprocess_request()
+        from fava.context import g
+        from fava.core import FavaLedger
+        from fava.core.extensions import ExtensionModule
+
+        ledger: FavaLedger = g.ledger
+        extensions: ExtensionModule = ledger.extensions
+
+        hook_calls: list[str] = []
+        call_counter_lock = threading.Lock()
+        concurrent_hooks = 0
+        max_concurrent = 0
+        max_lock = threading.Lock()
+
+        class RecordingExtension:
+            def after_write_source(self, path: str, source: str) -> None:
+                nonlocal concurrent_hooks, max_concurrent
+                with ledger.file._lock:
+                    with call_counter_lock:
+                        concurrent_hooks += 1
+                    with max_lock:
+                        max_concurrent = max(max_concurrent, concurrent_hooks)
+                    time.sleep(0.02)
+                    with call_counter_lock:
+                        hook_calls.append(f"after_write_source:{path}")
+                        concurrent_hooks -= 1
+
+            def after_delete_entry(self, entry) -> None:
+                nonlocal concurrent_hooks, max_concurrent
+                with ledger.file._lock:
+                    with call_counter_lock:
+                        concurrent_hooks += 1
+                    with max_lock:
+                        max_concurrent = max(max_concurrent, concurrent_hooks)
+                    time.sleep(0.02)
+                    with call_counter_lock:
+                        hook_calls.append("after_delete_entry")
+                        concurrent_hooks -= 1
+
+        ext = RecordingExtension()
+
+        def run_after_write():
+            ext.after_write_source("test.beancount", "content")
+
+        def run_after_delete():
+            fake_entry = SimpleNamespace(
+                account="Assets:Test",
+                date="2014-12-31",
+            )
+            ext.after_delete_entry(fake_entry)
+
+        threads = []
+        for i in range(3):
+            threads.append(threading.Thread(target=run_after_write))
+            threads.append(threading.Thread(target=run_after_delete))
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert len(hook_calls) == 6, f"Expected 6 hook calls, got {len(hook_calls)}"
+        assert max_concurrent == 1, (
+            f"File lock must serialize hooks, max concurrent was {max_concurrent}"
+        )
