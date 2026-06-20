@@ -16,7 +16,7 @@
     /** Whether this is a remote link (for which we do not intercept clicks). */
     remote?: true;
     /** Show a bubble with a number */
-    bubble?: [number, "error" | "info"];
+    bubble?: [number, "error" | "info" | "warning"];
     children?: Snippet;
   }
 
@@ -30,7 +30,7 @@
   <a class:selected {href} {@attach keyboardShortcut(key)} data-remote={remote}>
     {name}
     {#if bubble && bubble[0] > 0}
-      <span class="bubble" class:error={bubble[1] === "error"}>
+      <span class="bubble" class:error={bubble[1] === "error"} class:warning={bubble[1] === "warning"}>
         {bubble[0]}
       </span>
     {/if}
@@ -77,5 +77,10 @@
   .error.bubble {
     color: white;
     background-color: var(--error);
+  }
+
+  .warning.bubble {
+    color: #856404;
+    background-color: #ffc107;
   }
 </style>

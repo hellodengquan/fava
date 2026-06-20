@@ -3,6 +3,7 @@
   import { _ } from "../i18n.ts";
   import { keyboardShortcut } from "../keyboard-shortcuts.ts";
   import { errors, extensions, ledgerData } from "../stores/index.ts";
+  import { review_stats } from "../stores/review.ts";
   import AccountSelector from "./AccountSelector.svelte";
   import Link from "./SidebarLink.svelte";
 
@@ -14,6 +15,7 @@
   let extension_reports = $derived(
     $extensions.filter((e) => e.report_title != null),
   );
+  let review_pending = $derived($review_stats.pending);
 </script>
 
 {#if sidebar_links.length}
@@ -69,6 +71,12 @@
       bubble={[$errors.length, "error"]}
     />
   {/if}
+  <Link
+    report="review"
+    name={_("Review Desk")}
+    key="g r"
+    bubble={review_pending > 0 ? [review_pending, "warning"] : undefined}
+  />
   <Link report="import" name={_("Import")} key="g n">
     <a href="#export" class="secondary" title={_("Export")}>⬇</a>
   </Link>

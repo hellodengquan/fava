@@ -24,6 +24,7 @@ export interface BeancountError {
     readonly filename: string;
     readonly lineno: number;
   } | null;
+  readonly entry_hash?: string | null;
 }
 
 /** Validator for a BeancountError. */
@@ -31,6 +32,26 @@ export const error_validator = object<BeancountError>({
   type: string,
   message: string,
   source: optional(object({ filename: string, lineno: number })),
+  entry_hash: optional(string),
+});
+
+/** Review status for an anomaly transaction. */
+export type ReviewStatus = "pending" | "skipped" | "explained";
+
+/** Review data stored per anomaly (keyed by a stable ID). */
+export interface ReviewItemState {
+  readonly status: ReviewStatus;
+  readonly note: string;
+  readonly explanation: string;
+  readonly updated_at: string;
+}
+
+/** Validator for ReviewItemState. */
+export const review_item_state_validator = object<ReviewItemState>({
+  status: constants("pending", "skipped", "explained"),
+  note: string,
+  explanation: string,
+  updated_at: string,
 });
 
 /** Validator for the details for a single account. */
