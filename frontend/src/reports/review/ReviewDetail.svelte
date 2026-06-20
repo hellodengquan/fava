@@ -4,7 +4,7 @@
   import { router } from "../../router.ts";
   import {
     enriched_errors,
-    review_context,
+    review_context_stack,
     review_store,
     urlForReviewDetail,
     urlForReviewList,
@@ -85,21 +85,53 @@
   }
 
   function goList(): void {
-    review_context.update((ctx) => ({
-      ...ctx,
-      highlightId: id,
-    }));
+    // 更新栈顶 highlightId 为当前 ID，列表页面 pop 时会看到
+    review_context_stack.update((stack) => {
+      if (stack.length === 0) {
+        return [
+          {
+            highlightId: id,
+            scrollTop: 0,
+            filterStatus: "all",
+            filterType: "all",
+            searchText: "",
+          },
+        ];
+      }
+      const next = [...stack];
+      const top = { ...next[next.length - 1] };
+      top.highlightId = id;
+      next[next.length - 1] = top;
+      return next;
+    });
     router.navigate($base_url + urlForReviewList());
   }
 
   function goPrev(): void {
     if (prevItem) {
+      // 切换详情：更新栈顶 highlightId，保持筛选/滚动位置不变
+      review_context_stack.update((stack) => {
+        if (stack.length === 0) return stack;
+        const next = [...stack];
+        const top = { ...next[next.length - 1] };
+        top.highlightId = prevItem.id;
+        next[next.length - 1] = top;
+        return next;
+      });
       router.navigate($base_url + urlForReviewDetail(prevItem.id));
     }
   }
 
   function goNext(): void {
     if (nextItem) {
+      review_context_stack.update((stack) => {
+        if (stack.length === 0) return stack;
+        const next = [...stack];
+        const top = { ...next[next.length - 1] };
+        top.highlightId = nextItem.id;
+        next[next.length - 1] = top;
+        return next;
+      });
       router.navigate($base_url + urlForReviewDetail(nextItem.id));
     }
   }

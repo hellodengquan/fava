@@ -897,27 +897,79 @@ def _review_state_path() -> Path:
     return Path(g.ledger.beancount_file_path).parent / _REVIEW_STATE_FILENAME
 
 
+def _review_state_version_and_data() -> tuple[int, dict[str, Any]]:
+    """Return (version, data) from the review state file.
+
+    Handles migration from legacy flat-dict format (no version envelope)
+    to the new envelope `{"version": int, "data": {...}}` format.
+    """
+    review_path = _review_state_path()
+    if not review_path.is_file():
+        return (0, {})
+    try:
+        raw = review_path.read_text(encoding="utf-8")
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, OSError):
+        return (0, {})
+
+    if isinstance(payload, dict) and "version" in payload and "data" in payload:
+        version = int(payload["version"])
+        data = payload["data"] if isinstance(payload["data"], dict) else {}
+        return (version, data)
+
+    # Legacy flat format: migrate to envelope by writing it back at version 1.
+    legacy_data = payload if isinstance(payload, dict) else {}
+    migrated = {"version": 1, "data": legacy_data}
+    try:
+        review_path.write_text(
+            json.dumps(migrated, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        # If the rewrite fails, simply return the parsed data with version 0.
+        return (0, legacy_data)
+    return (1, legacy_data)
+
+
 @api_endpoint
 def get_review_state() -> dict[str, Any]:
-    review_path = _review_state_path()
-    if review_path.is_file():
-        try:
-            return json.loads(review_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
+    version, data = _review_state_version_and_data()
+    return {"version": version, "data": data}
 
 
 @api_endpoint
-def put_review_state(state: list[Any]) -> str:
+def put_review_state(version: int, state: list[Any]) -> dict[str, Any]:
     review_path = _review_state_path()
+    current_version, current_data = _review_state_version_and_data()
+
+    if version != current_version:
+        msg = (
+            f"Review state version mismatch: expected v{current_version}, "
+            f"got v{version}. Another user may have updated it."
+        )
+        raise FavaAPIError(msg)
+
+    merged: dict[str, Any] = dict(current_data)
+    for item in state:
+        key, value = item[0], item[1]
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
+
+    new_version = current_version + 1
+    envelope = {"version": new_version, "data": merged}
     try:
-        data = {item[0]: item[1] for item in state}
         review_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
+            json.dumps(envelope, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
     except OSError as exc:
         msg = f"Failed to save review state: {exc}"
         raise FavaAPIError(msg) from exc
-    return f"Saved review state ({len(data)} items)."
+
+    return {
+        "version": new_version,
+        "count": len(merged),
+        "message": f"Saved review state ({len(merged)} items) at v{new_version}.",
+    }

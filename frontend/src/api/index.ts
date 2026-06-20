@@ -25,6 +25,10 @@ import {
   ledgerDataValidator,
   options_validator,
   review_item_state_validator,
+  review_state_envelope_validator,
+  review_state_put_response_validator,
+  type ReviewStateEnvelope,
+  type ReviewStatePutResponse,
   source_validator,
   type SourceFile,
   statistics_validator,
@@ -326,10 +330,39 @@ export const get_trial_balance = define_endpoint(
 );
 export const get_review_state = define_paramless_endpoint(
   "review_state",
-  record(review_item_state_validator),
+  review_state_envelope_validator,
 );
 
 type Put<T> = (body: T) => Promise<string>;
+type PutJson<T, R = string> = (body: T) => Promise<R>;
+
+function define_put_json_typed<T, R>(
+  endpoint: PutEndpoint,
+  responseValidator?: Validator,
+): PutJson<T, R> {
+  return async (body: T) => {
+    const res = await fetch(`/${endpoint}/`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
+      throw new Error(
+        `PUT ${endpoint} failed (${res.status}): ${errBody || res.statusText}`,
+      );
+    }
+    const json = await res.json();
+    if (responseValidator) {
+      try {
+        responseValidator(json);
+      } catch (cause: unknown) {
+        throw new InvalidResponseDataError(cause as Error);
+      }
+    }
+    return json as R;
+  };
+}
 
 // PUT endpoints
 
@@ -354,8 +387,10 @@ export const put_source_slice: Put<{
   sha256sum: string;
 }> = define_put_json("source_slice");
 export const put_upload_import_file = define_put_form("upload_import_file");
-export const put_review_state: Put<Array<[string, unknown]>> =
-  define_put_json("review_state");
+export const put_review_state: PutJson<
+  { version: number; state: Array<[string, unknown]> },
+  ReviewStatePutResponse
+> = define_put_json_typed("review_state", review_state_put_response_validator);
 
 /**
  * Move a file, either in an import directory or a document.

@@ -54,6 +54,32 @@ export const review_item_state_validator = object<ReviewItemState>({
   updated_at: string,
 });
 
+/** Version-enveloped review state, as returned by `GET /review_state`. */
+export interface ReviewStateEnvelope {
+  readonly version: number;
+  readonly data: Record<string, ReviewItemState>;
+}
+
+/** Validator for ReviewStateEnvelope. */
+export const review_state_envelope_validator = object<ReviewStateEnvelope>({
+  version: number,
+  data: record(review_item_state_validator),
+});
+
+/** Response envelope for `PUT /review_state`. */
+export interface ReviewStatePutResponse {
+  readonly version: number;
+  readonly count: number;
+  readonly message: string;
+}
+
+/** Validator for ReviewStatePutResponse. */
+export const review_state_put_response_validator = object<ReviewStatePutResponse>({
+  version: number,
+  count: number,
+  message: string,
+});
+
 /** Validator for the details for a single account. */
 const account_detail = object({
   balance_string: optional(string),

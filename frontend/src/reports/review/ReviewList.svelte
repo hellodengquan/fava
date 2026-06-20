@@ -7,7 +7,7 @@
   import { accounts, base_url } from "../../stores/index.ts";
   import {
     enriched_errors,
-    review_context,
+    review_context_stack,
     review_stats,
     review_store,
     urlForReviewDetail,
@@ -22,6 +22,8 @@
   let selectedIds = $state<Set<string>>(new Set());
   let batchExplanation = $state<string>("");
   let showBatchExplain = $state<boolean>(false);
+  let batchNote = $state<string>("");
+  let showBatchNote = $state<boolean>(false);
 
   let highlightId = $state<string | null>(null);
   let tableContainer: HTMLElement | undefined = $state();
@@ -95,7 +97,7 @@
   }
 
   function goDetail(id: string): void {
-    review_context.set({
+    review_context_stack.push({
       highlightId: id,
       scrollTop: tableContainer?.scrollTop ?? 0,
       filterStatus,
@@ -142,15 +144,19 @@
     }
   }
 
+  function getSelectedIds(): string[] {
+    return [...selectedIds].filter((id) => filteredIds.has(id));
+  }
+
   function handleBatchSkip(): void {
-    const ids = [...selectedIds].filter((id) => filteredIds.has(id));
+    const ids = getSelectedIds();
     if (ids.length === 0) return;
     review_store.batchSkip(ids);
     selectedIds = new Set();
   }
 
   function handleBatchExplain(): void {
-    const ids = [...selectedIds].filter((id) => filteredIds.has(id));
+    const ids = getSelectedIds();
     if (ids.length === 0) return;
     review_store.batchExplain(ids, batchExplanation);
     batchExplanation = "";
@@ -158,33 +164,44 @@
     selectedIds = new Set();
   }
 
+  function handleBatchNote(): void {
+    const ids = getSelectedIds();
+    if (ids.length === 0) return;
+    review_store.batchNote(ids, batchNote);
+    batchNote = "";
+    showBatchNote = false;
+    selectedIds = new Set();
+  }
+
   function handleBatchReset(): void {
-    const ids = [...selectedIds].filter((id) => filteredIds.has(id));
+    const ids = getSelectedIds();
     if (ids.length === 0) return;
     review_store.batchReset(ids);
     selectedIds = new Set();
   }
 
   onMount(() => {
-    const ctx = $review_context;
-    if (ctx.filterStatus && ctx.filterStatus !== "all") {
-      filterStatus = ctx.filterStatus as FilterStatus;
-    }
-    if (ctx.filterType && ctx.filterType !== "all") {
-      filterType = ctx.filterType;
-    }
-    if (ctx.searchText) {
-      searchText = ctx.searchText;
-    }
-    if (ctx.highlightId) {
-      highlightId = ctx.highlightId;
-    }
-    if (ctx.scrollTop > 0 && tableContainer) {
-      requestAnimationFrame(() => {
-        if (tableContainer) {
-          tableContainer.scrollTop = ctx.scrollTop;
-        }
-      });
+    const ctx = review_context_stack.pop();
+    if (ctx) {
+      if (ctx.filterStatus && ctx.filterStatus !== "all") {
+        filterStatus = ctx.filterStatus as FilterStatus;
+      }
+      if (ctx.filterType && ctx.filterType !== "all") {
+        filterType = ctx.filterType;
+      }
+      if (ctx.searchText) {
+        searchText = ctx.searchText;
+      }
+      if (ctx.highlightId) {
+        highlightId = ctx.highlightId;
+      }
+      if (ctx.scrollTop > 0 && tableContainer) {
+        requestAnimationFrame(() => {
+          if (tableContainer) {
+            tableContainer.scrollTop = ctx.scrollTop;
+          }
+        });
+      }
     }
   });
 
@@ -200,7 +217,7 @@
   });
 
   function saveContext(): void {
-    review_context.set({
+    review_context_stack.replaceTop({
       highlightId,
       scrollTop: tableContainer?.scrollTop ?? 0,
       filterStatus,
@@ -210,7 +227,9 @@
   }
 
   $effect(() => {
-    saveContext();
+    if ($review_context_stack.length > 0) {
+      saveContext();
+    }
   });
 </script>
 
@@ -269,6 +288,13 @@
       >
         {_("批量解释")}
       </button>
+      <button
+        type="button"
+        class="btn btn-batch-note"
+        onclick={() => (showBatchNote = !showBatchNote)}
+      >
+        {_("批量备注")}
+      </button>
       <button type="button" class="btn btn-batch-reset" onclick={handleBatchReset}>
         {_("批量重置")}
       </button>
@@ -281,7 +307,7 @@
       </button>
     </div>
     {#if showBatchExplain}
-      <div class="batch-explain-row">
+      <div class="batch-row batch-explain-row">
         <textarea
           class="form-textarea"
           bind:value={batchExplanation}
@@ -295,6 +321,24 @@
           disabled={!batchExplanation.trim()}
         >
           {_("确认解释")}
+        </button>
+      </div>
+    {/if}
+    {#if showBatchNote}
+      <div class="batch-row batch-note-row">
+        <textarea
+          class="form-textarea"
+          bind:value={batchNote}
+          rows={3}
+          placeholder={_("请输入批量备注内容...（不改变复核状态）")}
+        ></textarea>
+        <button
+          type="button"
+          class="btn btn-secondary"
+          onclick={handleBatchNote}
+          disabled={!batchNote.trim()}
+        >
+          {_("确认备注")}
         </button>
       </div>
     {/if}
@@ -517,19 +561,28 @@
     margin-right: 0.5rem;
   }
 
-  .batch-explain-row {
+  .batch-row {
     display: flex;
     gap: 0.75rem;
     align-items: flex-start;
     padding: 0.75rem;
-    background: #f0fff0;
-    border: 1px solid #c3e6cb;
+    border: 1px solid;
     border-radius: 4px;
   }
 
-  .batch-explain-row .form-textarea {
+  .batch-row .form-textarea {
     flex: 1;
     min-height: 60px;
+  }
+
+  .batch-explain-row {
+    background: #f0fff0;
+    border-color: #c3e6cb;
+  }
+
+  .batch-note-row {
+    background: #fffbeb;
+    border-color: #ffe0a1;
   }
 
   .form-textarea {
@@ -741,6 +794,15 @@
     background: #d4edda;
   }
 
+  .btn-batch-note {
+    border-color: #ffa726;
+    color: #e65100;
+  }
+
+  .btn-batch-note:hover:not(:disabled) {
+    background: #ffe0b2;
+  }
+
   .btn-batch-reset {
     border-color: #6c757d;
     color: #383d41;
@@ -768,6 +830,17 @@
   .btn-primary:hover:not(:disabled) {
     background: #218838;
     border-color: #218838;
+  }
+
+  .btn-secondary {
+    border-color: #ffa726;
+    background: #ffa726;
+    color: #fff;
+  }
+
+  .btn-secondary:hover:not(:disabled) {
+    background: #fb8c00;
+    border-color: #fb8c00;
   }
 
   .empty-state {
