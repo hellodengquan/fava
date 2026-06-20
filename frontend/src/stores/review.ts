@@ -1,6 +1,7 @@
 import { derived, get, writable } from "svelte/store";
 
 import type { BeancountError, ReviewItemState, ReviewStatus } from "../api/validators.ts";
+import { get_review_state, put_review_state } from "../api/index.ts";
 import { errors, ledgerData } from "./index.ts";
 
 const STORAGE_KEY_PREFIX = "fava:review:";
@@ -58,15 +59,29 @@ function createReviewStore() {
   const store = writable<ReviewStoreValue>(initial);
   let initialized = false;
   let lastBaseUrl = "";
+  let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
-  function ensureInit() {
+  async function loadFromBackend(): Promise<ReviewStoreValue> {
+    try {
+      const data = await get_review_state();
+      return data ?? {};
+    } catch {
+      return {};
+    }
+  }
+
+  async function ensureInit() {
     if (initialized) return;
     const $ledgerData = get(ledgerData);
     const baseUrl = $ledgerData?.base_url ?? "";
     if (baseUrl) {
       lastBaseUrl = baseUrl;
-      store.set(loadFromStorage(baseUrl));
+      const localData = loadFromStorage(baseUrl);
+      store.set(localData);
       initialized = true;
+      const backendData = await loadFromBackend();
+      store.set(backendData);
+      saveToStorage(baseUrl, backendData);
     }
   }
 
@@ -74,21 +89,42 @@ function createReviewStore() {
     const baseUrl = $ledgerData?.base_url ?? "";
     if (baseUrl && baseUrl !== lastBaseUrl) {
       lastBaseUrl = baseUrl;
-      store.set(loadFromStorage(baseUrl));
       initialized = true;
+      const localData = loadFromStorage(baseUrl);
+      store.set(localData);
+      loadFromBackend().then((backendData) => {
+        store.set(backendData);
+        saveToStorage(baseUrl, backendData);
+      });
     }
   });
 
   const { subscribe, set, update } = store;
 
-  function persist(value: ReviewStoreValue) {
+  function persistLocal(value: ReviewStoreValue) {
     if (lastBaseUrl) {
       saveToStorage(lastBaseUrl, value);
     }
   }
 
+  function persistBackend(value: ReviewStoreValue) {
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+    }
+    saveTimer = setTimeout(() => {
+      const entries = Object.entries(value);
+      put_review_state(entries).catch(() => {
+        // backend save failed; local cache is already saved
+      });
+    }, 500);
+  }
+
+  function persist(value: ReviewStoreValue) {
+    persistLocal(value);
+    persistBackend(value);
+  }
+
   function getState(id: string): ReviewItemState {
-    ensureInit();
     const all = get(store);
     return all[id] ?? defaultState();
   }
@@ -97,7 +133,6 @@ function createReviewStore() {
     id: string,
     changes: Partial<ReviewItemState>,
   ): void {
-    ensureInit();
     update((all) => {
       const current = all[id] ?? defaultState();
       const next: ReviewItemState = {
@@ -139,6 +174,43 @@ function createReviewStore() {
     });
   }
 
+  function batchSkip(ids: string[]): void {
+    update((all) => {
+      const result = { ...all };
+      const ts = nowIso();
+      for (const id of ids) {
+        const current = result[id] ?? defaultState();
+        result[id] = { ...current, status: "skipped", updated_at: ts };
+      }
+      persist(result);
+      return result;
+    });
+  }
+
+  function batchExplain(ids: string[], explanation: string): void {
+    update((all) => {
+      const result = { ...all };
+      const ts = nowIso();
+      for (const id of ids) {
+        const current = result[id] ?? defaultState();
+        result[id] = { ...current, status: "explained", explanation, updated_at: ts };
+      }
+      persist(result);
+      return result;
+    });
+  }
+
+  function batchReset(ids: string[]): void {
+    update((all) => {
+      const result = { ...all };
+      for (const id of ids) {
+        delete result[id];
+      }
+      persist(result);
+      return result;
+    });
+  }
+
   return {
     subscribe,
     ensureInit,
@@ -150,6 +222,9 @@ function createReviewStore() {
     skip,
     explain,
     reset,
+    batchSkip,
+    batchExplain,
+    batchReset,
   };
 }
 
@@ -165,7 +240,7 @@ export const enriched_errors = derived(
   [errors, review_store, ledgerData],
   ([$errors, _review, $ledgerData]) => {
     void $ledgerData;
-    review_store.ensureInit();
+    void _review;
     return $errors.map<EnrichedError>((error) => {
       const id = getErrorId(error);
       const state = review_store.getState(id);
@@ -198,3 +273,17 @@ export function urlForReviewDetail(id: string): string {
 export function getErrorIdExported(error: BeancountError): string {
   return getErrorId(error);
 }
+
+export const review_context = writable<{
+  highlightId: string | null;
+  scrollTop: number;
+  filterStatus: string;
+  filterType: string;
+  searchText: string;
+}>({
+  highlightId: null,
+  scrollTop: 0,
+  filterStatus: "all",
+  filterType: "all",
+  searchText: "",
+});

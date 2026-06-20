@@ -6,6 +6,7 @@ interface for asynchronous functionality.
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 from abc import abstractmethod
@@ -887,3 +888,36 @@ def get_statistics() -> Statistics:
         balances=balances,
         entries_by_type=entries_by_type,
     )
+
+
+_REVIEW_STATE_FILENAME = ".fava-review-state.json"
+
+
+def _review_state_path() -> Path:
+    return Path(g.ledger.beancount_file_path).parent / _REVIEW_STATE_FILENAME
+
+
+@api_endpoint
+def get_review_state() -> dict[str, Any]:
+    review_path = _review_state_path()
+    if review_path.is_file():
+        try:
+            return json.loads(review_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+@api_endpoint
+def put_review_state(state: list[Any]) -> str:
+    review_path = _review_state_path()
+    try:
+        data = {item[0]: item[1] for item in state}
+        review_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        msg = f"Failed to save review state: {exc}"
+        raise FavaAPIError(msg) from exc
+    return f"Saved review state ({len(data)} items)."

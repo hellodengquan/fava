@@ -4,6 +4,7 @@
   import { router } from "../../router.ts";
   import {
     enriched_errors,
+    review_context,
     review_store,
     urlForReviewDetail,
     urlForReviewList,
@@ -84,6 +85,10 @@
   }
 
   function goList(): void {
+    review_context.update((ctx) => ({
+      ...ctx,
+      highlightId: id,
+    }));
     router.navigate($base_url + urlForReviewList());
   }
 

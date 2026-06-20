@@ -10,7 +10,7 @@ import {
 import type { NonEmptyArray } from "../lib/array.ts";
 import { fetch_json } from "../lib/fetch.ts";
 import type { Validator } from "../lib/validation.ts";
-import { array, boolean, number, object, string } from "../lib/validation.ts";
+import { array, boolean, number, object, record, string } from "../lib/validation.ts";
 import { notify, notify_err } from "../notifications.ts";
 import { query_validator } from "../reports/query/query_table.ts";
 import { router } from "../router.ts";
@@ -24,6 +24,7 @@ import {
   importable_files_validator,
   ledgerDataValidator,
   options_validator,
+  review_item_state_validator,
   source_validator,
   type SourceFile,
   statistics_validator,
@@ -64,6 +65,7 @@ type GetEndpoint =
   | "narration_transaction"
   | "narrations"
   | "query"
+  | "review_state"
   | "source"
   | "statistics";
 type PutEndpoint =
@@ -72,6 +74,7 @@ type PutEndpoint =
   | "attach_document"
   | "format_source"
   | "move"
+  | "review_state"
   | "source"
   | "source_slice"
   | "upload_import_file";
@@ -321,6 +324,10 @@ export const get_trial_balance = define_endpoint(
   tree_report_validator,
   filters_conversion_interval,
 );
+export const get_review_state = define_paramless_endpoint(
+  "review_state",
+  record(review_item_state_validator),
+);
 
 type Put<T> = (body: T) => Promise<string>;
 
@@ -347,6 +354,8 @@ export const put_source_slice: Put<{
   sha256sum: string;
 }> = define_put_json("source_slice");
 export const put_upload_import_file = define_put_form("upload_import_file");
+export const put_review_state: Put<Array<[string, unknown]>> =
+  define_put_json("review_state");
 
 /**
  * Move a file, either in an import directory or a document.
