@@ -55,6 +55,7 @@ Source = "https://github.com/beancount/fava/"
 
 [project.scripts]
 fava = "fava.cli:main"
+fava-generate-example = "fava.generate_example:main"
 
 [project.optional-dependencies]
 # Extra dependencies that are needed for the export to excel.
@@ -238,6 +239,7 @@ max-args = 9
 "src/fava/core/filters.py" = ["D"]
 # Lazy imports in CLI and request handlers (for conditionally used deps)
 "src/fava/{__init__,application,cli}.py" = ["PLC0415"]
+"src/fava/generate_example.py" = ["E501", "PLR0915", "RUF002"]
 
 # pylint is not run as part of linting for Fava anymore but we keep these disables
 # around for devs who might have pylint automatically run by their editors to avoid
