@@ -1,7 +1,10 @@
 <script lang="ts">
   import type { ConsolidatedBudgetAccount, ConsolidatedBudgetInterval } from "../../api/validators.ts";
-  import { _ } from "../../i18n.ts";
-  import { leaf } from "../../lib/account.ts";
+  import {
+    get_account_type,
+    get_over_budget_label,
+    get_over_budget_suggestion,
+  } from "../../lib/budget_suggestions.ts";
   import { is_empty } from "../../lib/objects.ts";
   import { toggle_account, toggled_accounts } from "../../stores/accounts.ts";
   import { ctx } from "../../stores/format.ts";
@@ -15,6 +18,8 @@
   let { node }: Props = $props();
 
   let is_toggled = $derived($toggled_accounts.has(node.account));
+
+  let account_type = $derived(get_account_type(node.account));
 
   let has_data = $derived(
     node.intervals.some(
@@ -57,33 +62,26 @@
     if (diff == null || diff <= 0) {
       return "";
     }
-    if (pct == null) {
-      return _("Over Budget");
-    }
-    if (pct > 50) {
-      return _("Over Budget") + " — " + _("Critical: significantly exceeded");
-    }
-    if (pct > 20) {
-      return _("Over Budget") + " — " + _("Warning: moderately exceeded");
-    }
-    return _("Over Budget") + " — " + _("Slight: minor overrun");
+    return get_over_budget_label(pct, account_type);
   }
 
   function getOverBudgetSuggestion(
     iv: ConsolidatedBudgetInterval,
     currency: string,
   ): string {
+    const budget = iv.budget[currency];
+    const diff = getDiff(iv, currency);
     const pct = getOverBudgetPct(iv, currency);
-    if (pct == null) {
+    if (pct == null || diff == null || budget == null) {
       return "";
     }
-    if (pct > 50) {
-      return _("Suggestion: Reallocate funds from other categories or review this expense.");
-    }
-    if (pct > 20) {
-      return _("Suggestion: Review spending pattern and adjust budget or cut non-essential items.");
-    }
-    return _("Suggestion: Minor overrun — monitor if this trend continues.");
+    return get_over_budget_suggestion(
+      pct,
+      account_type,
+      budget,
+      diff,
+      node.account,
+    );
   }
 
   function getChange(

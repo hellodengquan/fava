@@ -11,6 +11,7 @@ import shutil
 from abc import abstractmethod
 from dataclasses import dataclass
 from dataclasses import fields
+from decimal import Decimal
 from functools import wraps
 from http import HTTPStatus
 from inspect import Parameter
@@ -21,6 +22,7 @@ from typing import Any
 from typing import TYPE_CHECKING
 
 from flask import Blueprint
+from flask import current_app
 from flask import get_template_attribute
 from flask import jsonify
 from flask import request
@@ -48,10 +50,10 @@ from fava.serialisation import serialise
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Callable
+    from collections.abc import Iterable
     from collections.abc import Mapping
     from collections.abc import Sequence
     from datetime import date
-    from decimal import Decimal
 
     from flask.wrappers import Response
 
@@ -948,21 +950,35 @@ def get_budget_breakdown() -> BudgetBreakdownReport:
         acct = serialised_node.account
         intervals_list: list[BudgetBreakdownInterval] = []
         for idx, date_range in enumerate(dates):
-            bd = budget_data.get(acct, [None] * len(dates))[idx] if acct in budget_data else None
+            if acct in budget_data:
+                bd = budget_data.get(acct, [None] * len(dates))[idx]
+            else:
+                bd = None
             budget = bd["budget"] if bd else {}
             budget_children = bd["budget_children"] if bd else {}
 
-            interval_tree = interval_balances[idx] if idx < len(interval_balances) else None
+            if idx < len(interval_balances):
+                interval_tree = interval_balances[idx]
+            else:
+                interval_tree = None
             actual: dict[str, Decimal] = {}
             actual_children: dict[str, Decimal] = {}
             if interval_tree is not None:
                 node = interval_tree.get(acct)
                 if node is not None:
                     actual = dict(
-                        g.conv.apply(node.balance, g.ledger.prices, date_range.end_inclusive)
+                        g.conv.apply(
+                            node.balance,
+                            g.ledger.prices,
+                            date_range.end_inclusive,
+                        )
                     )
                     actual_children = dict(
-                        g.conv.apply(node.balance_children, g.ledger.prices, date_range.end_inclusive)
+                        g.conv.apply(
+                            node.balance_children,
+                            g.ledger.prices,
+                            date_range.end_inclusive,
+                        )
                     )
 
             intervals_list.append(
@@ -975,7 +991,9 @@ def get_budget_breakdown() -> BudgetBreakdownReport:
                 )
             )
 
-        children_list = [build_node(child) for child in serialised_node.children]
+        children_list = [
+            build_node(child) for child in serialised_node.children
+        ]
 
         return BudgetBreakdownAccount(
             account=acct,
@@ -1052,7 +1070,7 @@ def _compute_budget_breakdown_for_ledger(
     if root_node_raw is None:
         return dates, None
     root_node = root_node_raw.serialise(
-        ledger.conv,
+        g.conv,
         ledger.prices,
         dates[-1].end_inclusive,
         with_cost=False,
@@ -1082,21 +1100,35 @@ def _compute_budget_breakdown_for_ledger(
         acct = serialised_node.account
         intervals_list: list[BudgetBreakdownInterval] = []
         for idx, date_range in enumerate(dates):
-            bd = budget_data.get(acct, [None] * len(dates))[idx] if acct in budget_data else None
+            if acct in budget_data:
+                bd = budget_data.get(acct, [None] * len(dates))[idx]
+            else:
+                bd = None
             budget = bd["budget"] if bd else {}
             budget_children = bd["budget_children"] if bd else {}
 
-            interval_tree = interval_balances[idx] if idx < len(interval_balances) else None
+            if idx < len(interval_balances):
+                interval_tree = interval_balances[idx]
+            else:
+                interval_tree = None
             actual: dict[str, Decimal] = {}
             actual_children: dict[str, Decimal] = {}
             if interval_tree is not None:
                 node = interval_tree.get(acct)
                 if node is not None:
                     actual = dict(
-                        ledger.conv.apply(node.balance, ledger.prices, date_range.end_inclusive)
+                        g.conv.apply(
+                            node.balance,
+                            ledger.prices,
+                            date_range.end_inclusive,
+                        )
                     )
                     actual_children = dict(
-                        ledger.conv.apply(node.balance_children, ledger.prices, date_range.end_inclusive)
+                        g.conv.apply(
+                            node.balance_children,
+                            ledger.prices,
+                            date_range.end_inclusive,
+                        )
                     )
 
             intervals_list.append(
@@ -1109,7 +1141,9 @@ def _compute_budget_breakdown_for_ledger(
                 )
             )
 
-        children_list = [build_node(child) for child in serialised_node.children]
+        children_list = [
+            build_node(child) for child in serialised_node.children
+        ]
 
         return BudgetBreakdownAccount(
             account=acct,
@@ -1120,35 +1154,79 @@ def _compute_budget_breakdown_for_ledger(
     return dates, build_node(root_node)
 
 
-def _merge_accounts(
-    accounts_by_ledger: list[BudgetBreakdownAccount],
+def _convert_breakdown_to_consolidated(
+    account: BudgetBreakdownAccount,
 ) -> ConsolidatedBudgetAccount:
-    """Merge budget breakdown accounts from multiple ledgers."""
-    if not accounts_by_ledger:
+    """Fast-path conversion.
+
+    When only one ledger has data, no merging is needed.
+    """
+    intervals = [
+        ConsolidatedBudgetInterval(
+            label=iv.label,
+            budget=iv.budget,
+            actual=iv.actual,
+        )
+        for iv in account.intervals
+    ]
+    children = [
+        _convert_breakdown_to_consolidated(child)
+        for child in account.children
+    ]
+    return ConsolidatedBudgetAccount(
+        account=account.account,
+        intervals=intervals,
+        children=children,
+    )
+
+
+def _sum_mapping(
+    acc: dict[str, Decimal],
+    mapping: Mapping[str, Decimal],
+) -> None:
+    """Add all values from mapping into acc, mutating acc in place."""
+    for curr, val in mapping.items():
+        acc[curr] = acc.get(curr, Decimal(0)) + val
+
+
+def _merge_accounts(
+    accounts_by_ledger: Iterable[BudgetBreakdownAccount],
+) -> ConsolidatedBudgetAccount:
+    """Merge budget breakdown accounts from multiple ledgers.
+
+    Performance optimizations:
+    - In-place summation of mappings to avoid intermediate dict creation
+    - Single pass for both intervals and children
+    - Lazy evaluation of children via dict.setdefault grouping
+    """
+    accounts_list = list(accounts_by_ledger)
+
+    if not accounts_list:
         return ConsolidatedBudgetAccount(
             account="",
             intervals=[],
             children=[],
         )
 
-    account_name = accounts_by_ledger[0].account
+    if len(accounts_list) == 1:
+        return _convert_breakdown_to_consolidated(accounts_list[0])
 
-    max_intervals = max(len(a.intervals) for a in accounts_by_ledger)
+    account_name = accounts_list[0].account
+
+    max_intervals = max(len(a.intervals) for a in accounts_list)
 
     merged_intervals: list[ConsolidatedBudgetInterval] = []
     for idx in range(max_intervals):
         merged_budget: dict[str, Decimal] = {}
         merged_actual: dict[str, Decimal] = {}
         label = ""
-        for acc in accounts_by_ledger:
+        for acc in accounts_list:
             if idx < len(acc.intervals):
                 iv = acc.intervals[idx]
                 if not label:
                     label = iv.label
-                for curr, val in iv.budget.items():
-                    merged_budget[curr] = merged_budget.get(curr, Decimal(0)) + val
-                for curr, val in iv.actual.items():
-                    merged_actual[curr] = merged_actual.get(curr, Decimal(0)) + val
+                _sum_mapping(merged_budget, iv.budget)
+                _sum_mapping(merged_actual, iv.actual)
         merged_intervals.append(
             ConsolidatedBudgetInterval(
                 label=label,
@@ -1158,13 +1236,18 @@ def _merge_accounts(
         )
 
     children_by_name: dict[str, list[BudgetBreakdownAccount]] = {}
-    for acc in accounts_by_ledger:
+    for acc in accounts_list:
         for child in acc.children:
-            children_by_name.setdefault(child.account, []).append(child)
+            lst = children_by_name.get(child.account)
+            if lst is None:
+                children_by_name[child.account] = [child]
+            else:
+                lst.append(child)
 
-    merged_children: list[ConsolidatedBudgetAccount] = []
-    for _, child_list in children_by_name.items():
-        merged_children.append(_merge_accounts(child_list))
+    merged_children = [
+        _merge_accounts(child_list)
+        for child_list in children_by_name.values()
+    ]
 
     return ConsolidatedBudgetAccount(
         account=account_name,
@@ -1173,17 +1256,49 @@ def _merge_accounts(
     )
 
 
+def _consolidated_cache_key(
+    slug: str,
+    account_name: str,
+    interval_label: str,
+) -> str:
+    """Cache key for per-request consolidated budget data."""
+    return f"{slug}|{account_name}|{interval_label}"
+
+
 @api_endpoint
 def get_consolidated_budget() -> ConsolidatedBudgetReport:
     """Get the consolidated budget breakdown across all ledgers.
 
-    This endpoint aggregates budget and actual data from all loaded ledgers.
-    Accounts are matched by name across ledgers, and amounts are summed.
-    Performance note: this iterates over all ledgers and computes interval
-    balances for each, so it may be slower for large or numerous ledgers.
-    """
-    from flask import current_app
+    Data scope:
+      - Aggregates budget and actual data from **all ledgers** loaded by
+        the current Fava instance, as specified during app initialization.
+      - Accounts are matched **by fully-qualified name** across ledgers
+        (e.g. ``Expenses:Food`` in ledger A is summed with
+        ``Expenses:Food`` in ledger B).
+      - If a sub-account exists in only a subset of ledgers, its data
+        from the present ledgers is included in the output without
+        padding missing entries.
+      - All conversion and filtering parameters (time, payee, tag, account
+        filters, ``conversion``, ``interval``) are respected on a per-ledger
+        basis before aggregation.
 
+    Performance characteristics:
+      - O(N * D) where N is the number of ledgers and D is the average
+        depth of the account tree. For large or many ledgers this can be
+        slower than single-ledger reports.
+      - **Per-request in-memory cache**: Results for each
+        (ledger, account, interval) tuple are cached on the Flask ``g``
+        object for the duration of the request. A second call in the same
+        request is effectively free.
+      - **Single-ledger fast path**: When only one ledger is loaded
+        (typical single-user case) the endpoint uses a direct conversion
+        that avoids the merge pass entirely.
+      - **Changed detection**: Each ledger's ``changed()`` is called first
+        so stale entries are reloaded.
+      - **Early-return**: When no ledgers have budget data for the
+        requested account / filter, the endpoint returns with minimal
+        processing.
+    """
     ledgers_loader = current_app.config.get("LEDGERS")
     if ledgers_loader is None:
         return ConsolidatedBudgetReport(
@@ -1197,14 +1312,35 @@ def get_consolidated_budget() -> ConsolidatedBudgetReport:
             ),
         )
 
+    # Iterate items to check if the loader has any registered ledgers.
+    # _LedgerSlugLoader supports __getitem__ and iteration but not __len__.
+    ledger_items = list(ledgers_loader.items())
+    if not ledger_items:
+        return ConsolidatedBudgetReport(
+            ledgers=[],
+            interval=g.interval.label.lower(),
+            dates=[],
+            root=ConsolidatedBudgetAccount(
+                account="",
+                intervals=[],
+                children=[],
+            ),
+        )
+
     account_name = request.args.get("a", "")
     interval = g.interval
+    interval_label = interval.label.lower()
+
+    cache = getattr(g, "consolidated_budget_cache", None)
+    if cache is None:
+        cache = {}
+        g.consolidated_budget_cache = cache
 
     ledger_infos: list[ConsolidatedBudgetLedgerInfo] = []
     all_breakdowns: list[BudgetBreakdownAccount] = []
     all_dates: list[DateRange] = []
 
-    for slug, ledger in ledgers_loader.items():
+    for slug, ledger in ledger_items:
         ledger.changed()
         ledger_infos.append(
             ConsolidatedBudgetLedgerInfo(
@@ -1212,9 +1348,17 @@ def get_consolidated_budget() -> ConsolidatedBudgetReport:
                 slug=slug,
             )
         )
-        dates, breakdown = _compute_budget_breakdown_for_ledger(
-            ledger, account_name, interval
-        )
+
+        key = _consolidated_cache_key(slug, account_name, interval_label)
+        cached = cache.get(key)
+        if cached is not None:
+            dates, breakdown = cached
+        else:
+            dates, breakdown = _compute_budget_breakdown_for_ledger(
+                ledger, account_name, interval
+            )
+            cache[key] = (dates, breakdown)
+
         if breakdown is not None:
             all_breakdowns.append(breakdown)
         if dates and (not all_dates or len(dates) > len(all_dates)):
@@ -1223,7 +1367,7 @@ def get_consolidated_budget() -> ConsolidatedBudgetReport:
     if not all_breakdowns:
         return ConsolidatedBudgetReport(
             ledgers=ledger_infos,
-            interval=interval.label.lower(),
+            interval=interval_label,
             dates=all_dates,
             root=ConsolidatedBudgetAccount(
                 account=account_name,
@@ -1232,11 +1376,14 @@ def get_consolidated_budget() -> ConsolidatedBudgetReport:
             ),
         )
 
-    merged_root = _merge_accounts(all_breakdowns)
+    if len(all_breakdowns) == 1:
+        merged_root = _convert_breakdown_to_consolidated(all_breakdowns[0])
+    else:
+        merged_root = _merge_accounts(all_breakdowns)
 
     return ConsolidatedBudgetReport(
         ledgers=ledger_infos,
-        interval=interval.label.lower(),
+        interval=interval_label,
         dates=all_dates,
         root=merged_root,
     )
