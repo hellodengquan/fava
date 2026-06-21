@@ -1,7 +1,65 @@
-"""Generate example ledger files for different scenarios."""
+"""Generate example ledger files for different scenarios.
+
+场景覆盖说明
+============
+
+以下清单展示了三种示例账本模板对 Fava 常用查询/展示场景的覆盖情况：
+
++--------------------------+----------+------------+----------+
+| Fava 常用场景            | 家庭模板 | 投资模板   | 企业模板 |
++==========================+==========+============+==========+
+| 资产负债表 (Balance)     | |check|  | |check|    | |check|  |
++--------------------------+----------+------------+----------+
+| 损益表 (Income Statement)| |check|  | |check|    | |check|  |
++--------------------------+----------+------------+----------+
+| 账户树状浏览             | |check|  | |check|    | |check|  |
++--------------------------+----------+------------+----------+
+| 交易明细查询             | |check|  | |check|    | |check|  |
++--------------------------+----------+------------+----------+
+| 按时间段过滤             | |check|  | |check|    | |check|  |
++--------------------------+----------+------------+----------+
+| 按账户过滤               | |check|  | |check|    | |check|  |
++--------------------------+----------+------------+----------+
+| 按标签过滤               | |cross|  | |cross|    | |cross|  |
++--------------------------+----------+------------+----------+
+| 多币种/汇率展示          | |cross|  | |check|    | |cross|  |
++--------------------------+----------+------------+----------+
+| 商品/持仓 (Holdings)     | |cross|  | |check|    | |cross|  |
++--------------------------+----------+------------+----------+
+| 成本与资本利得           | |cross|  | |check|    | |cross|  |
++--------------------------+----------+------------+----------+
+| 价格历史                 | |cross|  | |check|    | |cross|  |
++--------------------------+----------+------------+----------+
+| 期初/期末余额            | |check|  | |check|    | |check|  |
++--------------------------+----------+------------+----------+
+| 多级账户层次             | |check|  | |check|    | |check|  |
++--------------------------+----------+------------+----------+
+| 折旧/摊销                | |cross|  | |cross|    | |check|  |
++--------------------------+----------+------------+----------+
+| 应收/应付账款            | |cross|  | |cross|    | |check|  |
++--------------------------+----------+------------+----------+
+| 税费核算                 | |cross|  | |cross|    | |check|  |
++--------------------------+----------+------------+----------+
+| 贷款/利息支出            | |cross|  | |cross|    | |check|  |
++--------------------------+----------+------------+----------+
+| 收入来源分析             | |check|  | |check|    | |check|  |
++--------------------------+----------+------------+----------+
+| 支出分类统计             | |check|  | |check|    | |check|  |
++--------------------------+----------+------------+----------+
+| 现金流视角               | |check|  | |check|    | |check|  |
++--------------------------+----------+------------+----------+
+| 分红/投资收益            | |cross|  | |check|    | |cross|  |
++--------------------------+----------+------------+----------+
+| 财务费用/手续费          | |cross|  | |check|    | |check|  |
++--------------------------+----------+------------+----------+
+
+.. |check| unicode:: U+2714
+.. |cross| unicode:: U+2718
+"""
 
 from __future__ import annotations
 
+import random
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -9,6 +67,21 @@ import click
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+
+def _month_date(start_date: str, offset_months: int, day: int) -> str:
+    """生成从 start_date 起第 offset_months 个月的第 day 日.
+
+    Args:
+        start_date: 起始日期，格式 ``YYYY-MM-DD``。
+        offset_months: 偏移月数，0 表示当月。
+        day: 月内日期 (1-31)。
+    """
+    y, m, _ = map(int, start_date.split("-"))
+    total = y * 12 + (m - 1) + offset_months
+    new_y = total // 12
+    new_m = total % 12 + 1
+    return f"{new_y:04d}-{new_m:02d}-{day:02d}"
 
 
 def _header(title: str, operating_currency: str) -> str:
@@ -29,10 +102,6 @@ def _open(date: str, account: str, currencies: str = "") -> str:
     if currencies:
         return f"{date} open {account} {currencies}\n"
     return f"{date} open {account}\n"
-
-
-def _balance(date: str, account: str, amount: str) -> str:
-    return f"{date} balance {account} {amount}\n"
 
 
 def _price(date: str, commodity: str, amount: str) -> str:
@@ -62,960 +131,851 @@ def _subsection(title: str) -> str:
     return f"\n\n** {title}\n\n"
 
 
-def _generate_family() -> str:
+_FAMILY_CATEGORIES: list[tuple[str, list[tuple[str, str]]]] = [
+    (
+        "Expenses:Food:Groceries",
+        [
+            ("盒马鲜生", "采购食材"),
+            ("山姆会员店", "采购食材"),
+            ("沃尔玛", "采购日用品"),
+            ("永辉超市", "采购食材"),
+        ],
+    ),
+    (
+        "Expenses:Food:Dining",
+        [
+            ("美团外卖", "午餐"),
+            ("海底捞", "朋友聚餐"),
+            ("西贝莜面村", "晚餐"),
+            ("必胜客", "周末外卖"),
+        ],
+    ),
+    (
+        "Expenses:Transport",
+        [
+            ("地铁", "通勤充值"),
+            ("滴滴出行", "打车"),
+        ],
+    ),
+    (
+        "Expenses:Entertainment",
+        [
+            ("万达影城", "看电影"),
+            ("苹果商店", "购买App"),
+        ],
+    ),
+    (
+        "Expenses:Shopping",
+        [
+            ("优衣库", "买衣服"),
+            ("京东", "网购"),
+        ],
+    ),
+    (
+        "Expenses:Medical",
+        [
+            ("诊所", "感冒看诊"),
+        ],
+    ),
+]
+
+_FAMILY_PAYMENT_METHODS: list[str] = [
+    "Assets:Bank:ICBC",
+    "Assets:EWallet:Alipay",
+    "Assets:EWallet:WeChatPay",
+    "Liabilities:CreditCard:CMB",
+]
+
+
+def generate_family(
+    start_date: str = "2025-01-01",
+    num_months: int = 3,
+    currency: str = "CNY",
+    entries_per_month: int = 8,
+) -> str:
+    """Generate a minimal family ledger.
+
+    Args:
+        start_date: 账本起始日期，格式 ``YYYY-MM-DD``。
+        num_months: 生成交易的月份数。
+        currency: 本位货币符号。
+        entries_per_month: 每月日常交易笔数。
+    """
     lines: list[str] = []
-    lines.append(_header("极简家庭账本", "CNY"))
+    lines.append(_header("极简家庭账本", currency))
 
     lines.append(_section("币种"))
-    lines.append(_commodity("1970-01-01", "CNY", "人民币"))
+    lines.append(_commodity("1970-01-01", currency, "人民币"))
 
     lines.append(_section("账户"))
     lines.append(_subsection("资产"))
-    lines.append(_open("2025-01-01", "Assets:Bank:ICBC", "CNY"))
-    lines.append(_open("2025-01-01", "Assets:EWallet:Alipay", "CNY"))
-    lines.append(_open("2025-01-01", "Assets:EWallet:WeChatPay", "CNY"))
+    lines.append(_open(start_date, "Assets:Bank:ICBC", currency))
+    lines.append(_open(start_date, "Assets:EWallet:Alipay", currency))
+    lines.append(_open(start_date, "Assets:EWallet:WeChatPay", currency))
 
     lines.append(_subsection("负债"))
-    lines.append(_open("2025-01-01", "Liabilities:CreditCard:CMB", "CNY"))
+    lines.append(_open(start_date, "Liabilities:CreditCard:CMB", currency))
 
     lines.append(_subsection("收入"))
-    lines.append(_open("2025-01-01", "Income:Salary", "CNY"))
-    lines.append(_open("2025-01-01", "Income:Freelance", "CNY"))
+    lines.append(_open(start_date, "Income:Salary", currency))
+    lines.append(_open(start_date, "Income:Freelance", currency))
 
     lines.append(_subsection("支出"))
-    lines.append(_open("2025-01-01", "Expenses:Housing:Rent", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Food:Groceries", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Food:Dining", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Transport", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Utilities:Electricity", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Utilities:Water", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Phone", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Entertainment", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Medical", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Shopping", "CNY"))
+    lines.append(_open(start_date, "Expenses:Housing:Rent", currency))
+    lines.append(_open(start_date, "Expenses:Food:Groceries", currency))
+    lines.append(_open(start_date, "Expenses:Food:Dining", currency))
+    lines.append(_open(start_date, "Expenses:Transport", currency))
+    lines.append(_open(start_date, "Expenses:Utilities:Electricity", currency))
+    lines.append(_open(start_date, "Expenses:Utilities:Water", currency))
+    lines.append(_open(start_date, "Expenses:Phone", currency))
+    lines.append(_open(start_date, "Expenses:Entertainment", currency))
+    lines.append(_open(start_date, "Expenses:Medical", currency))
+    lines.append(_open(start_date, "Expenses:Shopping", currency))
 
     lines.append(_subsection("权益"))
-    lines.append(_open("2025-01-01", "Equity:Opening-Balances"))
+    lines.append(_open(start_date, "Equity:Opening-Balances"))
 
     lines.append(_section("初始余额"))
     lines.append(
         _txn(
-            "2025-01-01",
+            start_date,
             "*",
             "期初余额",
             "银行账户初始余额",
             [
-                ("Assets:Bank:ICBC", "50000.00 CNY"),
-                ("Equity:Opening-Balances", "-50000.00 CNY"),
+                ("Assets:Bank:ICBC", f"50000.00 {currency}"),
+                ("Equity:Opening-Balances", f"-50000.00 {currency}"),
             ],
         )
     )
     lines.append(
         _txn(
-            "2025-01-01",
+            start_date,
             "*",
             "期初余额",
             "支付宝初始余额",
             [
-                ("Assets:EWallet:Alipay", "3000.00 CNY"),
-                ("Equity:Opening-Balances", "-3000.00 CNY"),
+                ("Assets:EWallet:Alipay", f"3000.00 {currency}"),
+                ("Equity:Opening-Balances", f"-3000.00 {currency}"),
             ],
         )
     )
     lines.append(
         _txn(
-            "2025-01-01",
+            start_date,
             "*",
             "期初余额",
             "微信零钱初始余额",
             [
-                ("Assets:EWallet:WeChatPay", "1500.00 CNY"),
-                ("Equity:Opening-Balances", "-1500.00 CNY"),
+                ("Assets:EWallet:WeChatPay", f"1500.00 {currency}"),
+                ("Equity:Opening-Balances", f"-1500.00 {currency}"),
             ],
         )
     )
     lines.append(
         _txn(
-            "2025-01-01",
+            start_date,
             "*",
             "期初余额",
             "信用卡初始欠款",
             [
-                ("Liabilities:CreditCard:CMB", "-2000.00 CNY"),
-                ("Equity:Opening-Balances", "2000.00 CNY"),
+                ("Liabilities:CreditCard:CMB", f"-2000.00 {currency}"),
+                ("Equity:Opening-Balances", f"2000.00 {currency}"),
             ],
         )
     )
 
-    monthly_data: list[tuple[str, list[tuple[str, str, str, str, list[tuple[str, str]]]]]] = [
-        (
-            "01",
-            [
-                ("2025-01-05", "*", "某科技公司", "1月工资",
-                 [("Assets:Bank:ICBC", "15000.00 CNY"), ("Income:Salary", "-15000.00 CNY")]),
-                ("2025-01-05", "*", "房东", "1月房租",
-                 [("Assets:Bank:ICBC", "-4500.00 CNY"), ("Expenses:Housing:Rent", "4500.00 CNY")]),
-                ("2025-01-08", "*", "盒马鲜生", "采购食材",
-                 [("Assets:EWallet:Alipay", "-680.00 CNY"), ("Expenses:Food:Groceries", "680.00 CNY")]),
-                ("2025-01-12", "*", "美团外卖", "午餐",
-                 [("Assets:EWallet:WeChatPay", "-35.50 CNY"), ("Expenses:Food:Dining", "35.50 CNY")]),
-                ("2025-01-14", "*", "地铁", "通勤充值",
-                 [("Assets:EWallet:Alipay", "-200.00 CNY"), ("Expenses:Transport", "200.00 CNY")]),
-                ("2025-01-15", "*", "国家电网", "1月电费",
-                 [("Assets:Bank:ICBC", "-156.30 CNY"), ("Expenses:Utilities:Electricity", "156.30 CNY")]),
-                ("2025-01-16", "*", "自来水公司", "1月水费",
-                 [("Assets:Bank:ICBC", "-45.80 CNY"), ("Expenses:Utilities:Water", "45.80 CNY")]),
-                ("2025-01-18", "*", "中国移动", "1月话费",
-                 [("Assets:EWallet:Alipay", "-58.00 CNY"), ("Expenses:Phone", "58.00 CNY")]),
-                ("2025-01-20", "*", "海底捞", "朋友聚餐",
-                 [("Liabilities:CreditCard:CMB", "-268.00 CNY"), ("Expenses:Food:Dining", "268.00 CNY")]),
-                ("2025-01-22", "*", "优衣库", "买冬装",
-                 [("Liabilities:CreditCard:CMB", "-399.00 CNY"), ("Expenses:Shopping", "399.00 CNY")]),
-                ("2025-01-25", "*", "万达影城", "看电影",
-                 [("Assets:EWallet:WeChatPay", "-80.00 CNY"), ("Expenses:Entertainment", "80.00 CNY")]),
-                ("2025-01-28", "*", "招商银行", "还信用卡",
-                 [("Assets:Bank:ICBC", "-2667.00 CNY"), ("Liabilities:CreditCard:CMB", "2667.00 CNY")]),
-            ],
-        ),
-        (
-            "02",
-            [
-                ("2025-02-05", "*", "某科技公司", "2月工资",
-                 [("Assets:Bank:ICBC", "15000.00 CNY"), ("Income:Salary", "-15000.00 CNY")]),
-                ("2025-02-05", "*", "房东", "2月房租",
-                 [("Assets:Bank:ICBC", "-4500.00 CNY"), ("Expenses:Housing:Rent", "4500.00 CNY")]),
-                ("2025-02-10", "*", "自由职业平台", "设计项目收入",
-                 [("Assets:EWallet:Alipay", "3500.00 CNY"), ("Income:Freelance", "-3500.00 CNY")]),
-                ("2025-02-12", "*", "沃尔玛", "采购日用品",
-                 [("Assets:EWallet:WeChatPay", "-320.00 CNY"), ("Expenses:Food:Groceries", "320.00 CNY")]),
-                ("2025-02-14", "*", "西贝莜面村", "情人节晚餐",
-                 [("Liabilities:CreditCard:CMB", "-386.00 CNY"), ("Expenses:Food:Dining", "386.00 CNY")]),
-                ("2025-02-16", "*", "滴滴出行", "打车",
-                 [("Assets:EWallet:WeChatPay", "-42.50 CNY"), ("Expenses:Transport", "42.50 CNY")]),
-                ("2025-02-18", "*", "国家电网", "2月电费",
-                 [("Assets:Bank:ICBC", "-132.60 CNY"), ("Expenses:Utilities:Electricity", "132.60 CNY")]),
-                ("2025-02-20", "*", "京东", "买书",
-                 [("Assets:EWallet:Alipay", "-156.00 CNY"), ("Expenses:Shopping", "156.00 CNY")]),
-                ("2025-02-22", "*", "诊所", "感冒看诊",
-                 [("Assets:EWallet:WeChatPay", "-180.00 CNY"), ("Expenses:Medical", "180.00 CNY")]),
-                ("2025-02-25", "*", "招商银行", "还信用卡",
-                 [("Assets:Bank:ICBC", "-785.00 CNY"), ("Liabilities:CreditCard:CMB", "785.00 CNY")]),
-            ],
-        ),
-        (
-            "03",
-            [
-                ("2025-03-05", "*", "某科技公司", "3月工资",
-                 [("Assets:Bank:ICBC", "15000.00 CNY"), ("Income:Salary", "-15000.00 CNY")]),
-                ("2025-03-05", "*", "房东", "3月房租",
-                 [("Assets:Bank:ICBC", "-4500.00 CNY"), ("Expenses:Housing:Rent", "4500.00 CNY")]),
-                ("2025-03-08", "*", "山姆会员店", "采购食材",
-                 [("Assets:EWallet:Alipay", "-520.00 CNY"), ("Expenses:Food:Groceries", "520.00 CNY")]),
-                ("2025-03-10", "*", "中国移动", "3月话费",
-                 [("Assets:EWallet:Alipay", "-58.00 CNY"), ("Expenses:Phone", "58.00 CNY")]),
-                ("2025-03-12", "*", "国家电网", "3月电费",
-                 [("Assets:Bank:ICBC", "-98.40 CNY"), ("Expenses:Utilities:Electricity", "98.40 CNY")]),
-                ("2025-03-15", "*", "必胜客", "周末外卖",
-                 [("Assets:EWallet:WeChatPay", "-89.00 CNY"), ("Expenses:Food:Dining", "89.00 CNY")]),
-                ("2025-03-18", "*", "地铁", "通勤充值",
-                 [("Assets:EWallet:Alipay", "-200.00 CNY"), ("Expenses:Transport", "200.00 CNY")]),
-                ("2025-03-20", "*", "苹果商店", "购买App",
-                 [("Liabilities:CreditCard:CMB", "-68.00 CNY"), ("Expenses:Entertainment", "68.00 CNY")]),
-                ("2025-03-25", "*", "招商银行", "还信用卡",
-                 [("Assets:Bank:ICBC", "-454.00 CNY"), ("Liabilities:CreditCard:CMB", "454.00 CNY")]),
-            ],
-        ),
-    ]
-
     lines.append(_section("日常交易"))
-    for _month_label, transactions in monthly_data:
-        lines.extend(_txn(*txn_data) for txn_data in transactions)
-        lines.append("\n")
+    rng = random.Random(42)
+
+    for i in range(num_months):
+        lines.append(f"\n\n*** {_month_date(start_date, i, 1)[:7]}月\n\n")
+
+        lines.append(
+            _txn(
+                _month_date(start_date, i, 5),
+                "*",
+                "某科技公司",
+                f"{i + 1}月工资",
+                [
+                    ("Assets:Bank:ICBC", f"15000.00 {currency}"),
+                    ("Income:Salary", f"-15000.00 {currency}"),
+                ],
+            )
+        )
+        lines.append(
+            _txn(
+                _month_date(start_date, i, 5),
+                "*",
+                "房东",
+                f"{i + 1}月房租",
+                [
+                    ("Assets:Bank:ICBC", f"-4500.00 {currency}"),
+                    ("Expenses:Housing:Rent", f"4500.00 {currency}"),
+                ],
+            )
+        )
+        electricity = round(rng.uniform(80, 180), 2)
+        lines.append(
+            _txn(
+                _month_date(start_date, i, 15),
+                "*",
+                "国家电网",
+                f"{i + 1}月电费",
+                [
+                    ("Assets:Bank:ICBC", f"-{electricity:.2f} {currency}"),
+                    ("Expenses:Utilities:Electricity", f"{electricity:.2f} {currency}"),
+                ],
+            )
+        )
+        water = round(rng.uniform(30, 60), 2)
+        lines.append(
+            _txn(
+                _month_date(start_date, i, 16),
+                "*",
+                "自来水公司",
+                f"{i + 1}月水费",
+                [
+                    ("Assets:Bank:ICBC", f"-{water:.2f} {currency}"),
+                    ("Expenses:Utilities:Water", f"{water:.2f} {currency}"),
+                ],
+            )
+        )
+        phone = round(rng.uniform(50, 80), 2)
+        lines.append(
+            _txn(
+                _month_date(start_date, i, 18),
+                "*",
+                "中国移动",
+                f"{i + 1}月话费",
+                [
+                    ("Assets:EWallet:Alipay", f"-{phone:.2f} {currency}"),
+                    ("Expenses:Phone", f"{phone:.2f} {currency}"),
+                ],
+            )
+        )
+
+        for _ in range(entries_per_month):
+            cat_idx = rng.randint(0, len(_FAMILY_CATEGORIES) - 1)
+            account, options = _FAMILY_CATEGORIES[cat_idx]
+            payee, narration = rng.choice(options)
+            pay_method = rng.choice(_FAMILY_PAYMENT_METHODS)
+            amount = round(rng.uniform(20, 500), 2)
+            day = rng.randint(2, 28)
+            lines.append(
+                _txn(
+                    _month_date(start_date, i, day),
+                    "*",
+                    payee,
+                    narration,
+                    [
+                        (pay_method, f"-{amount:.2f} {currency}"),
+                        (account, f"{amount:.2f} {currency}"),
+                    ],
+                )
+            )
+
+        cc_payment = round(rng.uniform(500, 3000), 2)
+        lines.append(
+            _txn(
+                _month_date(start_date, i, 28),
+                "*",
+                "招商银行",
+                "还信用卡",
+                [
+                    ("Assets:Bank:ICBC", f"-{cc_payment:.2f} {currency}"),
+                    ("Liabilities:CreditCard:CMB", f"{cc_payment:.2f} {currency}"),
+                ],
+            )
+        )
 
     return "".join(lines)
 
 
-def _generate_investment() -> str:
+def generate_investment(
+    start_date: str = "2025-01-01",
+    num_months: int = 3,
+    base_currency: str = "CNY",
+    with_usd: bool = True,
+    with_hkd: bool = True,
+) -> str:
+    """Generate a multi-currency investment ledger.
+
+    Args:
+        start_date: 账本起始日期，格式 ``YYYY-MM-DD``。
+        num_months: 生成交易的月份数。
+        base_currency: 本位货币符号。
+        with_usd: 是否包含美元投资账户。
+        with_hkd: 是否包含港币投资账户。
+    """
     lines: list[str] = []
-    lines.append(_header("跨币种投资账本", "CNY"))
+    lines.append(_header("跨币种投资账本", base_currency))
 
     lines.append(_section("币种"))
-    lines.append(_commodity("1970-01-01", "CNY", "人民币"))
-    lines.append(_commodity("1792-01-01", "USD", "美元"))
-    lines.append(_commodity("1999-01-01", "EUR", "欧元"))
-    lines.append(_commodity("1983-01-01", "HKD", "港币"))
-    lines.append(_commodity("2020-01-01", "VOO", "Vanguard S&P 500 ETF"))
-    lines.append(_commodity("2020-01-01", "QQQ", "Invesco QQQ Trust"))
-    lines.append(_commodity("2020-01-01", "TCEHY", "腾讯控股ADR"))
+    lines.append(_commodity("1970-01-01", base_currency, "人民币"))
+    if with_usd:
+        lines.append(_commodity("1792-01-01", "USD", "美元"))
+        lines.append(_commodity("2020-01-01", "VOO", "Vanguard S&P 500 ETF"))
+        lines.append(_commodity("2020-01-01", "QQQ", "Invesco QQQ Trust"))
+        lines.append(_commodity("2020-01-01", "TCEHY", "腾讯控股ADR"))
+    if with_hkd:
+        lines.append(_commodity("1983-01-01", "HKD", "港币"))
 
     lines.append(_section("汇率"))
-    prices = [
-        ("2025-01-01", "USD", "7.30 CNY"),
-        ("2025-01-15", "USD", "7.28 CNY"),
-        ("2025-02-01", "USD", "7.25 CNY"),
-        ("2025-02-15", "USD", "7.27 CNY"),
-        ("2025-03-01", "USD", "7.24 CNY"),
-        ("2025-03-15", "USD", "7.22 CNY"),
-        ("2025-01-01", "EUR", "7.85 CNY"),
-        ("2025-02-01", "EUR", "7.78 CNY"),
-        ("2025-03-01", "EUR", "7.80 CNY"),
-        ("2025-01-01", "HKD", "0.94 CNY"),
-        ("2025-02-01", "HKD", "0.93 CNY"),
-        ("2025-03-01", "HKD", "0.93 CNY"),
-        ("2025-01-01", "VOO", "520.00 USD"),
-        ("2025-01-15", "VOO", "535.00 USD"),
-        ("2025-02-01", "VOO", "540.00 USD"),
-        ("2025-02-15", "VOO", "555.00 USD"),
-        ("2025-03-01", "VOO", "548.00 USD"),
-        ("2025-03-15", "VOO", "560.00 USD"),
-        ("2025-01-01", "QQQ", "500.00 USD"),
-        ("2025-01-15", "QQQ", "515.00 USD"),
-        ("2025-02-01", "QQQ", "525.00 USD"),
-        ("2025-02-15", "QQQ", "530.00 USD"),
-        ("2025-03-01", "QQQ", "518.00 USD"),
-        ("2025-03-15", "QQQ", "535.00 USD"),
-        ("2025-01-01", "TCEHY", "48.00 USD"),
-        ("2025-01-15", "TCEHY", "50.00 USD"),
-        ("2025-02-01", "TCEHY", "52.00 USD"),
-        ("2025-02-15", "TCEHY", "51.00 USD"),
-        ("2025-03-01", "TCEHY", "53.00 USD"),
-        ("2025-03-15", "TCEHY", "55.00 USD"),
-    ]
-    for date, commodity, price in prices:
-        lines.append(_price(date, commodity, price))
+    rng = random.Random(42)
+    if with_usd:
+        usd_rate = 7.30
+        for i in range(num_months):
+            date_str = _month_date(start_date, i, 1)
+            lines.append(_price(date_str, "USD", f"{usd_rate:.2f} {base_currency}"))
+            mid_date = _month_date(start_date, i, 15)
+            usd_rate += round(rng.uniform(-0.05, 0.05), 2)
+            lines.append(_price(mid_date, "USD", f"{usd_rate:.2f} {base_currency}"))
+    if with_hkd:
+        hkd_rate = 0.94
+        for i in range(num_months):
+            date_str = _month_date(start_date, i, 1)
+            lines.append(_price(date_str, "HKD", f"{hkd_rate:.2f} {base_currency}"))
+            hkd_rate += round(rng.uniform(-0.02, 0.02), 2)
 
     lines.append(_section("账户"))
     lines.append(_subsection("资产"))
-    lines.append(_open("2025-01-01", "Assets:Bank:ICBC", "CNY"))
-    lines.append(_open("2025-01-01", "Assets:Brokerage:US", "VOO,QQQ,TCEHY"))
-    lines.append(_open("2025-01-01", "Assets:Brokerage:US:Cash", "USD"))
-    lines.append(_open("2025-01-01", "Assets:Brokerage:HK", "TCEHY"))
-    lines.append(_open("2025-01-01", "Assets:Brokerage:HK:Cash", "HKD"))
+    lines.append(_open(start_date, "Assets:Bank:ICBC", base_currency))
+    if with_usd:
+        lines.append(_open(start_date, "Assets:Brokerage:US", "VOO,QQQ,TCEHY"))
+        lines.append(_open(start_date, "Assets:Brokerage:US:Cash", "USD"))
+    if with_hkd:
+        lines.append(_open(start_date, "Assets:Brokerage:HK:Cash", "HKD"))
 
     lines.append(_subsection("负债"))
-    lines.append(_open("2025-01-01", "Liabilities:CreditCard:CMB", "CNY"))
+    lines.append(_open(start_date, "Liabilities:CreditCard:CMB", base_currency))
 
     lines.append(_subsection("收入"))
-    lines.append(_open("2025-01-01", "Income:Salary", "CNY"))
-    lines.append(_open("2025-01-01", "Income:CapitalGains", "USD"))
-    lines.append(_open("2025-01-01", "Income:Dividend", "USD"))
+    lines.append(_open(start_date, "Income:Salary", base_currency))
+    if with_usd:
+        lines.append(_open(start_date, "Income:CapitalGains", "USD"))
+        lines.append(_open(start_date, "Income:Dividend", "USD"))
 
     lines.append(_subsection("支出"))
-    lines.append(_open("2025-01-01", "Expenses:Financial:Fees", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Financial:Tax", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Housing:Rent", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Food", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Transport", "CNY"))
+    lines.append(_open(start_date, "Expenses:Financial:Fees", base_currency))
+    lines.append(_open(start_date, "Expenses:Financial:Tax", base_currency))
+    lines.append(_open(start_date, "Expenses:Housing:Rent", base_currency))
+    lines.append(_open(start_date, "Expenses:Food", base_currency))
+    lines.append(_open(start_date, "Expenses:Transport", base_currency))
 
     lines.append(_subsection("权益"))
-    lines.append(_open("2025-01-01", "Equity:Opening-Balances"))
+    lines.append(_open(start_date, "Equity:Opening-Balances"))
 
     lines.append(_section("初始余额"))
     lines.append(
         _txn(
-            "2025-01-01",
+            start_date,
             "*",
             "期初余额",
             "银行账户初始余额",
             [
-                ("Assets:Bank:ICBC", "200000.00 CNY"),
-                ("Equity:Opening-Balances", "-200000.00 CNY"),
+                ("Assets:Bank:ICBC", f"200000.00 {base_currency}"),
+                ("Equity:Opening-Balances", f"-200000.00 {base_currency}"),
             ],
         )
     )
-    lines.append(
-        _txn(
-            "2025-01-01",
-            "*",
-            "期初余额",
-            "美股账户现金初始余额",
-            [
-                ("Assets:Brokerage:US:Cash", "10000.00 USD"),
-                ("Equity:Opening-Balances", "-10000.00 USD"),
-            ],
+    if with_usd:
+        lines.append(
+            _txn(
+                start_date,
+                "*",
+                "期初余额",
+                "美股账户现金初始余额",
+                [
+                    ("Assets:Brokerage:US:Cash", "10000.00 USD"),
+                    ("Equity:Opening-Balances", "-10000.00 USD"),
+                ],
+            )
         )
-    )
-    lines.append(
-        _txn(
-            "2025-01-01",
-            "*",
-            "期初余额",
-            "港股账户现金初始余额",
-            [
-                ("Assets:Brokerage:HK:Cash", "50000.00 HKD"),
-                ("Equity:Opening-Balances", "-50000.00 HKD"),
-            ],
+    if with_hkd:
+        lines.append(
+            _txn(
+                start_date,
+                "*",
+                "期初余额",
+                "港股账户现金初始余额",
+                [
+                    ("Assets:Brokerage:HK:Cash", "50000.00 HKD"),
+                    ("Equity:Opening-Balances", "-50000.00 HKD"),
+                ],
+            )
         )
-    )
 
     lines.append(_section("工资与生活支出"))
-    lines.append(
-        _txn(
-            "2025-01-05",
-            "*",
-            "某科技公司",
-            "1月工资",
-            [
-                ("Assets:Bank:ICBC", "30000.00 CNY"),
-                ("Income:Salary", "-30000.00 CNY"),
-            ],
+    for i in range(num_months):
+        lines.append(
+            _txn(
+                _month_date(start_date, i, 5),
+                "*",
+                "某科技公司",
+                f"{i + 1}月工资",
+                [
+                    ("Assets:Bank:ICBC", f"30000.00 {base_currency}"),
+                    ("Income:Salary", f"-30000.00 {base_currency}"),
+                ],
+            )
         )
-    )
-    lines.append(
-        _txn(
-            "2025-01-05",
-            "*",
-            "房东",
-            "1月房租",
-            [
-                ("Assets:Bank:ICBC", "-6000.00 CNY"),
-                ("Expenses:Housing:Rent", "6000.00 CNY"),
-            ],
+        lines.append(
+            _txn(
+                _month_date(start_date, i, 5),
+                "*",
+                "房东",
+                f"{i + 1}月房租",
+                [
+                    ("Assets:Bank:ICBC", f"-6000.00 {base_currency}"),
+                    ("Expenses:Housing:Rent", f"6000.00 {base_currency}"),
+                ],
+            )
         )
-    )
-    lines.append(
-        _txn(
-            "2025-02-05",
-            "*",
-            "某科技公司",
-            "2月工资",
-            [
-                ("Assets:Bank:ICBC", "30000.00 CNY"),
-                ("Income:Salary", "-30000.00 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-02-05",
-            "*",
-            "房东",
-            "2月房租",
-            [
-                ("Assets:Bank:ICBC", "-6000.00 CNY"),
-                ("Expenses:Housing:Rent", "6000.00 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-03-05",
-            "*",
-            "某科技公司",
-            "3月工资",
-            [
-                ("Assets:Bank:ICBC", "30000.00 CNY"),
-                ("Income:Salary", "-30000.00 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-03-05",
-            "*",
-            "房东",
-            "3月房租",
-            [
-                ("Assets:Bank:ICBC", "-6000.00 CNY"),
-                ("Expenses:Housing:Rent", "6000.00 CNY"),
-            ],
-        )
-    )
 
     lines.append(_section("购汇与跨境转账"))
-    lines.append(
-        _txn(
-            "2025-01-10",
-            "*",
-            "工商银行",
-            "购汇20000美元转入美股账户",
-            [
-                ("Assets:Brokerage:US:Cash", "20000.00 USD @ 7.30 CNY"),
-                ("Assets:Bank:ICBC", "-146000.00 CNY"),
-            ],
+    if with_usd:
+        for i in range(min(num_months, 2)):
+            amount_usd = 20000 if i == 0 else 15000
+            rate = 7.30 + i * 0.02
+            lines.append(
+                _txn(
+                    _month_date(start_date, i, 10),
+                    "*",
+                    "工商银行",
+                    "购汇转入美股账户",
+                    [
+                        (
+                            "Assets:Brokerage:US:Cash",
+                            f"{amount_usd}.00 USD @ {rate:.2f} {base_currency}",
+                        ),
+                        (
+                            "Assets:Bank:ICBC",
+                            f"-{amount_usd * rate:.2f} {base_currency}",
+                        ),
+                    ],
+                )
+            )
+            lines.append(
+                _txn(
+                    _month_date(start_date, i, 10),
+                    "*",
+                    "工商银行",
+                    "购汇手续费",
+                    [
+                        ("Assets:Bank:ICBC", f"-200.00 {base_currency}"),
+                        ("Expenses:Financial:Fees", f"200.00 {base_currency}"),
+                    ],
+                )
+            )
+    if with_hkd:
+        lines.append(
+            _txn(
+                _month_date(start_date, 1, 10),
+                "*",
+                "工商银行",
+                "购汇转入港股账户",
+                [
+                    (
+                        "Assets:Brokerage:HK:Cash",
+                        f"50000.00 HKD @ 0.93 {base_currency}",
+                    ),
+                    ("Assets:Bank:ICBC", f"-46500.00 {base_currency}"),
+                ],
+            )
         )
-    )
-    lines.append(
-        _txn(
-            "2025-02-10",
-            "*",
-            "工商银行",
-            "购汇50000港币转入港股账户",
-            [
-                ("Assets:Brokerage:HK:Cash", "50000.00 HKD @ 0.93 CNY"),
-                ("Assets:Bank:ICBC", "-46500.00 CNY"),
-            ],
+        lines.append(
+            _txn(
+                _month_date(start_date, 1, 10),
+                "*",
+                "工商银行",
+                "购汇手续费",
+                [
+                    ("Assets:Bank:ICBC", f"-100.00 {base_currency}"),
+                    ("Expenses:Financial:Fees", f"100.00 {base_currency}"),
+                ],
+            )
         )
-    )
 
-    lines.append(_section("美股投资"))
-    lines.append(
-        _txn(
-            "2025-01-15",
-            "*",
-            "券商",
-            "买入VOO",
-            [
-                ("Assets:Brokerage:US", "20 VOO {535.00 USD}"),
-                ("Assets:Brokerage:US:Cash", "-10700.00 USD"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-01-20",
-            "*",
-            "券商",
-            "买入QQQ",
-            [
-                ("Assets:Brokerage:US", "15 QQQ {515.00 USD}"),
-                ("Assets:Brokerage:US:Cash", "-7725.00 USD"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-02-20",
-            "*",
-            "券商",
-            "加仓VOO",
-            [
-                ("Assets:Brokerage:US", "10 VOO {555.00 USD}"),
-                ("Assets:Brokerage:US:Cash", "-5550.00 USD"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-03-10",
-            "*",
-            "券商",
-            "卖出QQQ",
-            [
-                ("Assets:Brokerage:US:Cash", "7770.00 USD"),
-                ("Assets:Brokerage:US", "-15 QQQ {515.00 USD}"),
-                ("Income:CapitalGains", "-45.00 USD"),
-            ],
-        )
-    )
+    if with_usd:
+        lines.append(_section("美股投资"))
+        voo_price = 520.0
+        qqq_price = 500.0
+        for i in range(num_months):
+            voo_price += round(rng.uniform(-10, 20), 2)
+            qqq_price += round(rng.uniform(-8, 15), 2)
+            if i % 2 == 0:
+                lines.append(
+                    _txn(
+                        _month_date(start_date, i, 15),
+                        "*",
+                        "券商",
+                        "买入VOO",
+                        [
+                            (
+                                "Assets:Brokerage:US",
+                                f"10 VOO {{{voo_price:.2f} USD}}",
+                            ),
+                            (
+                                "Assets:Brokerage:US:Cash",
+                                f"-{voo_price * 10:.2f} USD",
+                            ),
+                        ],
+                    )
+                )
+            else:
+                lines.append(
+                    _txn(
+                        _month_date(start_date, i, 15),
+                        "*",
+                        "券商",
+                        "买入QQQ",
+                        [
+                            (
+                                "Assets:Brokerage:US",
+                                f"5 QQQ {{{qqq_price:.2f} USD}}",
+                            ),
+                            (
+                                "Assets:Brokerage:US:Cash",
+                                f"-{qqq_price * 5:.2f} USD",
+                            ),
+                        ],
+                    )
+                )
 
-    lines.append(_section("中概股投资"))
-    lines.append(
-        _txn(
-            "2025-01-20",
-            "*",
-            "券商",
-            "买入腾讯ADR",
-            [
-                ("Assets:Brokerage:US", "200 TCEHY {48.00 USD}"),
-                ("Assets:Brokerage:US:Cash", "-9600.00 USD"),
-            ],
+        lines.append(_section("分红"))
+        lines.append(
+            _txn(
+                _month_date(start_date, num_months - 1, 15),
+                "*",
+                "券商",
+                "VOO分红",
+                [
+                    ("Assets:Brokerage:US:Cash", "60.00 USD"),
+                    ("Income:Dividend", "-60.00 USD"),
+                ],
+            )
         )
-    )
-
-    lines.append(_section("分红"))
-    lines.append(
-        _txn(
-            "2025-03-15",
-            "*",
-            "券商",
-            "VOO分红",
-            [
-                ("Assets:Brokerage:US:Cash", "60.00 USD"),
-                ("Income:Dividend", "-60.00 USD"),
-            ],
-        )
-    )
-
-    lines.append(_section("手续费"))
-    lines.append(
-        _txn(
-            "2025-01-10",
-            "*",
-            "工商银行",
-            "购汇手续费",
-            [
-                ("Assets:Bank:ICBC", "-200.00 CNY"),
-                ("Expenses:Financial:Fees", "200.00 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-02-10",
-            "*",
-            "工商银行",
-            "购汇手续费",
-            [
-                ("Assets:Bank:ICBC", "-100.00 CNY"),
-                ("Expenses:Financial:Fees", "100.00 CNY"),
-            ],
-        )
-    )
 
     return "".join(lines)
 
 
-def _generate_enterprise() -> str:
+def generate_enterprise(
+    start_date: str = "2025-01-01",
+    num_months: int = 3,
+    currency: str = "CNY",
+) -> str:
+    """Generate an enterprise accounting ledger.
+
+    Args:
+        start_date: 账本起始日期，格式 ``YYYY-MM-DD``。
+        num_months: 生成交易的月份数。
+        currency: 本位货币符号。
+    """
     lines: list[str] = []
-    lines.append(_header("企业核算账本", "CNY"))
+    lines.append(_header("企业核算账本", currency))
 
     lines.append(_section("币种"))
-    lines.append(_commodity("1970-01-01", "CNY", "人民币"))
+    lines.append(_commodity("1970-01-01", currency, "人民币"))
 
     lines.append(_section("账户"))
     lines.append(_subsection("资产"))
-    lines.append(_open("2025-01-01", "Assets:Current:Bank:ICBC", "CNY"))
-    lines.append(_open("2025-01-01", "Assets:Current:Cash", "CNY"))
-    lines.append(_open("2025-01-01", "Assets:Current:AccountsReceivable", "CNY"))
-    lines.append(_open("2025-01-01", "Assets:Current:Inventory", "CNY"))
-    lines.append(_open("2025-01-01", "Assets:Fixed:Equipment", "CNY"))
-    lines.append(_open("2025-01-01", "Assets:Fixed:Vehicles", "CNY"))
+    lines.append(_open(start_date, "Assets:Current:Bank:ICBC", currency))
+    lines.append(_open(start_date, "Assets:Current:Cash", currency))
+    lines.append(_open(start_date, "Assets:Current:AccountsReceivable", currency))
+    lines.append(_open(start_date, "Assets:Current:Inventory", currency))
+    lines.append(_open(start_date, "Assets:Fixed:Equipment", currency))
+    lines.append(_open(start_date, "Assets:Fixed:Vehicles", currency))
 
     lines.append(_subsection("负债"))
-    lines.append(_open("2025-01-01", "Liabilities:Current:AccountsPayable", "CNY"))
-    lines.append(_open("2025-01-01", "Liabilities:Current:SalaryPayable", "CNY"))
-    lines.append(_open("2025-01-01", "Liabilities:Current:TaxPayable:VAT", "CNY"))
-    lines.append(_open("2025-01-01", "Liabilities:Current:TaxPayable:IncomeTax", "CNY"))
-    lines.append(_open("2025-01-01", "Liabilities:Current:SocialInsurance", "CNY"))
-    lines.append(_open("2025-01-01", "Liabilities:NonCurrent:BankLoan", "CNY"))
+    lines.append(_open(start_date, "Liabilities:Current:AccountsPayable", currency))
+    lines.append(_open(start_date, "Liabilities:Current:SalaryPayable", currency))
+    lines.append(_open(start_date, "Liabilities:Current:TaxPayable:VAT", currency))
+    lines.append(
+        _open(start_date, "Liabilities:Current:TaxPayable:IncomeTax", currency)
+    )
+    lines.append(_open(start_date, "Liabilities:Current:SocialInsurance", currency))
+    lines.append(_open(start_date, "Liabilities:NonCurrent:BankLoan", currency))
 
     lines.append(_subsection("收入"))
-    lines.append(_open("2025-01-01", "Income:Operating:Sales", "CNY"))
-    lines.append(_open("2025-01-01", "Income:Other:Service", "CNY"))
+    lines.append(_open(start_date, "Income:Operating:Sales", currency))
+    lines.append(_open(start_date, "Income:Other:Service", currency))
 
     lines.append(_subsection("支出"))
-    lines.append(_open("2025-01-01", "Expenses:Operating:COGS", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Operating:Salary", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Operating:SocialInsurance", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Operating:Rent", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Operating:Utilities", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Operating:Depreciation", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Selling:Advertising", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Selling:Commission", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Admin:Office", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Admin:Travel", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Financial:Interest", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Tax:IncomeTax", "CNY"))
-    lines.append(_open("2025-01-01", "Expenses:Tax:VAT", "CNY"))
+    lines.append(_open(start_date, "Expenses:Operating:COGS", currency))
+    lines.append(_open(start_date, "Expenses:Operating:Salary", currency))
+    lines.append(_open(start_date, "Expenses:Operating:SocialInsurance", currency))
+    lines.append(_open(start_date, "Expenses:Operating:Rent", currency))
+    lines.append(_open(start_date, "Expenses:Operating:Utilities", currency))
+    lines.append(_open(start_date, "Expenses:Operating:Depreciation", currency))
+    lines.append(_open(start_date, "Expenses:Selling:Advertising", currency))
+    lines.append(_open(start_date, "Expenses:Selling:Commission", currency))
+    lines.append(_open(start_date, "Expenses:Admin:Office", currency))
+    lines.append(_open(start_date, "Expenses:Admin:Travel", currency))
+    lines.append(_open(start_date, "Expenses:Financial:Interest", currency))
+    lines.append(_open(start_date, "Expenses:Tax:IncomeTax", currency))
+    lines.append(_open(start_date, "Expenses:Tax:VAT", currency))
 
     lines.append(_subsection("权益"))
-    lines.append(_open("2025-01-01", "Equity:Opening-Balances"))
-    lines.append(_open("2025-01-01", "Equity:RetainedEarnings"))
+    lines.append(_open(start_date, "Equity:Opening-Balances"))
+    lines.append(_open(start_date, "Equity:RetainedEarnings"))
 
     lines.append(_section("初始余额"))
     lines.append(
         _txn(
-            "2025-01-01",
+            start_date,
             "*",
             "期初余额",
             "银行存款初始余额",
             [
-                ("Assets:Current:Bank:ICBC", "500000.00 CNY"),
-                ("Equity:Opening-Balances", "-500000.00 CNY"),
+                ("Assets:Current:Bank:ICBC", f"500000.00 {currency}"),
+                ("Equity:Opening-Balances", f"-500000.00 {currency}"),
             ],
         )
     )
     lines.append(
         _txn(
-            "2025-01-01",
+            start_date,
             "*",
             "期初余额",
             "库存现金初始余额",
             [
-                ("Assets:Current:Cash", "5000.00 CNY"),
-                ("Equity:Opening-Balances", "-5000.00 CNY"),
+                ("Assets:Current:Cash", f"5000.00 {currency}"),
+                ("Equity:Opening-Balances", f"-5000.00 {currency}"),
             ],
         )
     )
     lines.append(
         _txn(
-            "2025-01-01",
+            start_date,
             "*",
             "期初余额",
             "存货初始余额",
             [
-                ("Assets:Current:Inventory", "200000.00 CNY"),
-                ("Equity:Opening-Balances", "-200000.00 CNY"),
+                ("Assets:Current:Inventory", f"200000.00 {currency}"),
+                ("Equity:Opening-Balances", f"-200000.00 {currency}"),
             ],
         )
     )
     lines.append(
         _txn(
-            "2025-01-01",
+            start_date,
             "*",
             "期初余额",
             "固定资产初始余额",
             [
-                ("Assets:Fixed:Equipment", "300000.00 CNY"),
-                ("Equity:Opening-Balances", "-300000.00 CNY"),
+                ("Assets:Fixed:Equipment", f"300000.00 {currency}"),
+                ("Equity:Opening-Balances", f"-300000.00 {currency}"),
             ],
         )
     )
     lines.append(
         _txn(
-            "2025-01-01",
+            start_date,
             "*",
             "期初余额",
             "银行贷款初始余额",
             [
-                ("Liabilities:NonCurrent:BankLoan", "-1000000.00 CNY"),
-                ("Equity:Opening-Balances", "1000000.00 CNY"),
+                ("Liabilities:NonCurrent:BankLoan", f"-1000000.00 {currency}"),
+                ("Equity:Opening-Balances", f"1000000.00 {currency}"),
             ],
         )
     )
     lines.append(
         _txn(
-            "2025-01-01",
+            start_date,
             "*",
             "期初余额",
             "应付账款初始余额",
             [
-                ("Liabilities:Current:AccountsPayable", "-80000.00 CNY"),
-                ("Equity:Opening-Balances", "80000.00 CNY"),
+                ("Liabilities:Current:AccountsPayable", f"-80000.00 {currency}"),
+                ("Equity:Opening-Balances", f"80000.00 {currency}"),
             ],
         )
     )
 
-    lines.append(_section("1月业务"))
-    lines.append(
-        _txn(
-            "2025-01-05",
-            "*",
-            "客户A",
-            "销售商品收入",
-            [
-                ("Assets:Current:AccountsReceivable", "150000.00 CNY"),
-                ("Income:Operating:Sales", "-132743.36 CNY"),
-                ("Expenses:Tax:VAT", "-17256.64 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-01-08",
-            "*",
-            "供应商甲",
-            "采购原材料",
-            [
-                ("Expenses:Operating:COGS", "85000.00 CNY"),
-                ("Expenses:Tax:VAT", "11050.00 CNY"),
-                ("Liabilities:Current:AccountsPayable", "-96050.00 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-01-10",
-            "*",
-            "人力资源部",
-            "1月工资发放",
-            [
-                ("Expenses:Operating:Salary", "120000.00 CNY"),
-                ("Expenses:Operating:SocialInsurance", "35000.00 CNY"),
-                ("Assets:Current:Bank:ICBC", "-155000.00 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-01-12",
-            "*",
-            "客户A",
-            "收到货款",
-            [
-                ("Assets:Current:Bank:ICBC", "150000.00 CNY"),
-                ("Assets:Current:AccountsReceivable", "-150000.00 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-01-15",
-            "*",
-            "供应商甲",
-            "支付货款",
-            [
-                ("Liabilities:Current:AccountsPayable", "80000.00 CNY"),
-                ("Assets:Current:Bank:ICBC", "-80000.00 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-01-15",
-            "*",
-            "物业公司",
-            "1月办公室租金",
-            [
-                ("Expenses:Operating:Rent", "25000.00 CNY"),
-                ("Assets:Current:Bank:ICBC", "-25000.00 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-01-18",
-            "*",
-            "国家电网",
-            "1月电费",
-            [
-                ("Expenses:Operating:Utilities", "8500.00 CNY"),
-                ("Assets:Current:Bank:ICBC", "-8500.00 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-01-20",
-            "*",
-            "广告公司",
-            "1月广告投放",
-            [
-                ("Expenses:Selling:Advertising", "30000.00 CNY"),
-                ("Assets:Current:Bank:ICBC", "-30000.00 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-01-25",
-            "*",
-            "银行",
-            "1月贷款利息",
-            [
-                ("Expenses:Financial:Interest", "4500.00 CNY"),
-                ("Assets:Current:Bank:ICBC", "-4500.00 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-01-31",
-            "*",
-            "财务部",
-            "1月固定资产折旧",
-            [
-                ("Expenses:Operating:Depreciation", "5000.00 CNY"),
-                ("Assets:Fixed:Equipment", "-5000.00 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-01-31",
-            "*",
-            "行政部",
-            "1月办公用品",
-            [
-                ("Expenses:Admin:Office", "3200.00 CNY"),
-                ("Assets:Current:Cash", "-3200.00 CNY"),
-            ],
-        )
-    )
+    lines.append(_section("月度业务"))
+    rng = random.Random(42)
 
-    lines.append(_section("2月业务"))
-    lines.append(
-        _txn(
-            "2025-02-05",
-            "*",
-            "客户B",
-            "销售商品收入",
-            [
-                ("Assets:Current:Bank:ICBC", "180000.00 CNY"),
-                ("Income:Operating:Sales", "-159292.04 CNY"),
-                ("Expenses:Tax:VAT", "-20707.96 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-02-08",
-            "*",
-            "供应商乙",
-            "采购原材料",
-            [
-                ("Expenses:Operating:COGS", "95000.00 CNY"),
-                ("Expenses:Tax:VAT", "12350.00 CNY"),
-                ("Assets:Current:Bank:ICBC", "-107350.00 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-02-10",
-            "*",
-            "人力资源部",
-            "2月工资发放",
-            [
-                ("Expenses:Operating:Salary", "125000.00 CNY"),
-                ("Expenses:Operating:SocialInsurance", "36000.00 CNY"),
-                ("Assets:Current:Bank:ICBC", "-161000.00 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-02-12",
-            "*",
-            "客户C",
-            "技术服务收入",
-            [
-                ("Assets:Current:Bank:ICBC", "50000.00 CNY"),
-                ("Income:Other:Service", "-47169.81 CNY"),
-                ("Expenses:Tax:VAT", "-2830.19 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-02-15",
-            "*",
-            "物业公司",
-            "2月办公室租金",
-            [
-                ("Expenses:Operating:Rent", "25000.00 CNY"),
-                ("Assets:Current:Bank:ICBC", "-25000.00 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-02-18",
-            "*",
-            "销售人员",
-            "2月销售提成",
-            [
-                ("Expenses:Selling:Commission", "15000.00 CNY"),
-                ("Assets:Current:Bank:ICBC", "-15000.00 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-02-20",
-            "*",
-            "员工出差",
-            "差旅费报销",
-            [
-                ("Expenses:Admin:Travel", "8500.00 CNY"),
-                ("Assets:Current:Bank:ICBC", "-8500.00 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-02-25",
-            "*",
-            "银行",
-            "2月贷款利息",
-            [
-                ("Expenses:Financial:Interest", "4500.00 CNY"),
-                ("Assets:Current:Bank:ICBC", "-4500.00 CNY"),
-            ],
-        )
-    )
-    lines.append(
-        _txn(
-            "2025-02-28",
-            "*",
-            "财务部",
-            "2月固定资产折旧",
-            [
-                ("Expenses:Operating:Depreciation", "5000.00 CNY"),
-                ("Assets:Fixed:Equipment", "-5000.00 CNY"),
-            ],
-        )
-    )
+    for i in range(num_months):
+        sales = round(rng.uniform(120000, 250000), 2)
+        lines.append(f"\n\n*** {_month_date(start_date, i, 1)[:7]}月\n\n")
 
-    lines.append(_section("3月业务"))
-    lines.append(
-        _txn(
-            "2025-03-05",
-            "*",
-            "客户D",
-            "销售商品收入",
-            [
-                ("Assets:Current:Bank:ICBC", "220000.00 CNY"),
-                ("Income:Operating:Sales", "-194690.27 CNY"),
-                ("Expenses:Tax:VAT", "-25309.73 CNY"),
-            ],
+        lines.append(
+            _txn(
+                _month_date(start_date, i, 5),
+                "*",
+                f"客户{chr(ord('A') + i)}",
+                "销售商品收入",
+                [
+                    (
+                        "Assets:Current:Bank:ICBC",
+                        f"{sales:.2f} {currency}",
+                    ),
+                    (
+                        "Income:Operating:Sales",
+                        f"{-sales * 0.885:.2f} {currency}",
+                    ),
+                    (
+                        "Expenses:Tax:VAT",
+                        f"{-sales * 0.115:.2f} {currency}",
+                    ),
+                ],
+            )
         )
-    )
-    lines.append(
-        _txn(
-            "2025-03-08",
-            "*",
-            "供应商甲",
-            "采购原材料",
-            [
-                ("Expenses:Operating:COGS", "110000.00 CNY"),
-                ("Expenses:Tax:VAT", "14300.00 CNY"),
-                ("Liabilities:Current:AccountsPayable", "-124300.00 CNY"),
-            ],
+
+        cogs = round(sales * 0.55, 2)
+        lines.append(
+            _txn(
+                _month_date(start_date, i, 8),
+                "*",
+                f"供应商{chr(ord('甲') + i)}",
+                "采购原材料",
+                [
+                    ("Expenses:Operating:COGS", f"{cogs * 0.885:.2f} {currency}"),
+                    ("Expenses:Tax:VAT", f"{cogs * 0.115:.2f} {currency}"),
+                    (
+                        "Liabilities:Current:AccountsPayable", f"{-cogs:.2f} {currency}"),
+                ],
+            )
         )
-    )
-    lines.append(
-        _txn(
-            "2025-03-10",
-            "*",
-            "人力资源部",
-            "3月工资发放",
-            [
-                ("Expenses:Operating:Salary", "130000.00 CNY"),
-                ("Expenses:Operating:SocialInsurance", "37000.00 CNY"),
-                ("Assets:Current:Bank:ICBC", "-167000.00 CNY"),
-            ],
+
+        salary = round(rng.uniform(110000, 140000), 2)
+        social = round(salary * 0.28, 2)
+        lines.append(
+            _txn(
+                _month_date(start_date, i, 10),
+                "*",
+                "人力资源部",
+                f"{i + 1}月工资发放",
+                [
+                    ("Expenses:Operating:Salary", f"{salary:.2f} {currency}"),
+                    (
+                        "Expenses:Operating:SocialInsurance",
+                        f"{social:.2f} {currency}",
+                    ),
+                    (
+                        "Assets:Current:Bank:ICBC",
+                        f"{-salary - social:.2f} {currency}",
+                    ),
+                ],
+            )
         )
-    )
-    lines.append(
-        _txn(
-            "2025-03-15",
-            "*",
-            "供应商甲",
-            "支付货款",
-            [
-                ("Liabilities:Current:AccountsPayable", "124300.00 CNY"),
-                ("Assets:Current:Bank:ICBC", "-124300.00 CNY"),
-            ],
+
+        lines.append(
+            _txn(
+                _month_date(start_date, i, 15),
+                "*",
+                "物业公司",
+                f"{i + 1}月办公室租金",
+                [
+                    ("Expenses:Operating:Rent", f"25000.00 {currency}"),
+                    ("Assets:Current:Bank:ICBC", f"-25000.00 {currency}"),
+                ],
+            )
         )
-    )
-    lines.append(
-        _txn(
-            "2025-03-20",
-            "*",
-            "银行",
-            "偿还部分贷款",
-            [
-                ("Liabilities:NonCurrent:BankLoan", "200000.00 CNY"),
-                ("Assets:Current:Bank:ICBC", "-200000.00 CNY"),
-            ],
+
+        utilities = round(rng.uniform(7000, 12000), 2)
+        lines.append(
+            _txn(
+                _month_date(start_date, i, 18),
+                "*",
+                "国家电网",
+                f"{i + 1}月电费",
+                [
+                    ("Expenses:Operating:Utilities", f"{utilities:.2f} {currency}"),
+                    (
+                        "Assets:Current:Bank:ICBC",
+                        f"-{utilities:.2f} {currency}",
+                    ),
+                ],
+            )
         )
-    )
-    lines.append(
-        _txn(
-            "2025-03-25",
-            "*",
-            "银行",
-            "3月贷款利息",
-            [
-                ("Expenses:Financial:Interest", "3600.00 CNY"),
-                ("Assets:Current:Bank:ICBC", "-3600.00 CNY"),
-            ],
+
+        if i % 2 == 0:
+            advertising = round(rng.uniform(20000, 40000), 2)
+            lines.append(
+                _txn(
+                    _month_date(start_date, i, 20),
+                    "*",
+                    "广告公司",
+                    "广告投放",
+                    [
+                        (
+                            "Expenses:Selling:Advertising",
+                            f"{advertising:.2f} {currency}",
+                        ),
+                        (
+                            "Assets:Current:Bank:ICBC",
+                            f"-{advertising:.2f} {currency}",
+                        ),
+                    ],
+                )
+            )
+
+        if i == 1:
+            travel = round(rng.uniform(5000, 10000), 2)
+            lines.append(
+                _txn(
+                    _month_date(start_date, i, 20),
+                    "*",
+                    "员工出差",
+                    "差旅费报销",
+                    [
+                        ("Expenses:Admin:Travel", f"{travel:.2f} {currency}"),
+                        (
+                            "Assets:Current:Bank:ICBC",
+                            f"-{travel:.2f} {currency}",
+                        ),
+                    ],
+                )
+            )
+
+        interest = round(rng.uniform(3500, 4500), 2)
+        lines.append(
+            _txn(
+                _month_date(start_date, i, 25),
+                "*",
+                "银行",
+                f"{i + 1}月贷款利息",
+                [
+                    ("Expenses:Financial:Interest", f"{interest:.2f} {currency}"),
+                    ("Assets:Current:Bank:ICBC", f"-{interest:.2f} {currency}"),
+                ],
+            )
         )
-    )
-    lines.append(
-        _txn(
-            "2025-03-31",
-            "*",
-            "财务部",
-            "3月固定资产折旧",
-            [
-                ("Expenses:Operating:Depreciation", "5000.00 CNY"),
-                ("Assets:Fixed:Equipment", "-5000.00 CNY"),
-            ],
+
+        lines.append(
+            _txn(
+                _month_date(start_date, i, 28),
+                "*",
+                "供应商",
+                "支付货款",
+                [
+                    (
+                        "Liabilities:Current:AccountsPayable",
+                        f"{cogs * 0.8:.2f} {currency}",
+                    ),
+                    (
+                        "Assets:Current:Bank:ICBC",
+                        f"{-cogs * 0.8:.2f} {currency}",
+                    ),
+                ],
+            )
         )
-    )
+
+        lines.append(
+            _txn(
+                _month_date(start_date, i, 28),
+                "*",
+                "财务部",
+                f"{i + 1}月固定资产折旧",
+                [
+                    ("Expenses:Operating:Depreciation", f"5000.00 {currency}"),
+                    ("Assets:Fixed:Equipment", f"-5000.00 {currency}"),
+                ],
+            )
+        )
 
     return "".join(lines)
 
@@ -1024,12 +984,6 @@ _TEMPLATES: dict[str, tuple[str, str]] = {
     "family": ("极简家庭账本", "example-family.beancount"),
     "investment": ("跨币种投资账本", "example-investment.beancount"),
     "enterprise": ("企业核算账本", "example-enterprise.beancount"),
-}
-
-_GENERATORS: dict[str, object] = {
-    "family": _generate_family,
-    "investment": _generate_investment,
-    "enterprise": _generate_enterprise,
 }
 
 
@@ -1049,7 +1003,58 @@ _GENERATORS: dict[str, object] = {
     show_default=True,
     help="输出目录",
 )
-def main(*, template: str, output: str) -> None:
+@click.option(
+    "-s",
+    "--start-date",
+    default="2025-01-01",
+    show_default=True,
+    help="账本起始日期（YYYY-MM-DD）",
+)
+@click.option(
+    "-m",
+    "--months",
+    type=int,
+    default=3,
+    show_default=True,
+    help="生成交易的月份数",
+)
+@click.option(
+    "-c",
+    "--currency",
+    default="CNY",
+    show_default=True,
+    help="本位货币符号",
+)
+@click.option(
+    "--entries-per-month",
+    type=int,
+    default=8,
+    show_default=True,
+    help="家庭模板：每月日常交易笔数",
+)
+@click.option(
+    "--with-usd/--no-with-usd",
+    default=True,
+    show_default=True,
+    help="投资模板：是否包含美元投资账户",
+)
+@click.option(
+    "--with-hkd/--no-with-hkd",
+    default=True,
+    show_default=True,
+    help="投资模板：是否包含港币投资账户",
+)
+def main(
+    *,
+    template: str,
+    output: str,
+    start_date: str,
+    months: int,
+    currency: str,
+    entries_per_month: int,
+    with_usd: bool,
+    with_hkd: bool,
+) -> None:
     r"""基于场景模板生成 Fava 示例账本文件.
 
     支持三种场景模板：
@@ -1060,8 +1065,28 @@ def main(*, template: str, output: str) -> None:
     - enterprise: 企业核算账本（CNY，营收、成本、税费、贷款）
     """
     label, filename = _TEMPLATES[template]
-    generator = _GENERATORS[template]
-    content = generator()
+
+    if template == "family":
+        content = generate_family(
+            start_date=start_date,
+            num_months=months,
+            currency=currency,
+            entries_per_month=entries_per_month,
+        )
+    elif template == "investment":
+        content = generate_investment(
+            start_date=start_date,
+            num_months=months,
+            base_currency=currency,
+            with_usd=with_usd,
+            with_hkd=with_hkd,
+        )
+    else:
+        content = generate_enterprise(
+            start_date=start_date,
+            num_months=months,
+            currency=currency,
+        )
 
     output_dir = Path(output)
     output_dir.mkdir(parents=True, exist_ok=True)
