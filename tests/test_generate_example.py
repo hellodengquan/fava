@@ -5,9 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING
 
-import pytest
 from click.testing import CliRunner
 
 from fava.generate_example import _month_date
@@ -15,9 +13,6 @@ from fava.generate_example import generate_enterprise
 from fava.generate_example import generate_family
 from fava.generate_example import generate_investment
 from fava.generate_example import main
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 
 def _count_txns(content: str) -> int:
@@ -140,6 +135,22 @@ class TestGenerateInvestment:
         content = generate_investment()
         assert "VOO {" in content
 
+    def test_transaction_tags_present(self) -> None:
+        content = generate_investment()
+        assert "#salary #recurring" in content
+        assert "#rent #recurring" in content
+        assert "#fx #usd" in content
+        assert "#fees #fx" in content
+        assert "#fx #hkd" in content
+        assert "#buy #voo #equity" in content
+        assert "#buy #qqq #equity" in content
+        assert "#dividend #voo" in content
+
+    def test_tags_count_matches_txns(self) -> None:
+        content = generate_investment()
+        tag_count = len(re.findall(r" #[\w#-]+$", content, re.MULTILINE))
+        assert tag_count >= 10
+
 
 class TestGenerateEnterprise:
     def test_basic_structure(self) -> None:
@@ -161,7 +172,8 @@ class TestGenerateEnterprise:
 
     def test_custom_months(self) -> None:
         content = generate_enterprise(num_months=6)
-        assert _count_txns(content) > _count_txns(generate_enterprise(num_months=2))
+        baseline = generate_enterprise(num_months=2)
+        assert _count_txns(content) > _count_txns(baseline)
 
     def test_custom_currency(self) -> None:
         content = generate_enterprise(currency="EUR")
@@ -254,7 +266,8 @@ class TestCli:
                 ["-t", "investment", "-o", tmpdir, "--no-with-usd"],
             )
             assert result.exit_code == 0
-            content = (Path(tmpdir) / "example-investment.beancount").read_text()
+            beanpath = Path(tmpdir) / "example-investment.beancount"
+            content = beanpath.read_text()
             assert "VOO" not in content
 
     def test_entries_per_month_flag(self) -> None:
@@ -262,7 +275,14 @@ class TestCli:
         with TemporaryDirectory() as tmpdir_small:
             runner.invoke(
                 main,
-                ["-t", "family", "-o", tmpdir_small, "--entries-per-month", "2"],
+                [
+                    "-t",
+                    "family",
+                    "-o",
+                    tmpdir_small,
+                    "--entries-per-month",
+                    "2",
+                ],
             )
             small_content = (
                 Path(tmpdir_small) / "example-family.beancount"
@@ -271,10 +291,90 @@ class TestCli:
         with TemporaryDirectory() as tmpdir_large:
             runner.invoke(
                 main,
-                ["-t", "family", "-o", tmpdir_large, "--entries-per-month", "20"],
+                [
+                    "-t",
+                    "family",
+                    "-o",
+                    tmpdir_large,
+                    "--entries-per-month",
+                    "20",
+                ],
             )
             large_content = (
                 Path(tmpdir_large) / "example-family.beancount"
             ).read_text()
 
         assert _count_txns(large_content) > _count_txns(small_content)
+
+    def test_invalid_start_date_format(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as tmpdir:
+            result = runner.invoke(
+                main,
+                ["-t", "family", "-o", tmpdir, "-s", "20250101"],
+            )
+            assert result.exit_code != 0
+            assert "YYYY-MM-DD" in result.output
+
+    def test_invalid_currency_symbol(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as tmpdir:
+            result = runner.invoke(
+                main,
+                ["-t", "family", "-o", tmpdir, "-c", "rmb"],
+            )
+            assert result.exit_code != 0
+            assert "currency" in result.output.lower()
+
+    def test_invalid_months_below_range(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as tmpdir:
+            result = runner.invoke(
+                main,
+                ["-t", "family", "-o", tmpdir, "-m", "0"],
+            )
+            assert result.exit_code != 0
+
+    def test_invalid_months_above_range(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as tmpdir:
+            result = runner.invoke(
+                main,
+                ["-t", "family", "-o", tmpdir, "-m", "61"],
+            )
+            assert result.exit_code != 0
+
+    def test_invalid_entries_below_range(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as tmpdir:
+            result = runner.invoke(
+                main,
+                ["-t", "family", "-o", tmpdir, "--entries-per-month", "-1"],
+            )
+            assert result.exit_code != 0
+
+    def test_invalid_entries_above_range(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as tmpdir:
+            result = runner.invoke(
+                main,
+                ["-t", "family", "-o", tmpdir, "--entries-per-month", "101"],
+            )
+            assert result.exit_code != 0
+
+    def test_investment_both_currencies_disabled(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as tmpdir:
+            result = runner.invoke(
+                main,
+                [
+                    "-t",
+                    "investment",
+                    "-o",
+                    tmpdir,
+                    "--no-with-usd",
+                    "--no-with-hkd",
+                ],
+            )
+            assert result.exit_code != 0
+            assert "至少需要开启一个" in result.output
