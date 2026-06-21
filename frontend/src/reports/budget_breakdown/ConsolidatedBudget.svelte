@@ -1,13 +1,13 @@
 <script lang="ts">
-  import type { BudgetBreakdownReport } from "../../api/validators.ts";
+  import type { ConsolidatedBudgetReport } from "../../api/validators.ts";
   import { _ } from "../../i18n.ts";
   import { type Interval, intervalLabel } from "../../lib/interval.ts";
   import { router } from "../../router.ts";
   import { interval as urlInterval } from "../../stores/url.ts";
-  import BudgetBreakdownNode from "./BudgetBreakdownNode.svelte";
+  import ConsolidatedBudgetNode from "./ConsolidatedBudgetNode.svelte";
 
   interface Props {
-    data: BudgetBreakdownReport;
+    data: ConsolidatedBudgetReport;
   }
 
   let { data }: Props = $props();
@@ -25,27 +25,40 @@
   }
 </script>
 
-<div class="budget-breakdown">
-  <div class="interval-switcher">
-    <span class="switcher-label">{_("Interval")}:</span>
-    {#each interval_options as opt (opt.value)}
-      <button
-        type="button"
-        class="unset interval-btn"
-        class:active={current_interval === opt.value}
-        onclick={() => {
-          set_interval(opt.value);
-        }}
-      >
-        {opt.label}
-      </button>
-    {/each}
+<div class="consolidated-budget">
+  <div class="consolidated-header">
+    <div class="interval-switcher">
+      <span class="switcher-label">{_("Interval")}:</span>
+      {#each interval_options as opt (opt.value)}
+        <button
+          type="button"
+          class="unset interval-btn"
+          class:active={current_interval === opt.value}
+          onclick={() => {
+            set_interval(opt.value);
+          }}
+        >
+          {opt.label}
+        </button>
+      {/each}
+    </div>
+
+    {#if data.ledgers.length > 0}
+      <div class="ledger-info">
+        <span class="info-label">{_("Consolidated from")}:</span>
+        {#each data.ledgers as ledger (ledger.slug)}
+          <span class="ledger-tag">{ledger.title}</span>
+        {/each}
+      </div>
+    {/if}
   </div>
 
-  <div class="legend">
-    <span class="legend-item"><span class="legend-dot slight"></span>{_("Slight overrun (≤20%)")}</span>
-    <span class="legend-item"><span class="legend-dot moderate"></span>{_("Moderate overrun (20-50%)")}</span>
-    <span class="legend-item"><span class="legend-dot severe"></span>{_("Critical overrun (>50%)")}</span>
+  <div class="scope-note">
+    <span class="info-icon">ℹ</span>
+    {_("Budget data is aggregated across all ledgers. Accounts are matched by name and amounts are summed.")}
+    <br />
+    <span class="info-icon">⚠</span>
+    {_("Performance note: this report computes interval balances for each ledger, so it may be slower with many or large ledgers.")}
   </div>
 
   {#if data.root.intervals.length === 0}
@@ -62,25 +75,28 @@
       </li>
       {#if data.root.children.length > 0}
         {#each data.root.children as child (child.account)}
-          <BudgetBreakdownNode node={child} />
+          <ConsolidatedBudgetNode node={child} />
         {/each}
       {:else}
-        <BudgetBreakdownNode node={data.root} />
+        <ConsolidatedBudgetNode node={data.root} />
       {/if}
     </ol>
   {/if}
 </div>
 
 <style>
-  .budget-breakdown {
+  .consolidated-budget {
     margin-top: 1em;
+  }
+
+  .consolidated-header {
+    margin-bottom: 0.5em;
   }
 
   .interval-switcher {
     display: flex;
     align-items: center;
     gap: 0.5em;
-    margin-bottom: 0.5em;
     padding: 0.5em 0;
     border-bottom: 1px solid var(--table-border);
   }
@@ -113,38 +129,40 @@
     font-weight: bold;
   }
 
-  .legend {
-    display: flex;
-    gap: 1em;
-    font-size: 0.78em;
-    color: var(--text-color-lighter);
-    padding: 0.3em 0;
-    margin-bottom: 0.5em;
-  }
-
-  .legend-item {
+  .ledger-info {
     display: flex;
     align-items: center;
-    gap: 0.3em;
+    gap: 0.4em;
+    flex-wrap: wrap;
+    padding: 0.3em 0;
+    font-size: 0.85em;
   }
 
-  .legend-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    display: inline-block;
+  .info-label {
+    color: var(--text-color-lighter);
+    font-weight: 500;
   }
 
-  .legend-dot.slight {
-    background: #b58900;
+  .ledger-tag {
+    background: var(--background-button);
+    padding: 0.15em 0.5em;
+    border-radius: 3px;
+    font-size: 0.9em;
+    border: 1px solid var(--table-border);
   }
 
-  .legend-dot.moderate {
-    background: #cb4b16;
+  .scope-note {
+    font-size: 0.8em;
+    color: var(--text-color-lighter);
+    padding: 0.5em 0.8em;
+    margin-bottom: 0.5em;
+    background: rgba(0, 0, 0, 0.02);
+    border-radius: 3px;
+    line-height: 1.6;
   }
 
-  .legend-dot.severe {
-    background: #dc322f;
+  .info-icon {
+    font-size: 1em;
   }
 
   .no-data {

@@ -215,3 +215,38 @@ export const budget_breakdown_validator = object({
   root: budget_breakdown_account,
 });
 export type BudgetBreakdownReport = ValidationT<typeof budget_breakdown_validator>;
+
+const consolidated_budget_ledger_info = object({
+  title: string,
+  slug: string,
+});
+export type ConsolidatedBudgetLedgerInfo = ValidationT<typeof consolidated_budget_ledger_info>;
+
+const consolidated_budget_interval = object({
+  label: string,
+  budget: record(number),
+  actual: record(number),
+});
+export type ConsolidatedBudgetInterval = ValidationT<typeof consolidated_budget_interval>;
+
+const consolidated_budget_account: Validator<ConsolidatedBudgetAccount> = lazy(
+  () =>
+    object({
+      account: string,
+      intervals: array(consolidated_budget_interval),
+      children: array(consolidated_budget_account),
+    }),
+);
+export interface ConsolidatedBudgetAccount {
+  account: string;
+  intervals: ConsolidatedBudgetInterval[];
+  children: ConsolidatedBudgetAccount[];
+}
+
+export const consolidated_budget_validator = object({
+  ledgers: array(consolidated_budget_ledger_info),
+  interval: string,
+  dates: array(date_range),
+  root: consolidated_budget_account,
+});
+export type ConsolidatedBudgetReport = ValidationT<typeof consolidated_budget_validator>;

@@ -1,5 +1,5 @@
 import { account_report } from "./accounts/index.ts";
-import { budget_breakdown } from "./budget_breakdown/index.ts";
+import { budget_breakdown, consolidated_budget } from "./budget_breakdown/index.ts";
 import { commodities } from "./commodities/index.ts";
 import { documents } from "./documents/index.ts";
 import { editor } from "./editor/index.ts";
@@ -31,6 +31,7 @@ export const frontend_routes: FrontendRoute[] = [
   balance_sheet,
   budget_breakdown,
   commodities,
+  consolidated_budget,
   documents,
   editor,
   errors,

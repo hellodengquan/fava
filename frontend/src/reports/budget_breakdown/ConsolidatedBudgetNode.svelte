@@ -1,6 +1,5 @@
 <script lang="ts">
-  import type { BudgetBreakdownAccount, BudgetBreakdownInterval } from "../../api/validators.ts";
-  import { urlForAccount } from "../../helpers.ts";
+  import type { ConsolidatedBudgetAccount, ConsolidatedBudgetInterval } from "../../api/validators.ts";
   import { _ } from "../../i18n.ts";
   import { leaf } from "../../lib/account.ts";
   import { is_empty } from "../../lib/objects.ts";
@@ -10,7 +9,7 @@
   import { operating_currency } from "../../stores/options.ts";
 
   interface Props {
-    node: BudgetBreakdownAccount;
+    node: ConsolidatedBudgetAccount;
   }
 
   let { node }: Props = $props();
@@ -26,7 +25,7 @@
   let show_detail = $derived(!is_toggled && has_data);
 
   function getDiff(
-    iv: BudgetBreakdownInterval,
+    iv: ConsolidatedBudgetInterval,
     currency: string,
   ): number | null {
     const budget = iv.budget[currency];
@@ -38,7 +37,7 @@
   }
 
   function getOverBudgetPct(
-    iv: BudgetBreakdownInterval,
+    iv: ConsolidatedBudgetInterval,
     currency: string,
   ): number | null {
     const budget = iv.budget[currency];
@@ -50,7 +49,7 @@
   }
 
   function getOverBudgetLabel(
-    iv: BudgetBreakdownInterval,
+    iv: ConsolidatedBudgetInterval,
     currency: string,
   ): string {
     const diff = getDiff(iv, currency);
@@ -71,7 +70,7 @@
   }
 
   function getOverBudgetSuggestion(
-    iv: BudgetBreakdownInterval,
+    iv: ConsolidatedBudgetInterval,
     currency: string,
   ): string {
     const pct = getOverBudgetPct(iv, currency);
@@ -88,7 +87,7 @@
   }
 
   function getChange(
-    intervals: BudgetBreakdownInterval[],
+    intervals: ConsolidatedBudgetInterval[],
     idx: number,
     currency: string,
   ): number | null {
@@ -110,9 +109,7 @@
 
   type Severity = "severe" | "moderate" | "slight";
 
-  function getSeverity(
-    pct: number | null,
-  ): Severity | null {
+  function getSeverity(pct: number | null): Severity | null {
     if (pct == null) {
       return null;
     }
@@ -140,9 +137,7 @@
           {is_toggled ? "▸" : "▾"}
         </button>
       {/if}
-      <a href={$urlForAccount(node.account)} class="account-link">
-        {leaf(node.account)}
-      </a>
+      <span class="account-name">{leaf(node.account)}</span>
     </span>
     {#each node.intervals as iv, idx (idx)}
       <span class="num interval-col" class:dimmed={!show_detail && !is_toggled}>
@@ -262,8 +257,9 @@
     color: var(--treetable-expander);
   }
 
-  .account-link {
+  .account-name {
     margin-left: 1em;
+    color: var(--text-color);
   }
 
   ol .account-cell-wrapper {
@@ -375,7 +371,6 @@
 
   .over-budget-label.slight {
     color: #b58900;
-    border-left-color: #b58900;
   }
 
   .over-budget-label.moderate {
