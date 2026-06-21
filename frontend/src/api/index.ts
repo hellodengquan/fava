@@ -18,6 +18,7 @@ import { base_url } from "../stores/index.ts";
 import { set_mtime } from "../stores/mtime.ts";
 import {
   account_report_validator,
+  budget_breakdown_validator,
   commodities_validator,
   context_validator,
   error_validator,
@@ -45,6 +46,7 @@ class InvalidResponseDataError extends Error {
 type DeleteEndpoint = "document" | "source_slice";
 type GetEndpoint =
   | "balance_sheet"
+  | "budget_breakdown"
   | "account_report"
   | "changed"
   | "commodities"
@@ -225,6 +227,11 @@ export const get_account_report = define_endpoint(
   "account_report",
   account_report_validator,
   [...filters_conversion_interval, "a", "r"],
+);
+export const get_budget_breakdown = define_endpoint(
+  "budget_breakdown",
+  budget_breakdown_validator,
+  [...filters_conversion_interval, "a"],
 );
 export const get_balance_sheet = define_endpoint(
   "balance_sheet",

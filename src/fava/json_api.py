@@ -857,6 +857,141 @@ def get_account_report() -> AccountReportJournal | AccountReportTree:
 
 
 @dataclass(frozen=True)
+class BudgetBreakdownInterval:
+    """Budget breakdown for one interval."""
+
+    label: str
+    budget: Mapping[str, Decimal]
+    budget_children: Mapping[str, Decimal]
+    actual: Mapping[str, Decimal]
+    actual_children: Mapping[str, Decimal]
+
+
+@dataclass(frozen=True)
+class BudgetBreakdownAccount:
+    """Budget breakdown for one account in the tree."""
+
+    account: str
+    intervals: Sequence[BudgetBreakdownInterval]
+    children: Sequence[BudgetBreakdownAccount]
+
+
+@dataclass(frozen=True)
+class BudgetBreakdownReport:
+    """Data for the budget breakdown report."""
+
+    account: str
+    interval: str
+    dates: Sequence[DateRange]
+    root: BudgetBreakdownAccount
+
+
+@api_endpoint
+def get_budget_breakdown() -> BudgetBreakdownReport:
+    """Get the data for the budget breakdown report."""
+    g.ledger.changed()
+
+    account_name = request.args.get("a", "")
+    interval = g.interval
+
+    accumulate = False
+    interval_balances, dates = g.ledger.interval_balances(
+        g.filtered,
+        interval,
+        account_name,
+        accumulate=accumulate,
+    )
+
+    if not interval_balances or not dates:
+        return BudgetBreakdownReport(
+            account=account_name,
+            interval=interval.label.lower(),
+            dates=[],
+            root=BudgetBreakdownAccount(
+                account=account_name,
+                intervals=[],
+                children=[],
+            ),
+        )
+
+    root_tree = interval_balances[-1]
+    root_node = root_tree.get(account_name).serialise(
+        g.conv,
+        g.ledger.prices,
+        dates[-1].end_inclusive,
+        with_cost=False,
+    )
+
+    budgets_mod = g.ledger.budgets
+    first_date_range = dates[-1]
+
+    all_accounts = interval_balances[0].accounts if interval_balances else []
+    budget_accounts = [a for a in all_accounts if a.startswith(account_name)]
+
+    budget_data: dict[str, list[dict]] = {}
+    for acct in budget_accounts:
+        budget_data[acct] = []
+        for date_range in dates:
+            begin = (first_date_range if accumulate else date_range).begin
+            b = budgets_mod.calculate(acct, begin, date_range.end)
+            bc = budgets_mod.calculate_children(acct, begin, date_range.end)
+            budget_data[acct].append({
+                "budget": b,
+                "budget_children": bc,
+            })
+
+    def build_node(
+        serialised_node: SerialisedTreeNode,
+    ) -> BudgetBreakdownAccount:
+        acct = serialised_node.account
+        intervals_list: list[BudgetBreakdownInterval] = []
+        for idx, date_range in enumerate(dates):
+            bd = budget_data.get(acct, [None] * len(dates))[idx] if acct in budget_data else None
+            budget = bd["budget"] if bd else {}
+            budget_children = bd["budget_children"] if bd else {}
+
+            interval_tree = interval_balances[idx] if idx < len(interval_balances) else None
+            actual: dict[str, Decimal] = {}
+            actual_children: dict[str, Decimal] = {}
+            if interval_tree is not None:
+                node = interval_tree.get(acct)
+                if node is not None:
+                    actual = dict(
+                        g.conv.apply(node.balance, g.ledger.prices, date_range.end_inclusive)
+                    )
+                    actual_children = dict(
+                        g.conv.apply(node.balance_children, g.ledger.prices, date_range.end_inclusive)
+                    )
+
+            intervals_list.append(
+                BudgetBreakdownInterval(
+                    label=interval.format_date(date_range.begin),
+                    budget=budget,
+                    budget_children=budget_children,
+                    actual=actual,
+                    actual_children=actual_children,
+                )
+            )
+
+        children_list = [build_node(child) for child in serialised_node.children]
+
+        return BudgetBreakdownAccount(
+            account=acct,
+            intervals=intervals_list,
+            children=children_list,
+        )
+
+    breakdown_root = build_node(root_node)
+
+    return BudgetBreakdownReport(
+        account=account_name,
+        interval=interval.label.lower(),
+        dates=dates,
+        root=breakdown_root,
+    )
+
+
+@dataclass(frozen=True)
 class Statistics:
     """Data for the statistics report."""
 

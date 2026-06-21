@@ -27,6 +27,7 @@
   <Link report="income_statement" name={_("Income Statement")} key="g i" />
   <Link report="balance_sheet" name={_("Balance Sheet")} key="g b" />
   <Link report="trial_balance" name={_("Trial Balance")} key="g t" />
+  <Link report="budget_breakdown" name={_("Budget Breakdown")} key="g u" />
   <Link report="journal" name={_("Journal")} key="g j" />
   <Link report="query" name={_("Query")} key="g q">
     {#if user_queries.length}

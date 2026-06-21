@@ -1,12 +1,13 @@
 import { account_hierarchy_validator } from "../charts/hierarchy.ts";
 import { chart_validator } from "../charts/index.ts";
 import { entryBaseValidator } from "../entries/index.ts";
-import type { ValidationT } from "../lib/validation.ts";
+import type { ValidationT, Validator } from "../lib/validation.ts";
 import {
   array,
   boolean,
   constants,
   date,
+  lazy,
   number,
   object,
   optional,
@@ -183,3 +184,34 @@ export const options_validator = object({
   fava_options: record(string),
   beancount_options: record(string),
 });
+
+const budget_breakdown_interval = object({
+  label: string,
+  budget: record(number),
+  budget_children: record(number),
+  actual: record(number),
+  actual_children: record(number),
+});
+export type BudgetBreakdownInterval = ValidationT<typeof budget_breakdown_interval>;
+
+const budget_breakdown_account: Validator<BudgetBreakdownAccount> = lazy(
+  () =>
+    object({
+      account: string,
+      intervals: array(budget_breakdown_interval),
+      children: array(budget_breakdown_account),
+    }),
+);
+export interface BudgetBreakdownAccount {
+  account: string;
+  intervals: BudgetBreakdownInterval[];
+  children: BudgetBreakdownAccount[];
+}
+
+export const budget_breakdown_validator = object({
+  account: string,
+  interval: string,
+  dates: array(date_range),
+  root: budget_breakdown_account,
+});
+export type BudgetBreakdownReport = ValidationT<typeof budget_breakdown_validator>;
