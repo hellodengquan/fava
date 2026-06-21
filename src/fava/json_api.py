@@ -26,7 +26,6 @@ from flask import jsonify
 from flask import request
 from flask_babel import gettext
 
-from fava.beans.abc import Document
 from fava.beans.abc import Event
 from fava.context import g
 from fava.core import EntryNotFoundForHashError
@@ -609,6 +608,58 @@ def get_documents() -> Sequence[Document]:
     return [
         serialise(e) for e in g.filtered.entries if isinstance(e, Document)
     ]
+
+
+@dataclass(frozen=True)
+class ProblemDocument:
+    """A document with a problem."""
+
+    document: Any
+    problem_type: str
+    problem_detail: str
+
+
+@dataclass(frozen=True)
+class DocumentReview:
+    """Document review data."""
+
+    missing_narration: list[ProblemDocument]
+    duplicate_names: list[ProblemDocument]
+    size_anomalies: list[ProblemDocument]
+    multiple_references: list[ProblemDocument]
+    total_documents: int
+    total_problems: int
+
+
+@api_endpoint
+def get_document_review() -> DocumentReview:
+    """Get document review data with problem documents."""
+    g.ledger.changed()
+
+    review_data = g.ledger.documents.review(g.filtered)
+
+    def serialise_problem_list(
+        problems: list[object],
+    ) -> list[ProblemDocument]:
+        return [
+            ProblemDocument(
+                serialise(p.document),
+                p.problem_type,
+                p.problem_detail,
+            )
+            for p in problems
+        ]
+
+    return DocumentReview(
+        missing_narration=serialise_problem_list(review_data.missing_narration),
+        duplicate_names=serialise_problem_list(review_data.duplicate_names),
+        size_anomalies=serialise_problem_list(review_data.size_anomalies),
+        multiple_references=serialise_problem_list(
+            review_data.multiple_references
+        ),
+        total_documents=review_data.total_documents,
+        total_problems=review_data.total_problems,
+    )
 
 
 @dataclass(frozen=True)

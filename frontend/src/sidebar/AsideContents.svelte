@@ -45,6 +45,7 @@
   <Link report="holdings" name={_("Holdings")} key="g h" />
   <Link report="commodities" name={_("Commodities")} key="g c" />
   <Link report="documents" name={_("Documents")} key="g d" />
+  <Link report="document_review" name={_("Document Review")} key="g r" />
   <Link
     report="events"
     name={_("Events")}

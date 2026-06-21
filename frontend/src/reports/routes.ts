@@ -1,6 +1,7 @@
 import { account_report } from "./accounts/index.ts";
 import { commodities } from "./commodities/index.ts";
 import { documents } from "./documents/index.ts";
+import { document_review } from "./document_review/index.ts";
 import { editor } from "./editor/index.ts";
 import { errors } from "./errors/index.ts";
 import { events } from "./events/index.ts";
@@ -30,6 +31,7 @@ export const frontend_routes: FrontendRoute[] = [
   balance_sheet,
   commodities,
   documents,
+  document_review,
   editor,
   errors,
   events,

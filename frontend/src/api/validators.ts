@@ -1,6 +1,6 @@
 import { account_hierarchy_validator } from "../charts/hierarchy.ts";
 import { chart_validator } from "../charts/index.ts";
-import { entryBaseValidator } from "../entries/index.ts";
+import { Document, entryBaseValidator } from "../entries/index.ts";
 import type { ValidationT } from "../lib/validation.ts";
 import {
   array,
@@ -183,3 +183,20 @@ export const options_validator = object({
   fava_options: record(string),
   beancount_options: record(string),
 });
+
+const problem_document_validator = object({
+  document: Document.validator,
+  problem_type: string,
+  problem_detail: string,
+});
+
+export const document_review_validator = object({
+  missing_narration: array(problem_document_validator),
+  duplicate_names: array(problem_document_validator),
+  size_anomalies: array(problem_document_validator),
+  multiple_references: array(problem_document_validator),
+  total_documents: number,
+  total_problems: number,
+});
+
+export type DocumentReview = ValidationT<typeof document_review_validator>;

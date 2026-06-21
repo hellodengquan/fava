@@ -20,6 +20,7 @@ import {
   account_report_validator,
   commodities_validator,
   context_validator,
+  document_review_validator,
   error_validator,
   importable_files_validator,
   ledgerDataValidator,
@@ -50,6 +51,7 @@ type GetEndpoint =
   | "commodities"
   | "context"
   | "documents"
+  | "document_review"
   | "errors"
   | "events"
   | "extract"
@@ -243,6 +245,11 @@ export const get_context = define_endpoint("context", context_validator, [
 export const get_documents = define_endpoint(
   "documents",
   array(Document.validator),
+  filters,
+);
+export const get_document_review = define_endpoint(
+  "document_review",
+  document_review_validator,
   filters,
 );
 export const get_errors = define_paramless_endpoint(

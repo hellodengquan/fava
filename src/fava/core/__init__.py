@@ -32,6 +32,7 @@ from fava.core.budgets import BudgetModule
 from fava.core.charts import ChartModule
 from fava.core.commodities import CommoditiesModule
 from fava.core.conversion import conversion_from_str
+from fava.core.documents import DocumentsModule
 from fava.core.extensions import ExtensionModule
 from fava.core.fava_options import parse_options
 from fava.core.file import _incomplete_sortkey
@@ -305,6 +306,7 @@ class FavaLedger:
         "budgets",
         "charts",
         "commodities",
+        "documents",
         "extensions",
         "fava_options",
         "fava_options_errors",
@@ -393,6 +395,7 @@ class FavaLedger:
         self.budgets = BudgetModule(self)
         self.charts = ChartModule(self)
         self.commodities = CommoditiesModule(self)
+        self.documents = DocumentsModule(self)
         self.extensions = ExtensionModule(self)
         self.file = FileModule(self)
         self.format_decimal = DecimalFormatModule(self)
@@ -431,6 +434,7 @@ class FavaLedger:
         self.budgets.load_file()
         self.charts.load_file()
         self.commodities.load_file()
+        self.documents.load_file()
         self.extensions.load_file()
         self.file.load_file()
         self.format_decimal.load_file()
