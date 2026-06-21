@@ -184,10 +184,28 @@ export const options_validator = object({
   beancount_options: record(string),
 });
 
+const reference_source_validator = object({
+  entry_hash: string,
+  entry_type: string,
+  date: string,
+  account: string,
+  payee: string,
+  narration: string,
+});
+
+const size_context_validator = object({
+  size_bytes: number,
+  size_kb: number,
+  criterion: string,
+  median_size_kb: optional(number),
+});
+
 const problem_document_validator = object({
   document: Document.validator,
   problem_type: string,
   problem_detail: string,
+  reference_sources: array(reference_source_validator),
+  size_context: optional(size_context_validator),
 });
 
 export const document_review_validator = object({

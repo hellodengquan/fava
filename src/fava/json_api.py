@@ -611,12 +611,36 @@ def get_documents() -> Sequence[Document]:
 
 
 @dataclass(frozen=True)
+class ReferenceSource:
+    """A reference to a document from another entry."""
+
+    entry_hash: str
+    entry_type: str
+    date: str
+    account: str
+    payee: str
+    narration: str
+
+
+@dataclass(frozen=True)
+class SizeContext:
+    """Context for a size anomaly detection."""
+
+    size_bytes: int
+    size_kb: float
+    criterion: str
+    median_size_kb: float | None
+
+
+@dataclass(frozen=True)
 class ProblemDocument:
     """A document with a problem."""
 
     document: Any
     problem_type: str
     problem_detail: str
+    reference_sources: list[ReferenceSource]
+    size_context: SizeContext | None
 
 
 @dataclass(frozen=True)
@@ -646,6 +670,25 @@ def get_document_review() -> DocumentReview:
                 serialise(p.document),
                 p.problem_type,
                 p.problem_detail,
+                [
+                    ReferenceSource(
+                        entry_hash=s.entry_hash,
+                        entry_type=s.entry_type,
+                        date=s.date,
+                        account=s.account,
+                        payee=s.payee,
+                        narration=s.narration,
+                    )
+                    for s in p.reference_sources
+                ],
+                SizeContext(
+                    size_bytes=p.size_context.size_bytes,
+                    size_kb=p.size_context.size_kb,
+                    criterion=p.size_context.criterion,
+                    median_size_kb=p.size_context.median_size_kb,
+                )
+                if p.size_context is not None
+                else None,
             )
             for p in problems
         ]

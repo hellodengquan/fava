@@ -7,9 +7,11 @@ from dataclasses import dataclass
 from os import altsep
 from os import sep
 from pathlib import Path
+from statistics import median
 from typing import TYPE_CHECKING
 
 from fava.beans.abc import Document
+from fava.beans.funcs import hash_entry
 from fava.helpers import FavaAPIError
 
 from .module_base import FavaModule
@@ -17,6 +19,7 @@ from .module_base import FavaModule
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Sequence
 
+    from fava.beans.abc import Directive
     from fava.core import FavaLedger
     from fava.core import FilteredLedger
 
@@ -35,6 +38,46 @@ class NotAValidAccountError(FavaAPIError):
         super().__init__(f"Not a valid account: '{account}'")
 
 
+SIZE_ZERO_BYTES = 0
+SIZE_ABSOLUTE_MIN_KB = 1
+SIZE_ABSOLUTE_MAX_KB = 10240
+SIZE_MEDIAN_RATIO_LOW = 0.1
+SIZE_MEDIAN_RATIO_HIGH = 10.0
+
+NARRATION_META_KEYS = frozenset(
+    {
+        "narration",
+        "description",
+        "note",
+        "备注",
+        "说明",
+        "描述",
+    }
+)
+
+
+@dataclass(frozen=True)
+class ReferenceSource:
+    """A single reference to a document from another entry."""
+
+    entry_hash: str
+    entry_type: str
+    date: str
+    account: str
+    payee: str
+    narration: str
+
+
+@dataclass(frozen=True)
+class SizeContext:
+    """Context for a size anomaly detection."""
+
+    size_bytes: int
+    size_kb: float
+    criterion: str
+    median_size_kb: float | None
+
+
 @dataclass(frozen=True)
 class ProblemDocument:
     """A document with a problem."""
@@ -42,6 +85,8 @@ class ProblemDocument:
     document: Document
     problem_type: str
     problem_detail: str
+    reference_sources: list[ReferenceSource]
+    size_context: SizeContext | None
 
 
 @dataclass(frozen=True)
@@ -54,6 +99,127 @@ class DocumentReviewData:
     multiple_references: list[ProblemDocument]
     total_documents: int
     total_problems: int
+
+
+def _build_reference_source(entry: Directive) -> ReferenceSource:
+    """Build a ReferenceSource from a referring entry.
+
+    Args:
+        entry: The entry that references a document.
+
+    Returns:
+        A ReferenceSource with identifying information and query path.
+    """
+    entry_hash = hash_entry(entry)
+    entry_type = type(entry).__name__
+    date_str = str(entry.date)
+    account = getattr(entry, "account", "")
+    payee = getattr(entry, "payee", "") or ""
+    narration = getattr(entry, "narration", "") or ""
+    return ReferenceSource(
+        entry_hash=entry_hash,
+        entry_type=entry_type,
+        date=date_str,
+        account=account,
+        payee=payee,
+        narration=narration,
+    )
+
+
+def _detect_size_anomaly(
+    size_bytes: int,
+    median_size_kb: float | None,
+) -> tuple[str, str, SizeContext] | None:
+    """Detect if a file size is anomalous.
+
+    Uses a two-layer detection strategy:
+    1. Absolute thresholds: files of 0 bytes, smaller than 1 KB, or larger
+       than 10 MB are always flagged.
+    2. Relative-to-median thresholds: when a population median is available,
+       files smaller than 10% of the median or larger than 10x the median
+       are also flagged.
+
+    Args:
+        size_bytes: The file size in bytes.
+        median_size_kb: The median file size in KB for the document
+            population, or None if unavailable.
+
+    Returns:
+        A tuple of (problem_type, problem_detail, SizeContext) if anomalous,
+        or None if the size is normal.
+    """
+    size_kb = size_bytes / 1024
+    size_context = SizeContext(
+        size_bytes=size_bytes,
+        size_kb=round(size_kb, 2),
+        criterion="",
+        median_size_kb=(
+            round(median_size_kb, 2) if median_size_kb is not None else None
+        ),
+    )
+
+    if size_bytes == SIZE_ZERO_BYTES:
+        return (
+            "size_anomaly_zero",
+            "文件大小为 0 字节 (绝对阈值)",
+            SizeContext(
+                size_bytes=size_context.size_bytes,
+                size_kb=size_context.size_kb,
+                criterion="absolute_zero",
+                median_size_kb=size_context.median_size_kb,
+            ),
+        )
+
+    if size_kb < SIZE_ABSOLUTE_MIN_KB:
+        return (
+            "size_anomaly_small_absolute",
+            f"文件过小: {size_bytes} 字节 < {SIZE_ABSOLUTE_MIN_KB} KB (绝对阈值)",
+            SizeContext(
+                size_bytes=size_context.size_bytes,
+                size_kb=size_context.size_kb,
+                criterion="absolute_min",
+                median_size_kb=size_context.median_size_kb,
+            ),
+        )
+
+    if size_kb > SIZE_ABSOLUTE_MAX_KB:
+        return (
+            "size_anomaly_large_absolute",
+            f"文件过大: {size_kb / 1024:.1f} MB > {SIZE_ABSOLUTE_MAX_KB / 1024:.0f} MB (绝对阈值)",
+            SizeContext(
+                size_bytes=size_context.size_bytes,
+                size_kb=size_context.size_kb,
+                criterion="absolute_max",
+                median_size_kb=size_context.median_size_kb,
+            ),
+        )
+
+    if median_size_kb is not None and median_size_kb > 0:
+        ratio = size_kb / median_size_kb
+        if ratio < SIZE_MEDIAN_RATIO_LOW:
+            return (
+                "size_anomaly_small_relative",
+                f"文件偏小: {size_kb:.1f} KB < 中位数 {median_size_kb:.1f} KB 的 {SIZE_MEDIAN_RATIO_LOW * 100:.0f}% (相对中位数)",
+                SizeContext(
+                    size_bytes=size_context.size_bytes,
+                    size_kb=size_context.size_kb,
+                    criterion="relative_median_low",
+                    median_size_kb=size_context.median_size_kb,
+                ),
+            )
+        if ratio > SIZE_MEDIAN_RATIO_HIGH:
+            return (
+                "size_anomaly_large_relative",
+                f"文件偏大: {size_kb:.1f} KB > 中位数 {median_size_kb:.1f} KB 的 {SIZE_MEDIAN_RATIO_HIGH:.0f}x (相对中位数)",
+                SizeContext(
+                    size_bytes=size_context.size_bytes,
+                    size_kb=size_context.size_kb,
+                    criterion="relative_median_high",
+                    median_size_kb=size_context.median_size_kb,
+                ),
+            )
+
+    return None
 
 
 class DocumentsModule(FavaModule):
@@ -132,55 +298,45 @@ class DocumentsModule(FavaModule):
 
         name_counts: dict[str, list[Document]] = defaultdict(list)
 
-        narration_keys = {
-            "narration",
-            "description",
-            "note",
-            "备注",
-            "说明",
-            "描述",
-        }
+        file_sizes: list[float] = []
+        for doc in all_documents:
+            file_path = Path(doc.filename)
+            if file_path.exists() and file_path.is_file():
+                file_sizes.append(file_path.stat().st_size / 1024)
+
+        median_size_kb: float | None = None
+        if len(file_sizes) >= 3:
+            median_size_kb = float(median(file_sizes))
 
         for doc in all_documents:
             basename = Path(doc.filename).name
             name_counts[basename].append(doc)
 
-            has_narration = bool(narration_keys & doc.meta.keys())
+            has_narration = bool(NARRATION_META_KEYS & doc.meta.keys())
             if not has_narration:
                 missing_narration.append(
                     ProblemDocument(
                         doc,
                         "missing_narration",
                         "缺少备注说明",
+                        [],
+                        None,
                     )
                 )
 
             file_path = Path(doc.filename)
             if file_path.exists() and file_path.is_file():
                 size_bytes = file_path.stat().st_size
-                size_kb = size_bytes / 1024
-                if size_bytes == 0:
+                result = _detect_size_anomaly(size_bytes, median_size_kb)
+                if result is not None:
+                    problem_type, problem_detail, size_context = result
                     size_anomalies.append(
                         ProblemDocument(
                             doc,
-                            "size_anomaly",
-                            "文件大小为 0 字节",
-                        )
-                    )
-                elif size_kb < 1:
-                    size_anomalies.append(
-                        ProblemDocument(
-                            doc,
-                            "size_anomaly",
-                            f"文件过小: {size_bytes} 字节",
-                        )
-                    )
-                elif size_kb > 10240:
-                    size_anomalies.append(
-                        ProblemDocument(
-                            doc,
-                            "size_anomaly",
-                            f"文件过大: {size_kb / 1024:.1f} MB",
+                            problem_type,
+                            problem_detail,
+                            [],
+                            size_context,
                         )
                     )
 
@@ -192,10 +348,12 @@ class DocumentsModule(FavaModule):
                             doc,
                             "duplicate_name",
                             f"命名重复: {name} (共 {len(docs)} 个)",
+                            [],
+                            None,
                         )
                     )
 
-        ref_counts: dict[str, list[object]] = defaultdict(list)
+        ref_map: dict[str, list[ReferenceSource]] = defaultdict(list)
         for entry in filtered.entries:
             disk_docs = [
                 value
@@ -203,18 +361,20 @@ class DocumentsModule(FavaModule):
                 if key.startswith("document") and isinstance(value, str)
             ]
             for disk_doc in disk_docs:
-                ref_counts[disk_doc].append(entry)
+                ref_map[disk_doc].append(_build_reference_source(entry))
 
         for doc in all_documents:
             basename = Path(doc.filename).name
             fullname = doc.filename
-            refs = ref_counts.get(basename, []) + ref_counts.get(fullname, [])
-            if len(refs) > 1:
+            sources = ref_map.get(basename, []) + ref_map.get(fullname, [])
+            if len(sources) > 1:
                 multiple_references.append(
                     ProblemDocument(
                         doc,
                         "multiple_references",
-                        f"被引用 {len(refs)} 次",
+                        f"被引用 {len(sources)} 次",
+                        sources,
+                        None,
                     )
                 )
 

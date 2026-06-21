@@ -15,6 +15,7 @@
 
   let activeCategory: ProblemCategory = $state("missing_narration");
   let selectedDoc: any = $state(null);
+  let selectedItem: any = $state(null);
 
   const categories: { key: ProblemCategory; label: string; icon: string }[] = [
     { key: "missing_narration", label: _("缺少备注"), icon: "📝" },
@@ -42,6 +43,71 @@
   }
 
   let currentList = $derived(getProblemList(activeCategory));
+
+  let groups = $derived.by(() => {
+    if (activeCategory === "size_anomalies") {
+      const criterionGroups = new Map<string, { label: string; items: any[] }>();
+      for (const item of currentList) {
+        const c = item.size_context?.criterion ?? "unknown";
+        if (!criterionGroups.has(c)) {
+          const labels: Record<string, string> = {
+            absolute_zero: _("空文件"),
+            absolute_min: _("绝对值过小"),
+            absolute_max: _("绝对值过大"),
+            relative_median_low: _("相对中位数偏小"),
+            relative_median_high: _("相对中位数偏大"),
+            unknown: _("其他"),
+          };
+          criterionGroups.set(c, { label: labels[c] ?? c, items: [] });
+        }
+        criterionGroups.get(c)!.items.push(item);
+      }
+      return [...criterionGroups.entries()].map(([key, val]) => ({
+        key,
+        label: val.label,
+        items: val.items,
+      }));
+    }
+    if (activeCategory === "missing_narration") {
+      return [{ key: "all", label: _("所有缺少备注的附件"), items: currentList }];
+    }
+    if (activeCategory === "duplicate_names") {
+      const nameGroups = new Map<string, any[]>();
+      for (const item of currentList) {
+        const name = basename(item.document.filename);
+        if (!nameGroups.has(name)) {
+          nameGroups.set(name, []);
+        }
+        nameGroups.get(name)!.push(item);
+      }
+      return [...nameGroups.entries()].map(([name, items]) => ({
+        key: name,
+        label: name,
+        items,
+      }));
+    }
+    if (activeCategory === "multiple_references") {
+      return [{ key: "all", label: _("引用次数超过一次的附件"), items: currentList }];
+    }
+    return [{ key: "all", label: "", items: currentList }];
+  });
+
+  function criterionBadgeClass(criterion: string) {
+    if (criterion.startsWith("absolute")) return "badge-absolute";
+    if (criterion.startsWith("relative")) return "badge-relative";
+    return "badge-unknown";
+  }
+
+  function formatSize(sizeKb: number) {
+    if (sizeKb >= 1024) return `${(sizeKb / 1024).toFixed(1)} MB`;
+    if (sizeKb >= 1) return `${sizeKb.toFixed(1)} KB`;
+    return `${Math.round(sizeKb * 1024)} B`;
+  }
+
+  function selectItem(item: any) {
+    selectedItem = item;
+    selectedDoc = item.document;
+  }
 </script>
 
 <div class="document-review">
@@ -70,6 +136,7 @@
         onclick={() => {
           activeCategory = cat.key;
           selectedDoc = null;
+          selectedItem = null;
         }}
       >
         <span class="tab-icon">{cat.icon}</span>
@@ -87,42 +154,48 @@
           <p>{_("该类别暂无问题附件")}</p>
         </div>
       {:else}
-        <table class="problem-table">
-        <thead>
-          <tr>
-            <th>{_("日期")}</th>
-            <th>{_("附件名称")}</th>
-            <th>{_("所属账户")}</th>
-            <th>{_("问题描述")}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each currentList as item (item.document.entry_hash)}
-            <tr
-              class="problem-row"
-              class:selected={selectedDoc?.entry_hash === item.document.entry_hash}
-              title={item.document.filename}
-              onclick={() => {
-                selectedDoc = item.document;
-              }}
-            >
-              <td class="doc-date">{item.document.date}</td>
-              <td class="doc-name">
-                <span class="doc-name-text">{docName(item.document)}</span>
-              </td>
-              <td class="doc-account">
-                <a href={$urlForAccount(item.document.account)} class="account-link"
-                  onclick={(e) => e.stopPropagation()}>
-                  {item.document.account}
-                </a>
-              </td>
-              <td class="problem-detail">
-                <span class="problem-badge">{item.problem_detail}</span>
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
+        {#each groups as group (group.key)}
+          <div class="group-section">
+            <div class="group-header">
+              <span class="group-label">{group.label}</span>
+              <span class="group-count">{group.items.length}</span>
+            </div>
+            <table class="problem-table">
+              <thead>
+                <tr>
+                  <th>{_("日期")}</th>
+                  <th>{_("附件名称")}</th>
+                  <th>{_("所属账户")}</th>
+                  <th>{_("问题描述")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each group.items as item (item.document.entry_hash)}
+                  <tr
+                    class="problem-row"
+                    class:selected={selectedDoc?.entry_hash === item.document.entry_hash}
+                    title={item.document.filename}
+                    onclick={() => selectItem(item)}
+                  >
+                    <td class="doc-date">{item.document.date}</td>
+                    <td class="doc-name">{docName(item.document)}</td>
+                    <td class="doc-account">
+                      <a href={$urlForAccount(item.document.account)} class="account-link"
+                        onclick={(e) => e.stopPropagation()}>
+                        {item.document.account}
+                      </a>
+                    </td>
+                    <td class="problem-detail">
+                      <span class="problem-badge {criterionBadgeClass(item.size_context?.criterion ?? '')}">
+                        {item.problem_detail}
+                      </span>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/each}
       {/if}
     </div>
 
@@ -134,6 +207,7 @@
             class="preview-close"
             onclick={() => {
               selectedDoc = null;
+              selectedItem = null;
             }}
           >
             ×
@@ -159,6 +233,60 @@
               {basename(selectedDoc.filename)}
             </span>
           </div>
+
+          {#if selectedItem?.size_context}
+            <div class="info-divider"></div>
+            <div class="info-row">
+              <span class="info-label">{_("文件大小")}:</span>
+              <span class="info-value">{formatSize(selectedItem.size_context.size_kb)}</span>
+            </div>
+            {#if selectedItem.size_context.median_size_kb != null}
+              <div class="info-row">
+                <span class="info-label">{_("群体中位数")}:</span>
+                <span class="info-value">{formatSize(selectedItem.size_context.median_size_kb)}</span>
+              </div>
+            {/if}
+            <div class="info-row">
+              <span class="info-label">{_("判定标准")}:</span>
+              <span class="info-value criterion-tag {criterionBadgeClass(selectedItem.size_context.criterion)}">
+                {#if selectedItem.size_context.criterion === "absolute_zero"}
+                  {_("绝对阈值: 0 字节")}
+                {:else if selectedItem.size_context.criterion === "absolute_min"}
+                  {_("绝对阈值: < 1 KB")}
+                {:else if selectedItem.size_context.criterion === "absolute_max"}
+                  {_("绝对阈值: > 10 MB")}
+                {:else if selectedItem.size_context.criterion === "relative_median_low"}
+                  {_("相对中位数: < 10%")}
+                {:else if selectedItem.size_context.criterion === "relative_median_high"}
+                  {_("相对中位数: > 10x")}
+                {:else}
+                  {selectedItem.size_context.criterion}
+                {/if}
+              </span>
+            </div>
+          {/if}
+
+          {#if selectedItem?.reference_sources?.length > 0}
+            <div class="info-divider"></div>
+            <div class="info-label" style="margin-bottom: 0.5rem;">{_("引用来源")} ({selectedItem.reference_sources.length})</div>
+            <div class="reference-list">
+              {#each selectedItem.reference_sources as ref (ref.entry_hash)}
+                <div class="reference-item">
+                  <span class="ref-type">{ref.entry_type}</span>
+                  <span class="ref-date">{ref.date}</span>
+                  {#if ref.account}
+                    <a href={$urlForAccount(ref.account)} class="ref-account">{ref.account}</a>
+                  {/if}
+                  {#if ref.payee}
+                    <span class="ref-payee">{ref.payee}</span>
+                  {/if}
+                  {#if ref.narration}
+                    <span class="ref-narration">{ref.narration}</span>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {/if}
         </div>
       </div>
     {/if}
@@ -281,6 +409,35 @@
     min-height: 0;
   }
 
+  .group-section {
+    border-bottom: 1px solid var(--sidebar-border);
+  }
+
+  .group-section:last-child {
+    border-bottom: none;
+  }
+
+  .group-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    background: var(--background);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--muted-text-color);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .group-count {
+    background: var(--sidebar-border);
+    padding: 0.0625rem 0.375rem;
+    border-radius: 9999px;
+    font-size: 0.6875rem;
+    font-weight: 600;
+  }
+
   .problem-table {
     width: 100%;
     border-collapse: collapse;
@@ -341,11 +498,26 @@
   .problem-badge {
     display: inline-block;
     padding: 0.25rem 0.75rem;
-    background: var(--warning-background, #fef3c7);
-    color: var(--warning-color, #92400e);
     border-radius: 9999px;
     font-size: 0.8125rem;
     font-weight: 500;
+    background: var(--warning-background, #fef3c7);
+    color: var(--warning-color, #92400e);
+  }
+
+  .badge-absolute {
+    background: #fee2e2;
+    color: #991b1b;
+  }
+
+  .badge-relative {
+    background: #fef3c7;
+    color: #92400e;
+  }
+
+  .badge-unknown {
+    background: var(--sidebar-border);
+    color: var(--muted-text-color);
   }
 
   .empty-state {
@@ -413,6 +585,13 @@
     padding: 1rem;
     border-top: 1px solid var(--sidebar-border);
     font-size: 0.875rem;
+    overflow-y: auto;
+    max-height: 40%;
+  }
+
+  .info-divider {
+    border-top: 1px dashed var(--sidebar-border);
+    margin: 0.75rem 0;
   }
 
   .info-row {
@@ -428,7 +607,7 @@
   .info-label {
     font-weight: 500;
     color: var(--muted-text-color);
-    min-width: 60px;
+    min-width: 80px;
   }
 
   .info-value {
@@ -449,6 +628,75 @@
   .file-path {
     font-family: monospace;
     font-size: 0.8125rem;
+  }
+
+  .criterion-tag {
+    display: inline-block;
+    padding: 0.125rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+
+  .criterion-tag.badge-absolute {
+    background: #fee2e2;
+    color: #991b1b;
+  }
+
+  .criterion-tag.badge-relative {
+    background: #fef3c7;
+    color: #92400e;
+  }
+
+  .reference-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .reference-item {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.375rem;
+    align-items: baseline;
+    padding: 0.375rem 0.5rem;
+    background: var(--background);
+    border-radius: 4px;
+    font-size: 0.8125rem;
+  }
+
+  .ref-type {
+    background: var(--sidebar-border);
+    padding: 0.0625rem 0.375rem;
+    border-radius: 3px;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+
+  .ref-date {
+    color: var(--muted-text-color);
+    font-size: 0.75rem;
+  }
+
+  .ref-account {
+    color: inherit;
+    text-decoration: none;
+    font-size: 0.8125rem;
+  }
+
+  .ref-account:hover {
+    color: var(--accent-color, #3498db);
+    text-decoration: underline;
+  }
+
+  .ref-payee {
+    font-weight: 500;
+  }
+
+  .ref-narration {
+    color: var(--muted-text-color);
+    font-style: italic;
   }
 
   @media (max-width: 768px) {
