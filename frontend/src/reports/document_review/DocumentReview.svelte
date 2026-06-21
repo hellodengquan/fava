@@ -1,6 +1,6 @@
 <script lang="ts">
   import { _ } from "../../i18n.ts";
-  import { urlForAccount } from "../../helpers.ts";
+  import { urlForAccount, urlForRaw } from "../../helpers.ts";
   import { basename } from "../../lib/paths.ts";
   import DocumentPreview from "../documents/DocumentPreview.svelte";
   import type { DocumentReviewReportProps } from "./index.ts";
@@ -16,6 +16,10 @@
   let activeCategory: ProblemCategory = $state("missing_narration");
   let selectedDoc: any = $state(null);
   let selectedItem: any = $state(null);
+  let expandedReferences: Set<string> = $state(new Set());
+  let showStatsDetail: boolean = $state(false);
+
+  const DEFAULT_VISIBLE_REFS = 5;
 
   const categories: { key: ProblemCategory; label: string; icon: string }[] = [
     { key: "missing_narration", label: _("缺少备注"), icon: "📝" },
@@ -108,6 +112,30 @@
     selectedItem = item;
     selectedDoc = item.document;
   }
+
+  function toggleReferences(docHash: string) {
+    if (expandedReferences.has(docHash)) {
+      expandedReferences.delete(docHash);
+    } else {
+      expandedReferences.add(docHash);
+    }
+    expandedReferences = new Set(expandedReferences);
+  }
+
+  function isExpanded(docHash: string) {
+    return expandedReferences.has(docHash);
+  }
+
+  function getVisibleReferences(refs: any[], docHash: string) {
+    if (isExpanded(docHash) || refs.length <= DEFAULT_VISIBLE_REFS) {
+      return refs;
+    }
+    return refs.slice(0, DEFAULT_VISIBLE_REFS);
+  }
+
+  function hasMoreReferences(refs: any[], docHash: string) {
+    return refs.length > DEFAULT_VISIBLE_REFS && !isExpanded(docHash);
+  }
 </script>
 
 <div class="document-review">
@@ -126,7 +154,45 @@
         <div class="card-label">{_("问题总数")}</div>
       </div>
     </div>
+    <button
+      type="button"
+      class="summary-card references"
+      onclick={() => { showStatsDetail = !showStatsDetail; }}
+    >
+      <div class="card-icon">🔗</div>
+      <div class="card-content">
+        <div class="card-value">{review.reference_stats.total_references}</div>
+        <div class="card-label">{_("引用总数")} ({review.reference_stats.total_documents_referenced} 个附件)</div>
+      </div>
+    </button>
   </div>
+
+  {#if showStatsDetail}
+    <div class="stats-panel">
+      <div class="stats-section">
+        <div class="stats-title">{_("引用统计")}</div>
+        <div class="stats-grid">
+          <div class="stat-item">
+            <span class="stat-label">{_("metadata 键")}:</span>
+            <span class="stat-value">{review.reference_stats.metadata_keys_found.join(", ") || "-"}</span>
+          </div>
+          {#if review.reference_stats.top_referenced.length > 0}
+            <div class="stat-item full-width">
+              <span class="stat-label">{_("Top 5 被引用附件")}:</span>
+              <ul class="top-refs-list">
+                {#each review.reference_stats.top_referenced as item (item[0])}
+                  <li>
+                    <span class="truncate" title={String(item[0])}>{basename(String(item[0]))}</span>
+                    <span class="ref-count">{item[1]} 次</span>
+                  </li>
+                {/each}
+              </ul>
+            </div>
+          {/if}
+        </div>
+      </div>
+    </div>
+  {/if}
 
   <div class="category-tabs">
     {#each categories as cat (cat.key)}
@@ -252,13 +318,13 @@
                 {#if selectedItem.size_context.criterion === "absolute_zero"}
                   {_("绝对阈值: 0 字节")}
                 {:else if selectedItem.size_context.criterion === "absolute_min"}
-                  {_("绝对阈值: < 1 KB")}
+                  {"绝对阈值: < "}{selectedItem.size_context.min_threshold_kb}{" KB"}
                 {:else if selectedItem.size_context.criterion === "absolute_max"}
-                  {_("绝对阈值: > 10 MB")}
+                  {"绝对阈值: > "}{Math.round(selectedItem.size_context.max_threshold_kb / 1024)}{" MB"}
                 {:else if selectedItem.size_context.criterion === "relative_median_low"}
-                  {_("相对中位数: < 10%")}
+                  {"相对中位数: < "}{selectedItem.size_context.median_ratio_low_pct}{"%"}
                 {:else if selectedItem.size_context.criterion === "relative_median_high"}
-                  {_("相对中位数: > 10x")}
+                  {"相对中位数: > "}{(selectedItem.size_context.median_ratio_high_pct / 100).toFixed(0)}{"x"}
                 {:else}
                   {selectedItem.size_context.criterion}
                 {/if}
@@ -268,12 +334,30 @@
 
           {#if selectedItem?.reference_sources?.length > 0}
             <div class="info-divider"></div>
-            <div class="info-label" style="margin-bottom: 0.5rem;">{_("引用来源")} ({selectedItem.reference_sources.length})</div>
+            <div class="references-header">
+              <span class="info-label">{_("引用来源")} ({selectedItem.reference_sources.length})</span>
+              {#if hasMoreReferences(selectedItem.reference_sources, selectedDoc.entry_hash)}
+                <button
+                  class="expand-btn"
+                  onclick={() => toggleReferences(selectedDoc.entry_hash)}
+                >
+                  {_("展开全部")}
+                </button>
+              {:else if selectedItem.reference_sources.length > DEFAULT_VISIBLE_REFS && isExpanded(selectedDoc.entry_hash)}
+                <button
+                  class="expand-btn"
+                  onclick={() => toggleReferences(selectedDoc.entry_hash)}
+                >
+                  {_("收起")}
+                </button>
+              {/if}
+            </div>
             <div class="reference-list">
-              {#each selectedItem.reference_sources as ref (ref.entry_hash)}
+              {#each getVisibleReferences(selectedItem.reference_sources, selectedDoc.entry_hash) as ref (ref.entry_hash)}
                 <div class="reference-item">
                   <span class="ref-type">{ref.entry_type}</span>
                   <span class="ref-date">{ref.date}</span>
+                  <a href={$urlForRaw(`/${ref.entry_hash}`)} class="ref-link" title={ref.query_path}>🔗</a>
                   {#if ref.account}
                     <a href={$urlForAccount(ref.account)} class="ref-account">{ref.account}</a>
                   {/if}
@@ -285,6 +369,16 @@
                   {/if}
                 </div>
               {/each}
+              {#if hasMoreReferences(selectedItem.reference_sources, selectedDoc.entry_hash)}
+                <div class="reference-more">
+                  <button
+                    class="more-btn"
+                    onclick={() => toggleReferences(selectedDoc.entry_hash)}
+                  >
+                    {"还有 "}{selectedItem.reference_sources.length - DEFAULT_VISIBLE_REFS}{" 条引用，点击展开"}
+                  </button>
+                </div>
+              {/if}
             </div>
           {/if}
         </div>
@@ -307,7 +401,7 @@
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
     gap: 1rem;
-    margin-bottom: 1.5rem;
+    margin-bottom: 1rem;
   }
 
   .summary-card {
@@ -318,6 +412,16 @@
     background: var(--table-header-background);
     border-radius: 8px;
     border: 1px solid var(--sidebar-border);
+    cursor: default;
+  }
+
+  .summary-card.references {
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .summary-card.references:hover {
+    border-color: var(--accent-color, #3498db);
   }
 
   .summary-card.total .card-icon {
@@ -338,6 +442,80 @@
     font-size: 0.875rem;
     color: var(--muted-text-color);
     margin-top: 0.25rem;
+  }
+
+  .stats-panel {
+    background: var(--table-header-background);
+    border: 1px solid var(--sidebar-border);
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+  }
+
+  .stats-title {
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+    font-size: 0.9375rem;
+  }
+
+  .stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.75rem;
+  }
+
+  .stat-item {
+    display: flex;
+    gap: 0.5rem;
+    font-size: 0.875rem;
+  }
+
+  .stat-item.full-width {
+    grid-column: 1 / -1;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .stat-label {
+    font-weight: 500;
+    color: var(--muted-text-color);
+    min-width: 80px;
+  }
+
+  .stat-value {
+    flex: 1;
+    word-break: break-all;
+  }
+
+  .top-refs-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .top-refs-list li {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.25rem 0.5rem;
+    background: var(--background);
+    border-radius: 4px;
+    font-size: 0.8125rem;
+  }
+
+  .ref-count {
+    font-weight: 600;
+    color: var(--accent-color, #3498db);
+  }
+
+  .truncate {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 300px;
   }
 
   .category-tabs {
@@ -576,7 +754,7 @@
 
   .preview-content {
     flex: 1;
-    min-height: 300px;
+    min-height: 250px;
     overflow: auto;
     background: var(--background);
   }
@@ -586,7 +764,7 @@
     border-top: 1px solid var(--sidebar-border);
     font-size: 0.875rem;
     overflow-y: auto;
-    max-height: 40%;
+    max-height: 45%;
   }
 
   .info-divider {
@@ -648,6 +826,29 @@
     color: #92400e;
   }
 
+  .references-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+  }
+
+  .expand-btn {
+    background: none;
+    border: 1px solid var(--sidebar-border);
+    border-radius: 4px;
+    padding: 0.125rem 0.5rem;
+    font-size: 0.75rem;
+    cursor: pointer;
+    color: var(--muted-text-color);
+    transition: all 0.2s;
+  }
+
+  .expand-btn:hover {
+    border-color: var(--accent-color, #3498db);
+    color: var(--accent-color, #3498db);
+  }
+
   .reference-list {
     display: flex;
     flex-direction: column;
@@ -679,6 +880,16 @@
     font-size: 0.75rem;
   }
 
+  .ref-link {
+    color: var(--accent-color, #3498db);
+    text-decoration: none;
+    font-size: 0.8125rem;
+  }
+
+  .ref-link:hover {
+    text-decoration: underline;
+  }
+
   .ref-account {
     color: inherit;
     text-decoration: none;
@@ -699,6 +910,27 @@
     font-style: italic;
   }
 
+  .reference-more {
+    margin-top: 0.5rem;
+  }
+
+  .more-btn {
+    width: 100%;
+    padding: 0.5rem;
+    background: var(--background);
+    border: 1px dashed var(--sidebar-border);
+    border-radius: 4px;
+    color: var(--muted-text-color);
+    font-size: 0.8125rem;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .more-btn:hover {
+    border-color: var(--accent-color, #3498db);
+    color: var(--accent-color, #3498db);
+  }
+
   @media (max-width: 768px) {
     .content-wrapper:has(.preview-panel) {
       grid-template-columns: 1fr;
@@ -706,6 +938,10 @@
 
     .preview-content {
       min-height: 200px;
+    }
+
+    .stats-grid {
+      grid-template-columns: 1fr;
     }
   }
 </style>

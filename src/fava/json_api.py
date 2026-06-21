@@ -620,6 +620,18 @@ class ReferenceSource:
     account: str
     payee: str
     narration: str
+    query_path: str
+
+
+@dataclass(frozen=True)
+class ReferenceStats:
+    """Statistics for document references across transactions."""
+
+    total_references: int
+    total_documents_referenced: int
+    document_reference_counts: dict[str, int]
+    top_referenced: list[tuple[str, int]]
+    metadata_keys_found: list[str]
 
 
 @dataclass(frozen=True)
@@ -630,6 +642,10 @@ class SizeContext:
     size_kb: float
     criterion: str
     median_size_kb: float | None
+    min_threshold_kb: int
+    max_threshold_kb: int
+    median_ratio_low_pct: int
+    median_ratio_high_pct: int
 
 
 @dataclass(frozen=True)
@@ -653,6 +669,7 @@ class DocumentReview:
     multiple_references: list[ProblemDocument]
     total_documents: int
     total_problems: int
+    reference_stats: ReferenceStats
 
 
 @api_endpoint
@@ -678,6 +695,7 @@ def get_document_review() -> DocumentReview:
                         account=s.account,
                         payee=s.payee,
                         narration=s.narration,
+                        query_path=s.query_path,
                     )
                     for s in p.reference_sources
                 ],
@@ -686,12 +704,25 @@ def get_document_review() -> DocumentReview:
                     size_kb=p.size_context.size_kb,
                     criterion=p.size_context.criterion,
                     median_size_kb=p.size_context.median_size_kb,
+                    min_threshold_kb=p.size_context.min_threshold_kb,
+                    max_threshold_kb=p.size_context.max_threshold_kb,
+                    median_ratio_low_pct=p.size_context.median_ratio_low_pct,
+                    median_ratio_high_pct=p.size_context.median_ratio_high_pct,
                 )
                 if p.size_context is not None
                 else None,
             )
             for p in problems
         ]
+
+    stats = review_data.reference_stats
+    serialised_stats = ReferenceStats(
+        total_references=stats.total_references,
+        total_documents_referenced=stats.total_documents_referenced,
+        document_reference_counts=stats.document_reference_counts,
+        top_referenced=stats.top_referenced,
+        metadata_keys_found=stats.metadata_keys_found,
+    )
 
     return DocumentReview(
         missing_narration=serialise_problem_list(review_data.missing_narration),
@@ -702,6 +733,7 @@ def get_document_review() -> DocumentReview:
         ),
         total_documents=review_data.total_documents,
         total_problems=review_data.total_problems,
+        reference_stats=serialised_stats,
     )
 
 

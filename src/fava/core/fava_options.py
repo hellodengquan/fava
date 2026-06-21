@@ -96,6 +96,10 @@ class FavaOptions:
     currency_column: int = 61
     default_file: str | None = None
     default_page: str = "income_statement/"
+    document_review_max_size_kb: int = 51200
+    document_review_median_ratio_high: int = 1000
+    document_review_median_ratio_low: int = 10
+    document_review_min_size_kb: int = 1
     fiscal_year_end: FiscalYearEnd = END_OF_YEAR
     import_config: str | None = None
     import_dirs: Sequence[str] = field(default_factory=list)

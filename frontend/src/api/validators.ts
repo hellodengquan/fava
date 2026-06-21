@@ -191,6 +191,15 @@ const reference_source_validator = object({
   account: string,
   payee: string,
   narration: string,
+  query_path: string,
+});
+
+const reference_stats_validator = object({
+  total_references: number,
+  total_documents_referenced: number,
+  document_reference_counts: record(number),
+  top_referenced: array(tuple(string, number)),
+  metadata_keys_found: array(string),
 });
 
 const size_context_validator = object({
@@ -198,6 +207,10 @@ const size_context_validator = object({
   size_kb: number,
   criterion: string,
   median_size_kb: optional(number),
+  min_threshold_kb: number,
+  max_threshold_kb: number,
+  median_ratio_low_pct: number,
+  median_ratio_high_pct: number,
 });
 
 const problem_document_validator = object({
@@ -215,6 +228,7 @@ export const document_review_validator = object({
   multiple_references: array(problem_document_validator),
   total_documents: number,
   total_problems: number,
+  reference_stats: reference_stats_validator,
 });
 
 export type DocumentReview = ValidationT<typeof document_review_validator>;
